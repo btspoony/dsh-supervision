@@ -112,19 +112,27 @@ Reasons, in order of weight:
    components; they must share a single `/dev/tty` writer and one session
    subject, so four rows buy ordering problems, not isolation.
 
-Activation gate, precisely:
+Activation gate, precisely — two layers, because a forwarder can only exist by
+connecting to a socket the plugin must create first:
 
 ```
-active = config.enabled !== false
-         && (HC_TERMINAL_ID is a non-empty string   // transport A: process in hc
-             || a forwarder is connected)           // transport B: external bridge (§9)
+discovery = config.enabled !== false          // create socket + registry entry
+effect    = discovery && (HC_TERMINAL_ID is a non-empty string   // transport A
+                          || a bridge is connected)              // transport B
 ```
 
-Every component — writer, emitter, stdin reader, approval answerer — mounts
-behind that gate. This is what prevents the worst regression of the design: a
-prepended answerer silently stealing approvals from a person using the browser
-GUI on a `dsh web` that merely happens to run in a terminal. Under transport B
-neither signal is present on a GUI-only run, so the plugin stays inert.
+- **Discovery layer**: unless `enabled === false`, `apply` creates the socket and
+  registry entry at startup. It has no effect on the agent: no OSC, no event
+  subscription, no stdin read, no approval listener.
+- **Effect layer**: only when `HC_TERMINAL_ID` is set or a bridge has completed
+  `welcome`. Then — and only then — the emitter, the line reader and (P2) the
+  prepended approval answerer mount, scoped to the bridged session tree.
+
+This is what prevents the worst regression of the design: a prepended answerer
+silently stealing approvals from a person using the browser GUI on a `dsh web`
+that merely happens to run in a terminal. On a GUI-only run no bridge exists and
+`HC_TERMINAL_ID` is unset, so the effect layer never mounts; the socket is a
+local, permission-restricted discovery surface with no agent-facing behaviour.
 
 The gate is the only place the two transports differ. Transport A writes OSC to
 `/dev/tty` directly and reads `process.stdin`; transport B hands the same bytes
@@ -376,7 +384,8 @@ Steps:
    `busy` otherwise. Subscribe to `session/event` for the bridged session, push
    encoded reports to the socket, and keep `src/transport.ts` behind
    `Transport` so §5.1 and future shapes are additions, not rewrites.
-6. Config: `programStatus` (default on), `app` (`dsh`), `echo` (default on),
+6. Config: `enabled` (default true; false skips even the discovery socket),
+   `programStatus` (default on), `app` (`dsh`), `echo` (default on),
    `titleFrom` (`cwd-basename|session-title|none`, default `cwd-basename`),
    `socketDir` (default `$DSH_HOME/supervision`).
 
@@ -559,6 +568,17 @@ plan; P2 runs under an explicit `--patch`/env override.
 
 ## 8. Verification and boundaries
 
+- TypeScript conventions: strict + `noUncheckedIndexedAccess` with no `any`,
+  no `as unknown as`, no non-null assertions on values that may be absent;
+  type-only imports; `readonly` data; string-literal unions instead of enums;
+  explicit return types plus a one-line JSDoc on every export; boundary
+  validation (socket frames and registry JSON are `unknown` until a type guard
+  proves them); pure modules (encoder, state reduction, arg parsing, registry
+  selection, frame codec) separated from I/O and testable without sockets or
+  timers; `Error` subclasses with stable `code` fields for programmer errors
+  and discriminated results for expected outcomes; `node:test` +
+  `assert/strict` with no shared mutable state and no sleep-based
+  synchronisation.
 - Unit checks: `pnpm test` at the root (plugin: `tsc` then `node --test
   lib/*.test.js`) and `pnpm --filter dsh-sup test` for `cli/`. No package-wide
   suite, no DSH vitest.

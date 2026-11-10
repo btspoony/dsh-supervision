@@ -269,14 +269,27 @@ Fail closed: asker `req.signal` abort, bridge disconnect, plugin dispose, or
 
 ### Activation
 
+Two layers, because a forwarder can only announce itself through a socket that
+must already exist:
+
 ```
-active = config.enabled !== false && (a forwarder is connected || HC_TERMINAL_ID is set)
+discovery = config.enabled !== false           // create socket + registry entry
+effect    = discovery && (HC_TERMINAL_ID is set || a bridge is connected)
 ```
 
-A GUI-only `dsh web` has neither signal: the plugin registers no listener, reads
-no stdin, writes no OSC, and writes no registry entry. This is the single most
-important safety property: a prepended answerer must never silently steal
-approvals from the person using the browser.
+- The **discovery layer** always runs unless the plugin is disabled. It creates
+  the `0600` socket and the registry entry, and nothing else: no OSC, no event
+  subscription, no stdin read, no approval listener.
+- The **effect layer** mounts only with `HC_TERMINAL_ID` or a bridge that has
+  completed `welcome`. It is what scopes the emitter, the line reader and the
+  prepended approval answerer to the bridged session tree.
+
+A GUI-only `dsh web` has neither effect signal, so the plugin registers no
+listener, reads no stdin, writes no OSC, and cannot answer approvals. This is
+the single most important safety property: a prepended answerer must never
+silently steal approvals from the person using the browser. The socket remains
+as a local, permission-restricted discovery surface with no agent-facing
+behaviour.
 
 ### Lifecycle and failure
 
