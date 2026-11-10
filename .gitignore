@@ -1,0 +1,5 @@
+# Morning Star harness (.mstar/)
+# Principle: process stays local; results are shared with the team.
+# Default-ignore everything under .mstar/, then re-include the tracked results.
+.mstar/**
+!.mstar/AGENTS.md
