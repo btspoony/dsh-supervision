@@ -231,6 +231,7 @@ never change `turn` and are invisible to `hc wait`.
 | `/reject <ask-id>` | settle it `rejected` |
 | `/cancel` | `agent.cancel({ kind: 'user' })` |
 | `/status` | echo one line: session, state, turn, pending ask ids |
+| `/new [cwd]` | create a fresh session through `ctx.agents.create()` and attach the bridge to it; `cwd` defaults to the current session's |
 | `/attach <session-id>` | switch the bridge to another live session (refused while an ask is parked) |
 
 Bare `/y` / `/n` settle the single parked ask and are refused when more than one
