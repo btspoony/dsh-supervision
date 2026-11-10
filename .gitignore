@@ -3,3 +3,7 @@
 # Default-ignore everything under .mstar/, then re-include the tracked results.
 .mstar/**
 !.mstar/AGENTS.md
+
+# pnpm workspace dependencies and TypeScript build output
+node_modules/
+lib/

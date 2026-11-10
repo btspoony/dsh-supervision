@@ -131,31 +131,49 @@ The gate is the only place the two transports differ. Transport A writes OSC to
 and lines to the forwarder over a socket. Everything upstream of the transport
 — encoder, state machine, command grammar, approval queue — is shared.
 
-Package layout (create):
+Package layout: the repository root **is the plugin package**; the forwarder is
+a separate package under `cli/`.
 
 ```
-package.json              name dsh-supervision; exports "." and "./client"; dsh.client roster
-bin/dsh-sup.mjs           forwarder: socket client, /dev/tty writer, stdin pump
-src/index.ts              host plugin: name, inject, Config, apply()
-src/osc.ts                OSC 7501 encoding, caps, sanitizing
-src/state.ts              session-event → report state derivation
-src/transport.ts          control socket, registry, frame codec
-src/routes.ts             GET /dsh-supervision/state, POST /dsh-supervision/reclaim
-src/stdin.ts              inbound line grammar (P1)
-src/approval.ts           prepended approval/request bridge (P2)
-src/client/index.ts       browser plugin: banner slot + reclaim action
-src/transport-inprocess.ts deferred §5.1: direct tty writer, no socket
-test/osc.test.ts          encoder caps and grammars
-test/state.test.ts        precedence and turn latch
-test/transport.test.ts    socket round-trip, busy, dispose cleanup
-test/stdin.test.ts        framing and command parsing
+package.json                     name dsh-supervision (publishable plugin package)
+tsconfig.json                    rootDir src → lib; src/**/*.test.ts co-located
+tsconfig.base.json               shared NodeNext/strict compiler options
+pnpm-workspace.yaml              packages: ["cli"]
+src/index.ts                     host plugin: name, inject, Config, apply()
+src/osc.ts                       OSC 7501 encoding, caps, sanitizing
+src/state.ts                     session-event → report state derivation
+src/transport.ts                 control socket, registry, frame codec, Transport interface
+src/routes.ts                    GET /dsh-supervision/state, POST /dsh-supervision/reclaim (P1)
+src/stdin.ts                     inbound line grammar (P1)
+src/approval.ts                  prepended approval/request bridge (P2)
+src/client/index.ts              browser plugin: banner slot + reclaim action (P1)
+src/transport-inprocess.ts       deferred §5.1: direct tty writer, no socket
+src/osc.test.ts                  encoder caps and grammars
+src/state.test.ts                precedence and turn latch
+src/transport.test.ts            socket round-trip, busy, dispose cleanup
+
+cli/                             name dsh-sup (separate package, own publish)
+cli/package.json                 bin { "dsh-sup": "./bin/dsh-sup.mjs" }
+cli/bin/dsh-sup.mjs              thin shebang shim importing ../lib/main.js
+cli/src/main.ts                  orchestration: parse → registry → connect → tty → stdin pump
+cli/src/args.ts                  new | attach | list | usage, --cwd, --pid
+cli/src/registry.ts              entry discovery, liveness, unique/ambiguous selection
+cli/src/connection.ts            NDJSON client, 5 s welcome timeout, frame cap
+cli/src/tty.ts                   /dev/tty → stdout(isTTY) → unavailable, single writer
+cli/src/args.test.ts             CLI grammar
+cli/src/registry.test.ts         none/single/ambiguous/stale
 ```
+
+The forwarder's logic lives in TypeScript under `cli/src`; the shipped
+`cli/bin/dsh-sup.mjs` is a three-line shebang shim, so the executable is an
+`.mjs` file while the implementation stays typed and testable. The root
+package's `files` field excludes `cli/`, so the two packages publish apart.
 
 Phasing, each phase independently useful:
 
 | Phase | Scope | Why it is separable |
 |---|---|---|
-| **P0** | `osc.ts`, `state.ts`, `transport.ts`, `bin/dsh-sup.mjs`, echo lines | Read-only supervision through the forwarder; no input grammar, no approval risk |
+| **P0** | `src/osc.ts`, `src/state.ts`, `src/transport.ts`, `cli/*` (new/attach/list + tty + stdin pump), echo lines | Read-only supervision through the forwarder; no input grammar, no approval risk |
 | **P1** | `stdin.ts` — `steer`, `/cancel`, `/status`, `/attach`, `/approve`, `/reject`; session selection and `list`; child records for non-attached sessions; `src/routes.ts` + `src/client/` — takeover banner and explicit reclaim | Requires P0's transport and session subject; makes concurrent supervision usable and visible |
 | **P2** | `approval.ts` — `prepend` waterfall, `blocked`, supervisor decisions, audit echo | Requires P1's input channel and an owner decision on policy |
 | **P3** (optional) | `transport-inprocess.ts` — `dsh web` inside hc, no forwarder | Same interface; only when a dedicated worker is wanted |
@@ -308,9 +326,11 @@ ST = ESC \
 
 ## 5. Task P0 — encoder, state, and the forwarder
 
-**In scope:** `package.json`, `src/osc.ts`, `src/state.ts`, `src/transport.ts`,
-`src/index.ts`, `bin/dsh-sup.mjs`, `test/osc.test.ts`, `test/state.test.ts`,
-`test/transport.test.ts`.
+**In scope:** `package.json`, `tsconfig.json`, `src/osc.ts`, `src/state.ts`,
+`src/transport.ts`, `src/index.ts`, `src/osc.test.ts`, `src/state.test.ts`,
+`src/transport.test.ts`; and in `cli/`: `package.json`, `tsconfig.json`,
+`bin/dsh-sup.mjs`, `src/{main,args,registry,connection,tty}.ts`,
+`src/{args,registry}.test.ts`.
 
 **Out of scope:** `src/stdin.ts`, `src/approval.ts`, the in-process tty writer
 (deferred to §5.1); any file under `../../deepseek-harness`;
@@ -336,7 +356,7 @@ Steps:
    (`hello`/`welcome`/`osc`/`echo`/`line`/`list`/`error`/`bye`), with `proto:1`
    checked on `hello`. Dispose closes the socket, unlinks both files, and
    resolves parked asks `cancelled`.
-4. `bin/dsh-sup.mjs`: resolve the target registry entry (single entry, or
+4. `cli/src/main.ts` (+ `args`, `registry`, `connection`, `tty`): resolve the target registry entry (single entry, or
    `--pid <n>`), then:
    - bare `dsh-sup` or `dsh-sup new [--cwd <path>]` → `hello` without a target
      (create), `cwd` = the forwarder's resolved cwd;
@@ -392,7 +412,7 @@ worker is wanted, and it reuses every other module unchanged. Its acceptance
 
 ## 6. Task P1 — stdin input channel
 
-**In scope:** `src/stdin.ts`, `src/index.ts`, `src/client/**`, `test/stdin.test.ts`.
+**In scope:** `src/stdin.ts`, `src/index.ts`, `src/client/**`, `src/stdin.test.ts`.
 
 Enabling rule: the component mounts only when the activation gate holds (§2:
 `config.enabled !== false` and either `HC_TERMINAL_ID` is set or a forwarder is
@@ -431,7 +451,7 @@ parked ask in that tree `cancelled`.
 
 **Acceptance (P1):**
 
-- `test/stdin.test.ts` asserts `\r`/`\n` framing, wrapper stripping, and command
+- `src/stdin.test.ts` asserts `\r`/`\n` framing, wrapper stripping, and command
   parsing.
 - Under a live hc core, with a 20 s tool running in turn 1:
   `hc send t0 "ignore that, answer BETA"` then `hc get t0` shows no new turn
@@ -539,12 +559,17 @@ plan; P2 runs under an explicit `--patch`/env override.
 
 ## 8. Verification and boundaries
 
-- Unit checks: `node --test test/*.test.ts` (encoder, state, stdin). No package
-  suite, no build unless the plugin is loaded from `src` and needs compilation.
+- Unit checks: `pnpm test` at the root (plugin: `tsc` then `node --test
+  lib/*.test.js`) and `pnpm --filter dsh-sup test` for `cli/`. No package-wide
+  suite, no DSH vitest.
 - Integration: the hc scenarios above, run in the control checkout, one worker
   per scenario. Record `hc get` JSON as evidence.
 - Drift: re-read `src/index.ts` and `src/state.ts` before P1/P2; the plan was
-  written against `b931b7d` for this repo and DSH `0.2.2-rc.1`.
+  written against `c35eb18` for this repo and DSH `0.2.2-rc.1`.
+- Security boundary: the socket directory is `0700` and the socket `0600`, so
+  only the same OS user can connect — the same trust domain that can already
+  read `~/.dsh`. No TCP listener exists. The reclaim route requires
+  `Content-Type: application/json` so a cross-origin form post cannot reach it.
 - Out of scope forever: `deepseek-harness` package source, `herdr-core` source,
   `~/.dsh/profiles/web/cordis.patch.yml` (unless the owner approves landing the
   rows), `dsh-tui` source (reference only).
@@ -604,7 +629,7 @@ fixed in the design before implementation:
 
 | # | Decision | Proposed rule |
 |---|---|---|
-| 1 | IPC trust | Unix socket, mode `0600`, random token in the path; same-user only. Document it as a new local attack surface |
+| 1 | IPC trust | Unix socket, mode `0600`, directory `0700`; same-user trust domain, **no token**. A token would not raise the boundary (the same user can read it) and would add rotation state. Document the socket as a new local injection path |
 | 2 | Ownership | One bridge per session; a second attach is refused with a reason. Many workers = many sessions |
 | 3 | Activation | The gate becomes `HC_TERMINAL_ID set || a forwarder is connected`; with neither, the plugin never registers an approval answerer, so a GUI-only run is untouched |
 | 4 | Backend loss | Socket EOF → bridge emits `error:msg=backend offline` and exits. Never leave a stale `idle` |
@@ -630,13 +655,16 @@ second implementation of the same `Transport` interface; it is not a
 prerequisite and must not be built first, because its tty writer would hide the
 framing bugs the socket path needs to expose.
 
-## 10. Open questions for the owner
+## 10. Decisions
 
-| # | Question | Default if unanswered |
+Every item below is settled; nothing is left for the executor to choose.
+
+| # | Decision | Settled rule |
 |---|---|---|
-| Q1 | Land the plugin rows in `~/.dsh/profiles/web` or keep a standalone `--patch` overlay? | Overlay first; land only after P0/P1 pass |
-| Q2 | Approval policy: change `defaultPreset` to `workspace-write`, or set `DSH_PERMISSION_MODE` per launch? | Per-launch env; profile untouched |
-| Q3 | Should a supervisor answer approvals without a human? | Yes — that is the point; decisions use `/approve <id>` / `/reject <id>` and are echoed with ask id, outcome and source |
-| Q4 | Multi-session child records? | Yes for sessions in one process; concurrent workers still default to one process each |
-| Q5 | Mount the emitter in the plain `web` profile permanently? | That is what P0 is; decide after it works |
-| Q6 | Transport A (`dsh web` inside hc), B (external web + forwarder), or both? | Decided: B is primary, A kept as the in-process transport sharing the same modules — ADR `2026-11-11-external-bridge-transport.md` |
+| D1 | How the plugin is installed into the running web profile | Local link plus one inserted row in `~/.dsh/profiles/web/cordis.patch.yml`; a `--patch` overlay is only for pre-landing tests. Landing the row is an owner action, never a side effect of a test run |
+| D2 | Approval policy source | Launch with `DSH_PERMISSION_MODE=workspace-write`; never edit the profile's `defaultPreset`, because that would change the owner's GUI behaviour |
+| D3 | Supervisor answers approvals without a human | Yes — that is the point; decisions use `/approve <id>` / `/reject <id>` and are echoed with ask id, outcome and source |
+| D4 | Multi-session child records | Yes for sessions in one process; concurrent workers still default to one process each |
+| D5 | Emitter mounted in the plain `web` profile | Yes; that is what B is. It activates only with a forwarder or `HC_TERMINAL_ID`, so a GUI-only run is unchanged |
+| D6 | Transport | B (external web + `dsh-sup` forwarder) is primary; A (in-process) is P3, optional, sharing the same modules — ADR `2026-11-11-external-bridge-transport.md` |
+| D7 | IPC trust | Unix socket `0600` in a `0700` directory, same-user trust domain, no token |
