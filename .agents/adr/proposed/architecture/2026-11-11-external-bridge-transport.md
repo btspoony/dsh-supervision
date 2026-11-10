@@ -362,9 +362,9 @@ GUI and hc are two views of one session, not two sessions.
 | Plugin (host) | Root package `dsh-supervision`, TypeScript → `lib/` via `tsc`, ESM, `exports` map | Matches DSH package shape; loaders resolve built JS |
 | Plugin (browser) | Same package, `./client` export, `dsh.client` roster entry, React slot components | The shipped DSH way to add UI (`packages/client/ui-approval` is the model) |
 | UI → host channel | `ctx.webserver` named routes (`GET /dsh-supervision/state`, `POST /dsh-supervision/reclaim`) | No Typert generator, no remote-event allowlist change; the webserver accepts plugin routes |
-| Forwarder | Separate package `dsh-sup` under `cli/`: TypeScript in `cli/src`, built to `cli/lib`, executed through `cli/bin/dsh-sup.mjs` (3-line shebang shim) | Typed, testable implementation while the installed executable is still an `.mjs`; publishes independently of the plugin |
+| Forwarder | Separate package `dsh-sup` under `packages/cli/`: TypeScript in `src`, bundled to `lib/main.js`, executed through `bin/dsh-sup.mjs` (3-line shebang shim) | Typed, testable implementation while the installed executable is still an `.mjs`; publishes independently of the plugin |
 | Forwarder runtime dependencies | none | Node built-ins only: `node:net`, `node:fs`, `node:path`, `node:os`, `node:process`, `node:readline` |
-| Shared protocol | JSON only; types in the plugin, the forwarder parses JSON | One validator, no shared build artifact between the two packages |
+| Shared protocol | `packages/protocol` (`dsh-supervision-protocol`, `private: true`) holds the OSC encoder, frame codec with guards, and registry schema. Both publishable packages import it as a workspace devDependency and **bundle** it into their output | One implementation of the contract instead of two drifting copies, while the published `dsh-supervision` and `dsh-sup` keep empty `dependencies` and never reference a private package at install time |
 | IPC | Unix domain socket, `0600`, directory `0700` | Local only; no network surface |
 | Tests | `node --test` per package for pure functions and socket round-trips | Zero dependency; DSH's vitest stays in DSH |
 | Workspace | pnpm workspace listing `cli`; root `files` excludes `cli/` | One checkout, two independently publishable packages |

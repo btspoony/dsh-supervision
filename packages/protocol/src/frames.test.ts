@@ -1,6 +1,14 @@
+/**
+ * Frame codec conformance from the forwarder's side: the server frames it must
+ * accept, the framing rule that keeps a desynchronised stream out of the
+ * writer, and the root report encoder it sends to the terminal.
+ */
+
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { decodeChunk, encodeReport, MAX_FRAME, type Decoded, type ServerFrame } from './wire.js';
+import { MAX_FRAME, decodeChunk } from './frames.js';
+import type { Decoded, OutFrame } from './frames.js';
+import { encodeReport } from './osc.js';
 
 const welcome = JSON.stringify({
   t: 'welcome',
@@ -11,7 +19,7 @@ const welcome = JSON.stringify({
   turn: 0,
 });
 
-function frames(decoded: Decoded): readonly ServerFrame[] {
+function frames(decoded: Decoded): readonly OutFrame[] {
   assert.equal(decoded.ok, true, decoded.ok ? '' : decoded.reason);
   return decoded.ok ? decoded.frames : [];
 }
@@ -46,6 +54,21 @@ test('invalid JSON and unknown frame types stop the stream', () => {
   assert.equal(decodeChunk('', 'not json\n').ok, false);
   assert.equal(decodeChunk('', '{"t":"nope"}\n').ok, false);
   assert.equal(decodeChunk('', '{"t":"welcome","proto":2}\n').ok, false);
+});
+
+test('a welcome must name a known state and a whole turn count', () => {
+  const good = { t: 'welcome', proto: 1, session: 'session-1', title: 'repo', state: 'working', turn: 3 };
+  assert.deepEqual(frames(decodeChunk('', `${JSON.stringify(good)}\n`)), [good]);
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...good, state: 'busy' })}\n`).ok, false);
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...good, turn: 1.5 })}\n`).ok, false);
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...good, session: '' })}\n`).ok, false);
+});
+
+test('an error frame carries one of the protocol codes', () => {
+  assert.deepEqual(frames(decodeChunk('', '{"t":"error","code":"busy","message":"held"}\n')), [
+    { t: 'error', code: 'busy', message: 'held' },
+  ]);
+  assert.equal(decodeChunk('', '{"t":"error","code":"nope","message":"held"}\n').ok, false);
 });
 
 test('osc payloads stay opaque and unparsed', () => {

@@ -4,7 +4,7 @@
  * when re-sending is worth a frame. No socket, clock, or process state here.
  */
 
-import type { ProgramState } from './osc.js'
+import type { ProgramState } from 'dsh-supervision-protocol'
 
 /** The record one bridge reports; a record is replaced whole, so every field is present. */
 export interface RootRecord {

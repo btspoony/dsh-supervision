@@ -8,8 +8,8 @@
     "node": ">=22"
   },
   "files": [
-    "lib/**",
-    "!lib/**/*.test.*"
+    "lib/index.js",
+    "lib/index.d.ts"
   ],
   "exports": {
     ".": {
@@ -18,11 +18,14 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test lib/*.test.js"
+    "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown",
+    "test": "pnpm build && node --test 'lib/*.test.js'"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "dsh-supervision-protocol": "workspace:*",
+    "tsdown": "^0.23.7",
     "typescript": "^5.9.2"
-  }
+  },
+  "dependencies": {}
 }

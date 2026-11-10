@@ -13,8 +13,8 @@ import type { Socket } from 'node:net'
 import { after, test } from 'node:test'
 import { DEFAULTS, apply, validateConfig } from './index.js'
 import type { Config, PluginContext, SessionEvent } from './index.js'
-import { PROTO, readRegistry } from './transport.js'
-import type { InFrame, OutFrame } from './transport.js'
+import { PROTO, readRegistry } from 'dsh-supervision-protocol'
+import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
 
 const roots: string[] = []
 /** Every client this file opened; a dangling socket would keep the runner alive. */

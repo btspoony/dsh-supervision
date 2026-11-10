@@ -1,9 +1,10 @@
 import { parseArgs, usageText } from './args.js';
 import { connect, type Connection } from './connection.js';
-import { isLive, liveEntries, readEntries, resolveSocketDir, selectEntry, type RegistryEntry } from './registry.js';
+import { liveEntries, selectEntry } from './registry.js';
 import { splitLines } from './lines.js';
 import { openTty } from './tty.js';
-import { APP_NAME, encodeReport, type HelloFrame, type ServerFrame, type SessionItem } from './wire.js';
+import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
+import type { HelloFrame, OutFrame, RegistryEntry, SessionItem } from 'dsh-supervision-protocol';
 
 /** Process exit codes, as the ADR fixes them. */
 const EXIT = {
@@ -54,8 +55,8 @@ async function main(argv: readonly string[]): Promise<number> {
     return EXIT.usage;
   }
 
-  const entries = readEntries(resolveSocketDir(process.env));
-  const live = liveEntries(entries, isLive, parsed.pid);
+  const entries = readRegistry(supervisionDir(process.env));
+  const live = liveEntries(entries, isEntryLive, parsed.pid);
   const none =
     parsed.pid === undefined
       ? 'no running dsh web found; start one, or pass --pid'
@@ -69,7 +70,7 @@ async function main(argv: readonly string[]): Promise<number> {
     return runList(live, parsed.cwd);
   }
 
-  const selection = selectEntry(entries, isLive, parsed.pid);
+  const selection = selectEntry(entries, isEntryLive, parsed.pid);
   if ('error' in selection) {
     refuse(
       selection.error === 'none'
@@ -82,8 +83,8 @@ async function main(argv: readonly string[]): Promise<number> {
 
   const hello: HelloFrame =
     parsed.kind === 'attach'
-      ? { t: 'hello', proto: 1, pid: process.pid, attach: parsed.session }
-      : { t: 'hello', proto: 1, pid: process.pid, new: { cwd: parsed.cwd } };
+      ? { t: 'hello', proto: PROTO, pid: process.pid, attach: parsed.session }
+      : { t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: parsed.cwd } };
   return runBridge(selection.entry.socket, hello);
 }
 
@@ -96,7 +97,7 @@ function listFrom(socket: string, cwd: string): Promise<readonly SessionItem[]> 
       resolve(items);
     };
     connection = connect(socket, undefined, {
-      onFrame: (frame: ServerFrame) => {
+      onFrame: (frame: OutFrame) => {
         if (frame.t === 'sessions') settle(frame.items);
         if (frame.t === 'bye') settle([]);
         if (frame.t === 'error') {
@@ -154,7 +155,7 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
     };
 
     const connection: Connection = connect(socket, hello, {
-      onFrame: (frame: ServerFrame) => {
+      onFrame: (frame: OutFrame) => {
         if (frame.t === 'welcome') {
           title = frame.title;
           tty.write(rootReport('idle', { title }));

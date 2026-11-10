@@ -14,7 +14,6 @@ import { after, test } from 'node:test'
 import {
   MAX_FRAME,
   PROTO,
-  SocketTransport,
   decodeFrame,
   encodeFrame,
   isRegistryEntry,
@@ -22,8 +21,10 @@ import {
   registryPaths,
   reclaimStale,
   supervisionDir,
-} from './transport.js'
-import type { HelloFrame, InFrame, OutFrame, TransportHandlers } from './transport.js'
+} from 'dsh-supervision-protocol'
+import type { HelloFrame, InFrame, OutFrame } from 'dsh-supervision-protocol'
+import { SocketTransport } from './transport.js'
+import type { TransportHandlers } from './transport.js'
 
 const roots: string[] = []
 /** Every client this file opened; a dangling socket would keep the runner alive. */

@@ -1,6 +1,6 @@
 import type { Socket } from 'node:net';
 import { connect as netConnect } from 'node:net';
-import { decodeChunk, type ClientFrame, type HelloFrame, type ServerFrame } from './wire.js';
+import { decodeChunk, type InFrame, type HelloFrame, type OutFrame } from 'dsh-supervision-protocol';
 
 /** How long the first reply may take before the backend counts as unreachable (ADR: 5 s). */
 export const REPLY_TIMEOUT_MS = 5000;
@@ -13,7 +13,7 @@ export const HANDSHAKE_TIMEOUT = 'backend handshake timeout';
 
 export interface ConnectionHandlers {
   /** Called for every validated frame, in arrival order. */
-  onFrame(frame: ServerFrame): void;
+  onFrame(frame: OutFrame): void;
   /**
    * The socket ended, failed, timed out, or broke the protocol. `msg` is the
    * root record text; `detail` carries the underlying cause for stderr.
@@ -23,7 +23,7 @@ export interface ConnectionHandlers {
 
 export interface Connection {
   /** Writes one JSON frame plus its newline; a closed socket drops it. */
-  send(frame: ClientFrame): void;
+  send(frame: InFrame): void;
   /** Ends the socket; the peer sees EOF. */
   close(): void;
 }
@@ -31,8 +31,8 @@ export interface Connection {
 /**
  * Connects and holds the one reply the caller needs to `REPLY_TIMEOUT_MS`:
  * `welcome` for a bridge, `sessions` for a list. `hello` is omitted by `list`,
- * which binds no bridge. The codec lives in `wire.ts`; this module owns only the
- * socket and the deadline.
+ * which binds no bridge. The codec lives in `dsh-supervision/protocol`; this
+ * module owns only the socket and the deadline.
  */
 export function connect(
   socketPath: string,
@@ -79,7 +79,7 @@ export function connect(
   });
 
   return {
-    send(frame: ClientFrame): void {
+    send(frame: InFrame): void {
       if (settled || socket.destroyed) return;
       socket.write(`${JSON.stringify(frame)}\n`);
     },

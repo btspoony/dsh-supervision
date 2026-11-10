@@ -139,43 +139,47 @@ The gate is the only place the two transports differ. Transport A writes OSC to
 and lines to the forwarder over a socket. Everything upstream of the transport
 — encoder, state machine, command grammar, approval queue — is shared.
 
-Package layout: the repository root **is the plugin package**; the forwarder is
-a separate package under `cli/`.
+Package layout: the repository root **is the plugin package**; the shared
+protocol is a private package; the forwarder is a separately publishable package.
 
 ```
-package.json                     name dsh-supervision (publishable plugin package)
-tsconfig.json                    rootDir src → lib; src/**/*.test.ts co-located
-tsconfig.base.json               shared NodeNext/strict compiler options
-pnpm-workspace.yaml              packages: ["cli"]
+package.json                     name dsh-supervision (plugin, publishable)
+tsconfig.json / tsconfig.base.json
+pnpm-workspace.yaml              packages: ["packages/*"]
 src/index.ts                     host plugin: name, inject, Config, apply()
-src/osc.ts                       OSC 7501 encoding, caps, sanitizing
 src/state.ts                     session-event → report state derivation
-src/transport.ts                 control socket, registry, frame codec, Transport interface
+src/transport.ts                 control socket, Bridge/Transport interfaces
 src/routes.ts                    GET /dsh-supervision/state, POST /dsh-supervision/reclaim (P1)
 src/stdin.ts                     inbound line grammar (P1)
 src/approval.ts                  prepended approval/request bridge (P2)
 src/client/index.ts              browser plugin: banner slot + reclaim action (P1)
 src/transport-inprocess.ts       deferred §5.1: direct tty writer, no socket
-src/osc.test.ts                  encoder caps and grammars
 src/state.test.ts                precedence and turn latch
 src/transport.test.ts            socket round-trip, busy, dispose cleanup
 
-cli/                             name dsh-sup (separate package, own publish)
-cli/package.json                 bin { "dsh-sup": "./bin/dsh-sup.mjs" }
-cli/bin/dsh-sup.mjs              thin shebang shim importing ../lib/main.js
-cli/src/main.ts                  orchestration: parse → registry → connect → tty → stdin pump
-cli/src/args.ts                  new | attach | list | usage, --cwd, --pid
-cli/src/registry.ts              entry discovery, liveness, unique/ambiguous selection
-cli/src/connection.ts            NDJSON client, 5 s welcome timeout, frame cap
-cli/src/tty.ts                   /dev/tty → stdout(isTTY) → unavailable, single writer
-cli/src/args.test.ts             CLI grammar
-cli/src/registry.test.ts         none/single/ambiguous/stale
+packages/protocol/               name dsh-supervision-protocol, "private": true
+  src/osc.ts                     OSC 7501 encoder, caps, sanitizing
+  src/frames.ts                  frame types, runtime guards, encode/decode
+  src/registry.ts                registry paths, entry guard, liveness, reclaim
+  src/index.ts                   one re-export surface
+  src/*.test.ts                  encoder caps, frame guards, registry rules
+
+packages/cli/                    name dsh-sup (publishable, independent)
+  package.json                   bin { "dsh-sup": "./bin/dsh-sup.mjs" }
+  bin/dsh-sup.mjs                thin shebang shim importing ../lib/main.js
+  src/main.ts                    orchestration: parse → registry → connect → tty → stdin pump
+  src/args.ts                    new | attach | list | usage, --cwd, --pid
+  src/registry.ts                selection policy: none | single | ambiguous
+  src/connection.ts              NDJSON client, 5 s welcome timeout, frame cap
+  src/tty.ts                     /dev/tty → stdout(isTTY) → unavailable, single writer
+  src/*.test.ts                  CLI grammar, registry selection, framing
 ```
 
-The forwarder's logic lives in TypeScript under `cli/src`; the shipped
-`cli/bin/dsh-sup.mjs` is a three-line shebang shim, so the executable is an
-`.mjs` file while the implementation stays typed and testable. The root
-package's `files` field excludes `cli/`, so the two packages publish apart.
+Packaging constraint: `dsh-supervision-protocol` is private, so it can never be
+a runtime dependency of a published package. Both `dsh-supervision` and `dsh-sup`
+bundle it into their own output (tsdown); their `dependencies` stay empty, and
+their tarballs contain no `packages/` entries.
+
 
 Phasing, each phase independently useful:
 

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { liveEntries, parseEntry, readEntries, resolveSocketDir, selectEntry, type RegistryEntry } from './registry.js';
+import { isRegistryEntry, readRegistry, supervisionDir, type RegistryEntry } from 'dsh-supervision-protocol';
+import { liveEntries, selectEntry } from './registry.js';
 
 function entry(pid: number, socket = `/run/${pid}.sock`): RegistryEntry {
   return { proto: 1, pid, socket, startedAt: 1762000000000, dshVersion: '0.2.2-rc.1' };
@@ -14,17 +15,11 @@ const dead = (): boolean => false;
 const aliveOnly = (...pids: number[]) => (candidate: RegistryEntry): boolean => pids.includes(candidate.pid);
 
 test('a malformed or foreign registry entry is rejected', () => {
-  assert.equal(parseEntry(null), undefined);
-  assert.equal(parseEntry({ proto: 2, pid: 1, socket: '/s', startedAt: 1, dshVersion: 'x' }), undefined);
-  assert.equal(parseEntry({ proto: 1, pid: '1', socket: '/s', startedAt: 1, dshVersion: 'x' }), undefined);
-  assert.equal(parseEntry({ proto: 1, pid: 1, socket: '', startedAt: 1, dshVersion: 'x' }), undefined);
-  assert.deepEqual(parseEntry({ proto: 1, pid: 1, socket: '/s', startedAt: 1, dshVersion: 'x' }), {
-    proto: 1,
-    pid: 1,
-    socket: '/s',
-    startedAt: 1,
-    dshVersion: 'x',
-  });
+  assert.equal(isRegistryEntry(null), false);
+  assert.equal(isRegistryEntry({ proto: 2, pid: 1, socket: '/s', startedAt: 1, dshVersion: 'x' }), false);
+  assert.equal(isRegistryEntry({ proto: 1, pid: '1', socket: '/s', startedAt: 1, dshVersion: 'x' }), false);
+  assert.equal(isRegistryEntry({ proto: 1, pid: 1, socket: '', startedAt: 1, dshVersion: 'x' }), false);
+  assert.equal(isRegistryEntry({ proto: 1, pid: 1, socket: '/s', startedAt: 1, dshVersion: 'x' }), true);
 });
 
 test('a stale entry is dropped before selection, so it cannot block the live one', () => {
@@ -62,7 +57,7 @@ test('an entry is stale when its pid died even though its file remains', () => {
   assert.deepEqual(selectEntry([entry(42)], dead, 42), { error: 'none', entries: [] });
 });
 
-test('readEntries skips malformed and foreign files in a temp registry dir', (t) => {
+test('readRegistry skips malformed and foreign files in a temp registry dir', (t) => {
   const dir = mkdtempSync('/tmp/dsh-reg-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -72,14 +67,14 @@ test('readEntries skips malformed and foreign files in a temp registry dir', (t)
   writeFileSync(join(dir, 'foreign.json'), JSON.stringify({ ...entry, proto: 2 }));
   writeFileSync(join(dir, 'note.txt'), 'ignored');
 
-  assert.deepEqual(readEntries(dir), [entry]);
+  assert.deepEqual(readRegistry(dir), [entry]);
 });
 
-test('readEntries yields nothing when the directory does not exist', () => {
-  assert.deepEqual(readEntries('/tmp/dsh-reg-absent-directory'), []);
+test('readRegistry yields nothing when the directory does not exist', () => {
+  assert.deepEqual(readRegistry('/tmp/dsh-reg-absent-directory'), []);
 });
 
-test('resolveSocketDir honours DSH_HOME and falls back to ~/.dsh', () => {
-  assert.equal(resolveSocketDir({ DSH_HOME: '/custom' }), join('/custom', 'supervision'));
-  assert.match(resolveSocketDir({}), /[/\\]\.dsh[/\\]supervision$/);
+test('supervisionDir honours DSH_HOME and falls back to ~/.dsh', () => {
+  assert.equal(supervisionDir({ DSH_HOME: '/custom' }), join('/custom', 'supervision'));
+  assert.match(supervisionDir({}), /[/\\]\.dsh[/\\]supervision$/);
 });

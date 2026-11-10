@@ -4,7 +4,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { BACKEND_OFFLINE, connect, type Connection } from './connection.js';
-import type { HelloFrame } from './wire.js';
+import type { HelloFrame } from 'dsh-supervision-protocol';
 
 interface Harness {
   readonly socketPath: string;

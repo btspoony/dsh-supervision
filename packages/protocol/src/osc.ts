@@ -25,8 +25,16 @@ const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2
 const STATES: readonly string[] = ['idle', 'working', 'done', 'blocked', 'error']
 const KINDS: readonly string[] = ['permission', 'question', 'auth']
 
+/** Root report `app` value; the plugin's default, restated on every report. */
+export const APP_NAME = 'dsh'
+
 export type ProgramState = 'idle' | 'working' | 'done' | 'blocked' | 'error'
 export type ProgramKind = 'permission' | 'question' | 'auth'
+
+/** Proves a decoded word is a state this protocol defines. */
+export function isProgramState(value: unknown): value is ProgramState {
+  return typeof value === 'string' && STATES.includes(value)
+}
 
 export interface ProgramStatus {
   readonly state: ProgramState
@@ -39,6 +47,14 @@ export interface ProgramStatus {
   readonly msg?: string
   /** Child record id; absent for the root record. */
   readonly id?: string
+}
+
+/** The fields of one root record; every present field is restated on each report. */
+export interface ReportFields {
+  readonly state: string
+  readonly app?: string
+  readonly title?: string
+  readonly msg?: string
 }
 
 /** One control-free line, whitespace collapsed. */
@@ -121,4 +137,19 @@ export function clearProgramStatus(id?: string): string {
   if (id === undefined || id === '') return `${ESC}]7501;state=clear${ST}`
   if (!legalId(id)) return ''
   return `${ESC}]7501;state=clear:id=${id}${ST}`
+}
+
+/**
+ * Encode one unconditional root report. Unlike {@link programStatus} this never
+ * returns `''`: an unrepresentable field is flattened and truncated, because a
+ * forwarder that goes silent leaves herdr-core showing a stale record.
+ * @param fields - the record; `state` is not restricted to {@link ProgramState}.
+ * @returns the complete `ESC ] 7501 ; … ST` sequence.
+ */
+export function encodeReport(fields: ReportFields): string {
+  const parts = [`state=${fields.state}`]
+  if (fields.app !== undefined) parts.push(`app=${fields.app}`)
+  if (fields.title !== undefined) parts.push(`title=${base64(clean(fields.title).slice(0, MAX_TITLE))}`)
+  if (fields.msg !== undefined) parts.push(`msg=${base64(clean(fields.msg).slice(0, MAX_MSG))}`)
+  return `${ESC}]7501;${parts.join(':')}${ST}`
 }

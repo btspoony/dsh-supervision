@@ -9,11 +9,12 @@
 
 import { randomUUID } from 'node:crypto'
 import { basename } from 'node:path'
-import { programStatus } from './osc.js'
+import { PROTO, programStatus } from 'dsh-supervision-protocol'
+import type { ErrorCode, HelloFrame, SessionItem } from 'dsh-supervision-protocol'
 import { createRootState, reduceRootState } from './state.js'
 import type { RootState, StateEvent } from './state.js'
-import { PROTO, SocketTransport } from './transport.js'
-import type { Bridge, ErrorCode, HelloFrame, SessionItem, Transport } from './transport.js'
+import { SocketTransport } from './transport.js'
+import type { Bridge, Transport } from './transport.js'
 
 /** The parts of a DSH Session this plugin reads. */
 interface SessionLike {
