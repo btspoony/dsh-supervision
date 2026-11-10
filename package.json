@@ -1,0 +1,31 @@
+{
+  "name": "dsh-supervision",
+  "version": "0.0.0",
+  "description": "Cordis plugin: expose a running DeepSeek Harness web session to herdr-core through the dsh-sup forwarder",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown",
+    "test": "pnpm build && node --test 'lib/*.test.js'"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "dsh-supervision-protocol": "workspace:*",
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,28 @@
+{
+  "name": "dsh-sup",
+  "version": "0.0.0",
+  "description": "Forwarder: reports a supervised DSH web session to herdr-core and relays stdin",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "dsh-sup": "./bin/dsh-sup.mjs"
+  },
+  "files": [
+    "lib/main.js",
+    "bin/**"
+  ],
+  "scripts": {
+    "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown",
+    "test": "pnpm build && node --test 'lib/*.test.js'"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "dsh-supervision-protocol": "workspace:*",
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {}
+}

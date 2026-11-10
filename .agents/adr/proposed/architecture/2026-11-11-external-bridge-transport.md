@@ -43,8 +43,9 @@ everything else. hc sees a well-behaved program, which is all its contract asks.
 
 | Artifact | Chosen | Rationale |
 |---|---|---|
-| Package | `dsh-supervision` | Names the capability, not the transport; survives a future non-hc surface |
-| Forwarder bin | `dsh-sup` | Owner's choice: short at the hc prompt (`hc run --bg --name w1 dsh-sup session-…`), unambiguous once documented, and unregistered on npm |
+| Plugin package | `dsh-supervision` (repository root) | Names the capability, not the transport; survives a future non-hc surface |
+| Forwarder package | `dsh-sup` (under `cli/`) | The bin and the package share one short name; the forwarder publishes independently of the plugin |
+| Forwarder bin | `dsh-sup` | Owner's choice: short at the hc prompt (`hc run --bg --name w1 dsh-sup session-…`), unregistered on npm |
 
 Registry check (2026-11-10, `registry.npmjs.org`):
 
@@ -231,6 +232,7 @@ never change `turn` and are invisible to `hc wait`.
 | `/reject <ask-id>` | settle it `rejected` |
 | `/cancel` | `agent.cancel({ kind: 'user' })` |
 | `/status` | echo one line: session, state, turn, pending ask ids |
+| `/new [cwd]` | create a fresh session through `ctx.agents.create()` and attach the bridge to it; `cwd` defaults to the current session's |
 | `/attach <session-id>` | switch the bridge to another live session (refused while an ask is parked) |
 
 Bare `/y` / `/n` settle the single parked ask and are refused when more than one
@@ -267,14 +269,27 @@ Fail closed: asker `req.signal` abort, bridge disconnect, plugin dispose, or
 
 ### Activation
 
+Two layers, because a forwarder can only announce itself through a socket that
+must already exist:
+
 ```
-active = config.enabled !== false && (a forwarder is connected || HC_TERMINAL_ID is set)
+discovery = config.enabled !== false           // create socket + registry entry
+effect    = discovery && (HC_TERMINAL_ID is set || a bridge is connected)
 ```
 
-A GUI-only `dsh web` has neither signal: the plugin registers no listener, reads
-no stdin, writes no OSC, and writes no registry entry. This is the single most
-important safety property: a prepended answerer must never silently steal
-approvals from the person using the browser.
+- The **discovery layer** always runs unless the plugin is disabled. It creates
+  the `0600` socket and the registry entry, and nothing else: no OSC, no event
+  subscription, no stdin read, no approval listener.
+- The **effect layer** mounts only with `HC_TERMINAL_ID` or a bridge that has
+  completed `welcome`. It is what scopes the emitter, the line reader and the
+  prepended approval answerer to the bridged session tree.
+
+A GUI-only `dsh web` has neither effect signal, so the plugin registers no
+listener, reads no stdin, writes no OSC, and cannot answer approvals. This is
+the single most important safety property: a prepended answerer must never
+silently steal approvals from the person using the browser. The socket remains
+as a local, permission-restricted discovery surface with no agent-facing
+behaviour.
 
 ### Lifecycle and failure
 
@@ -344,14 +359,15 @@ GUI and hc are two views of one session, not two sessions.
 
 | Part | Choice | Why |
 |---|---|---|
-| Plugin (host) | TypeScript → `lib/` via `tsc`, ESM, `exports` map | Matches DSH package shape; loaders resolve built JS |
+| Plugin (host) | Root package `dsh-supervision`, TypeScript → `lib/` via `tsc`, ESM, `exports` map | Matches DSH package shape; loaders resolve built JS |
 | Plugin (browser) | Same package, `./client` export, `dsh.client` roster entry, React slot components | The shipped DSH way to add UI (`packages/client/ui-approval` is the model) |
 | UI → host channel | `ctx.webserver` named routes (`GET /dsh-supervision/state`, `POST /dsh-supervision/reclaim`) | No Typert generator, no remote-event allowlist change; the webserver accepts plugin routes |
-| Forwarder | `bin/dsh-sup.mjs`, plain ESM JavaScript, zero dependencies | No build step, auditable, runs on any Node ≥ 22 |
-| Shared protocol | JSON only; types live in the plugin, the forwarder parses JSON | One validator, no shared build artifact |
+| Forwarder | Separate package `dsh-sup` under `packages/cli/`: TypeScript in `src`, bundled to `lib/main.js`, executed through `bin/dsh-sup.mjs` (3-line shebang shim) | Typed, testable implementation while the installed executable is still an `.mjs`; publishes independently of the plugin |
+| Forwarder runtime dependencies | none | Node built-ins only: `node:net`, `node:fs`, `node:path`, `node:os`, `node:process`, `node:readline` |
+| Shared protocol | `packages/protocol` (`dsh-supervision-protocol`, `private: true`) holds the OSC encoder, frame codec with guards, and registry schema. Both publishable packages import it as a workspace devDependency and **bundle** it into their output | One implementation of the contract instead of two drifting copies, while the published `dsh-supervision` and `dsh-sup` keep empty `dependencies` and never reference a private package at install time |
 | IPC | Unix domain socket, `0600`, directory `0700` | Local only; no network surface |
-| Tests | `node --test` for pure functions and socket round-trips | Zero dependency; DSH's vitest stays in DSH |
-| Registry | `$DSH_HOME/supervision/*.json`, stale entries reclaimed by pid | Survives restarts without a daemon |
+| Tests | `node --test` per package for pure functions and socket round-trips | Zero dependency; DSH's vitest stays in DSH |
+| Workspace | pnpm workspace listing `cli`; root `files` excludes `cli/` | One checkout, two independently publishable packages |
 
 Node built-ins only: `node:net`, `node:fs`, `node:path`, `node:os`,
 `node:process`, `node:readline`.

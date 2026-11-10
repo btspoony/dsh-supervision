@@ -1,0 +1,27 @@
+{
+  "name": "dsh-supervision-protocol",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Private wire protocol shared by dsh-supervision and dsh-sup; bundled into both, never published",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test 'lib/**/*.test.js'"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.2"
+  }
+}
