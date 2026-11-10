@@ -1,0 +1,26 @@
+{
+  "name": "dsh-sup",
+  "version": "0.0.0",
+  "description": "Forwarder: reports a supervised DSH web session to herdr-core and relays stdin",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "dsh-sup": "./bin/dsh-sup.mjs"
+  },
+  "files": [
+    "lib/**",
+    "bin/**",
+    "!lib/**/*.test.*"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test lib/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.2"
+  }
+}
