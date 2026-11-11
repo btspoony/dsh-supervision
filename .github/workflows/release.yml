@@ -247,6 +247,37 @@ jobs:
             echo "npmrc=$NPMRC missing"
           fi
           echo "registry=$(npm config get registry)"
+          # npm refuses a mismatched exchange with a blanket "package not found",
+          # so the only way to tell "wrong event", "wrong workflow file", "wrong
+          # repository" and "publisher config not effective" apart is to print the
+          # identity the registry actually saw. Only the decoded payload is
+          # printed — never the token itself.
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            OIDC_JSON="$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" || true)"
+            printf '%s' "$OIDC_JSON" | node -e '
+              let s = ""
+              process.stdin.on("data", d => { s += d }).on("end", () => {
+                try {
+                  const payload = JSON.parse(s).value.split(".")[1]
+                  const c = JSON.parse(Buffer.from(payload, "base64url").toString())
+                  console.log("oidc-claims=" + JSON.stringify({
+                    repository: c.repository,
+                    job_workflow_ref: c.job_workflow_ref,
+                    workflow_ref: c.workflow_ref,
+                    ref: c.ref,
+                    event_name: c.event_name,
+                    sub: c.sub,
+                    aud: c.aud,
+                  }))
+                } catch (err) {
+                  console.log("oidc-claims=<decode failed: " + (err instanceof Error ? err.message : err) + ">")
+                }
+              })
+            '
+          else
+            echo "oidc-claims=<no id-token request url>"
+          fi
           if [ "$(npm view "dsh-supervision@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
             echo "dsh-supervision@${VERSION} is already published; skipping."
             exit 0
