@@ -33,15 +33,17 @@ without duplicating either.
 ## Shape
 
 - The transport seam is `Transport` with `start`, `send`, `reclaim`, `close`.
-  `Bridge` (`session`, `claim`, `send`, `close`) and `TransportHandlers`
-  (`hello`, `line`, `list`, `bye`) are the only shared vocabulary; neither
-  transport adds a member.
+  `Bridge` (`session`, `claim`, `send`, `close`, optional `retryOnNoFactory`)
+  and `TransportHandlers` (`hello`, `line`, `list`, `bye`) are the only shared
+  vocabulary. The boot-only retry flag is the one optional member, so a tty
+  first hello may wait for the agent factory while operator paths fail fast.
 - `OutFrame` is the transport-independent wire shape. Rendering it to terminal
   bytes belongs to the protocol package, not to either transport, so a
   forwarder and an in-process transport write identical records.
-- Selection is one expression in the plugin entry: an environment signal chooses
-  the in-process transport and the socket transport is then never constructed.
-  Two transports must never mount for one process.
+- Selection is additive in the plugin entry: the socket transport always
+  mounts, and an environment signal appends the in-process transport when the
+  process owns a terminal. Both may mount for one process; the shared bridge
+  table is what keeps one bridge per session across them.
 - `reclaim` means the same thing on both paths — drop the binding, run `bye`,
   write the clear record, return ownership to the browser — and must never exit
   the host process. On the socket path the forwarder exits afterwards because
@@ -68,12 +70,11 @@ without duplicating either.
 
 ## When the activation rule must be stated precisely
 
-The plugin mounts in two layers: a discovery layer that always opens a socket
-and writes a registry entry, and an effect layer that mounts only when a
-supervisor exists. A transport that creates nothing (the in-process path) makes
-that wording false unless the discovery layer is described per transport: on the
-in-process path the terminal itself is the discovery surface, and nothing is
-created.
+The plugin mounts in two layers: a discovery layer that always opens the socket
+and writes a registry entry, and an effect layer that mounts only when a bridge
+exists. The in-process terminal is an additional surface on top of the socket,
+not a replacement: a forwarder elsewhere can still discover and attach a
+different session, while the terminal renders the one it holds.
 
 ## Trade-offs accepted
 

@@ -42,6 +42,8 @@ export class TtyTransport implements Transport {
   #session: string | undefined
   #closed = false
   #dead = false
+  /** True while the synthesized first hello runs, so only it may wait for the factory. */
+  #booting = false
 
   constructor(io: TtyIO) {
     this.#io = io
@@ -49,6 +51,9 @@ export class TtyTransport implements Transport {
     this.#bridge = {
       get session(): string | undefined {
         return self.#session
+      },
+      get retryOnNoFactory(): boolean {
+        return self.#booting
       },
       claim: session => self.#bind(session),
       send: frame => { self.#write(frame) },
@@ -61,10 +66,16 @@ export class TtyTransport implements Transport {
     this.#handlers = handlers
     // The first session is the one a bare `dsh-sup` asks for: create in the
     // hosting process's directory, so a first command needs no session id.
-    await handlers.hello(
-      { t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: process.cwd() } },
-      this.#bridge,
-    )
+    // Only this call may wait for the agent factory; operator commands fail fast.
+    this.#booting = true
+    try {
+      await handlers.hello(
+        { t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: process.cwd() } },
+        this.#bridge,
+      )
+    } finally {
+      this.#booting = false
+    }
     if (this.#closed) return
     void this.#consume()
   }

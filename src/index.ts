@@ -364,9 +364,13 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   if (server !== undefined) {
     ctx.effect(() => registerSupervisionRoutes(server, {
       snapshot,
-      // Both surfaces share one bridge table, so the surface holding the
-      // session answers the reclaim and the other one reports no bridge.
-      reclaim: session => transports.some(transport => transport.reclaim(session)),
+      // Both surfaces share one bridge table, so every surface holding the
+      // session must release it; `some` would leave a stale transport binding.
+      reclaim: session => {
+        let reclaimed = false
+        for (const transport of transports) reclaimed = transport.reclaim(session) || reclaimed
+        return reclaimed
+      },
     }))
   }
 
@@ -421,12 +425,13 @@ function handlersFor(
   }
 
   /**
-   * Create a fresh session in the directory the forwarder named. The tty
-   * transport creates its first session while the profile is still booting,
-   * before the agent loop registers its factory, so that refusal is retried
-   * instead of reported.
+   * Create a fresh session in the directory the forwarder named.
+   * @param cwd - the absolute directory the session is created in.
+   * @param retryOnNoFactory - only the tty's synthesized first hello waits for
+   *   the booting profile's agent factory; every operator or forwarder path
+   *   fails fast with `create-failed` instead.
    */
-  const create = async (cwd: string): Promise<AgentLike> => {
+  const create = async (cwd: string, retryOnNoFactory = false): Promise<AgentLike> => {
     // shortcut: the wait keys off DSH's "no agent factory registered" message;
     // switch to an explicit readiness signal if dsh-agent exposes one.
     for (let attempt = 0; ; attempt += 1) {
@@ -434,7 +439,7 @@ function handlersFor(
         return (await ctx.agents.create({ sessionId: `session-${randomUUID()}`, meta: { cwd } })).agent
       } catch (error) {
         const reason = reasonOf(error)
-        if (attempt < NO_FACTORY_ATTEMPTS && reason.includes(NO_FACTORY)) {
+        if (retryOnNoFactory && attempt < NO_FACTORY_ATTEMPTS && reason.includes(NO_FACTORY)) {
           await new Promise<void>(resolve => { setTimeout(resolve, NO_FACTORY_DELAY_MS) })
           continue
         }
@@ -702,12 +707,17 @@ function handlersFor(
    * @param bridge - the connection that drives it.
    * @param greet - `welcome` only for `hello`; the forwarder pumps stdin on it.
    */
-  const establish = (agent: AgentLike, bridge: Bridge, greet: 'welcome' | 'root'): void => {
+  const establish = (agent: AgentLike, bridge: Bridge, greet: 'welcome' | 'root'): boolean => {
     const session = agent.session.id
+    // The shared table is the single-owner rule across both surfaces: a claim
+    // that only checks its own transport cannot see the other one, and two
+    // racing hellos would last-write-wins. Refuse before any state is touched.
+    const held = bridged.get(session)
+    if (held !== undefined && held.bridge !== bridge) return false
     const previous = bridge.session
     // The claim is what makes a session single-owner and it precedes every
     // frame, so a racing second forwarder is refused rather than half-bound.
-    if (!bridge.claim(session)) return
+    if (!bridge.claim(session)) return false
     // The transport releases the old session on a switch; repeating it here
     // keeps this function idempotent and independent of that ordering detail.
     if (previous !== undefined) release(previous)
@@ -741,6 +751,7 @@ function handlersFor(
     }
     // A child report alone sets `reported`, so children follow the root word.
     seedChildren(state)
+    return true
   }
 
   /**
@@ -777,7 +788,7 @@ function handlersFor(
       try {
         agent = 'attach' in frame
           ? await bind(frame.attach)
-          : await create('new' in frame ? frame.new.cwd : process.cwd())
+          : await create('new' in frame ? frame.new.cwd : process.cwd(), bridge.retryOnNoFactory === true)
       } catch (error) {
         bridge.send({
           t: 'error',
@@ -788,7 +799,16 @@ function handlersFor(
         return
       }
 
-      establish(agent, bridge, 'welcome')
+      // The early attach check above is the fast path; this one catches a hello
+      // that raced another bridge into the shared table while it was binding.
+      if (!establish(agent, bridge, 'welcome')) {
+        bridge.send({
+          t: 'error',
+          code: 'busy',
+          message: `session ${agent.session.id} is already bridged`,
+        })
+        bridge.close()
+      }
     },
 
     line(text: string, bridge: Bridge): void {
@@ -824,7 +844,11 @@ function handlersFor(
             return
           }
           void create(cwd).then(
-            agent => { establish(agent, bridge, 'root') },
+            agent => {
+              if (!establish(agent, bridge, 'root')) {
+                bridge.send({ t: 'echo', text: `new failed: session ${agent.session.id} is already bridged` })
+              }
+            },
             (error: unknown) => { bridge.send({ t: 'echo', text: `new failed: ${reasonOf(error)}` }) },
           )
           return
@@ -832,7 +856,11 @@ function handlersFor(
         case 'attach':
           if (refuseWhileParked(state)) return
           void bind(command.session).then(
-            agent => { establish(agent, bridge, 'root') },
+            agent => {
+              if (!establish(agent, bridge, 'root')) {
+                bridge.send({ t: 'echo', text: `attach failed: session ${agent.session.id} is already bridged` })
+              }
+            },
             (error: unknown) => { bridge.send({ t: 'echo', text: `attach failed: ${reasonOf(error)}` }) },
           )
           return

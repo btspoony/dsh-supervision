@@ -1295,3 +1295,93 @@ test('a host without a webserver mounts no routes and keeps its socket', async (
   assert.ok(existsSync(await listening(dir)))
   host.dispose()
 })
+
+test('/attach to a session the other surface holds is refused and keeps the socket bridge', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.add('session-b', '/repo/b')
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    const held = host.created[0] ?? ''
+    const client = await attached(host, dir, 'session-b')
+
+    client.write({ t: 'line', text: `/attach ${held}` })
+    await until(() => client.frames.some(frame => frame.t === 'echo'), 'the refusal echo')
+    assert.deepEqual(client.frames.find(frame => frame.t === 'echo'), {
+      t: 'echo',
+      text: `attach failed: session ${held} is already bridged`,
+    })
+
+    // The socket bridge still owns session-b, and the tty still owns its own.
+    client.write({ t: 'line', text: 'still session-b' })
+    await until(() => host.steered.length === 1, 'the steer')
+    assert.equal(host.steered[0]?.session, 'session-b')
+    assert.equal(tty.raw.at(-1), true)
+    host.dispose()
+  })
+})
+
+test('two hellos racing for one session leave exactly one bridge', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-race', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const first = new Client(await listening(dir))
+  const second = new Client(await listening(dir))
+  await Promise.all([first.ready(), second.ready()])
+  first.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-race' })
+  second.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-race' })
+
+  await until(() => first.frames.length > 0 && second.frames.length > 0, 'both answers')
+  const answers = [first.frames[0], second.frames[0]]
+  assert.equal(answers.filter(frame => frame?.t === 'welcome').length, 1)
+  assert.equal(answers.filter(frame => frame?.t === 'error' && frame.code === 'busy').length, 1)
+  host.dispose()
+})
+
+test('reclaiming a tty-held session leaves the socket bridge untouched', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.add('session-b', '/repo/b')
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    const held = host.created[0] ?? ''
+    await attached(host, dir, 'session-b')
+
+    const reclaim = await host.server.call(
+      '/dsh-supervision/reclaim',
+      'POST',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ session: held }),
+    )
+    assert.equal(reclaim.statusCode, 200)
+    assert.equal(tty.raw.at(-1), false, 'the tty bridge was released')
+    const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
+    assert.deepEqual(Object.keys(sessions), ['session-b'], 'the socket bridge survived')
+    host.dispose()
+  })
+})
+
+test('a forwarder create fails fast when the agent factory is missing', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.failCreate = 1
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/repo/api' } })
+
+  const answer = await Promise.race([
+    client.take(1),
+    new Promise<'timeout'>(resolve => { setTimeout(() => { resolve('timeout') }, 1000) }),
+  ])
+  assert.notEqual(answer, 'timeout', 'a forwarder must not wait out the tty boot budget')
+  const [frame] = answer as readonly OutFrame[]
+  assert.equal(frame?.t, 'error')
+  assert.equal(frame?.t === 'error' ? frame.code : '', 'create-failed')
+  host.dispose()
+})
