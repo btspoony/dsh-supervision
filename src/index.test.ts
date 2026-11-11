@@ -12,7 +12,7 @@ import { connect } from 'node:net'
 import type { Socket } from 'node:net'
 import { after, test } from 'node:test'
 import { DEFAULTS, apply, validateConfig } from './index.js'
-import type { Config, PluginContext, SessionEvent } from './index.js'
+import type { Config, PluginContext, SessionEvent, UserMessage } from './index.js'
 import { PROTO, readRegistry } from 'dsh-supervision-protocol'
 import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
 
@@ -35,6 +35,8 @@ interface FakeAgent {
   id: string
   status: 'idle' | 'running'
   session: { id: string; header: { cwd?: string } }
+  steer(message: UserMessage): void
+  cancel(cause: { readonly kind: 'user' }): void
 }
 
 /** A host context whose agents are in-memory and whose events the test emits. */
@@ -42,6 +44,14 @@ class FakeHost {
   readonly agents: FakeAgent[] = []
   readonly created: string[] = []
   readonly resumed: string[] = []
+  /** Every steer the plugin delivered, with the session it went to. */
+  readonly steered: { readonly session: string; readonly message: UserMessage }[] = []
+  /** Every cancel the plugin delivered, with the session it went to. */
+  readonly cancelled: string[] = []
+  /** Stands in for `ctx.get('subagents')`; undefined mimics a host without one. */
+  subagentRoots: Map<string, string> | undefined
+  /** Sessions whose resume must fail, for the attach-failure branch. */
+  readonly failResume = new Set<string>()
   readonly #sessionListeners = new Set<(session: { id: string }, event: SessionEvent) => void>()
   readonly #statusListeners = new Set<(payload: { agent: FakeAgent; status: 'idle' | 'running' }) => void>()
   #disposer: (() => void) | undefined
@@ -55,10 +65,19 @@ class FakeHost {
         return { agent: this.add(sessionId, meta.cwd) }
       },
       resume: async ({ resumeSessionId }) => {
+        if (this.failResume.has(resumeSessionId)) throw new Error('no such session')
         this.resumed.push(resumeSessionId)
         return { agent: this.add(resumeSessionId, '/repo/resumed') }
       },
     },
+    get: (name: string) => name !== 'subagents' || this.subagentRoots === undefined
+      ? undefined
+      : {
+        rootOf: (agent: FakeAgent) => {
+          const root = this.subagentRoots?.get(agent.id)
+          return root === undefined ? agent : this.agents.find(candidate => candidate.id === root) ?? agent
+        },
+      },
     on: ((name: string, listener: never) => {
       const set = name === 'session/event' ? this.#sessionListeners : this.#statusListeners
       set.add(listener)
@@ -69,7 +88,13 @@ class FakeHost {
 
   /** Register an agent without going through `apply`. */
   add(id: string, cwd: string): FakeAgent {
-    const agent: FakeAgent = { id, status: 'idle', session: { id, header: { cwd } } }
+    const agent: FakeAgent = {
+      id,
+      status: 'idle',
+      session: { id, header: { cwd } },
+      steer: message => { this.steered.push({ session: id, message }) },
+      cancel: cause => { this.cancelled.push(`${id}:${cause.kind}`) },
+    }
     this.agents.push(agent)
     return agent
   }
@@ -341,5 +366,199 @@ test('programStatus off sends no OSC at all', async () => {
   const frames = await client.take(2)
   assert.equal(frames.some(frame => frame.t === 'osc'), false)
   assert.deepEqual(frames[1], { t: 'echo', text: '[turn 0] working' })
+  host.dispose()
+})
+
+/** Poll without timers: the runner only moves forward on `setImmediate`. */
+async function until(predicate: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+  }
+  throw new Error(`timed out waiting for ${what}`)
+}
+
+/** A client already attached and past its welcome. */
+async function attached(host: FakeHost, dir: string, session: string): Promise<Client> {
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: session })
+  await client.take(1)
+  return client
+}
+
+test('a plain line steers the attached session and a blank one does nothing', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '   ' })
+  client.write({ t: 'line', text: 'run the tests\r\n' })
+  await until(() => host.steered.length === 1, 'one steer')
+  await new Promise<void>(resolve => { setImmediate(resolve) })
+
+  assert.equal(host.steered.length, 1)
+  const [delivered] = host.steered
+  assert.equal(delivered?.session, 'session-1')
+  assert.equal(delivered?.message.role, 'user')
+  assert.equal(delivered?.message.source.kind, 'user')
+  assert.deepEqual(delivered?.message.content, [{ type: 'text', text: 'run the tests' }])
+  assert.ok(Object.isFrozen(delivered?.message))
+  assert.deepEqual(client.frames.map(frame => frame.t), ['welcome'], 'a line alone reports nothing')
+  host.dispose()
+})
+
+test('/cancel cancels the attached agent as the operator', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  client.write({ t: 'line', text: '/cancel' })
+  await until(() => host.cancelled.length === 1, 'one cancel')
+  assert.deepEqual(host.cancelled, ['session-1:user'])
+  assert.deepEqual(host.steered, [])
+  host.dispose()
+})
+
+test('/status echoes one line and malformed input never reaches the agent', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '/status' })
+  client.write({ t: 'line', text: '/help' })
+  client.write({ t: 'line', text: '/attach nope' })
+  client.write({ t: 'line', text: '/y' })
+  await until(() => client.frames.length === 5, 'four echoes')
+  assert.deepEqual(client.frames.slice(1), [
+    { t: 'echo', text: 'session=session-1 state=idle turn=0 asks=-' },
+    { t: 'echo', text: 'unknown command /help' },
+    { t: 'echo', text: 'unknown command /attach' },
+    { t: 'echo', text: 'no approval pending' },
+  ])
+  assert.deepEqual(host.steered, [], 'no diagnostic reaches the agent')
+  host.dispose()
+})
+
+test('/attach switches the bridge without a second welcome or a leaked listener', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  client.write({ t: 'line', text: '/attach session-2' })
+  await until(() => client.frames.length === 6, 'the switch')
+  assert.deepEqual(client.frames.map(frame => frame.t), ['welcome', 'osc', 'osc', 'osc', 'echo', 'osc'])
+  // The old child record is cleared, the new root reported, then the old session is a child.
+  assert.deepEqual(client.frames[2], { t: 'osc', data: '\u001b]7501;state=clear:id=session-2\u001b\\' })
+  assert.deepEqual(client.frames[3], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=d2Vi\u001b\\' })
+  assert.deepEqual(client.frames[5], { t: 'osc', data: '\u001b]7501;state=idle:id=session-1\u001b\\' })
+  assert.equal(client.frames.filter(frame => frame.t === 'welcome').length, 1, 'a switch never re-welcomes')
+  assert.equal(host.listenerCount, 2, 'the previous session listeners were released')
+
+  client.write({ t: 'line', text: 'after the switch' })
+  await until(() => host.steered.length === 1, 'the steer')
+  assert.equal(host.steered[0]?.session, 'session-2')
+  host.dispose()
+})
+
+test('a failed attach echoes the reason and keeps the current session', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.failResume.add('session-gone')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '/attach session-gone' })
+  await until(() => client.frames.length === 2, 'the refusal')
+  assert.deepEqual(client.frames[1], { t: 'echo', text: 'attach failed: no such session' })
+
+  client.write({ t: 'line', text: 'still here' })
+  await until(() => host.steered.length === 1, 'the steer')
+  assert.equal(host.steered[0]?.session, 'session-1')
+  host.dispose()
+})
+
+test('/new creates a session in the current cwd, attaches it, and does not re-welcome', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '/new' })
+  await until(() => client.frames.length === 4, 'the new root and the old session as its child')
+  const created = host.created[0]
+  assert.ok(created !== undefined && created.startsWith('session-'))
+  assert.equal(host.agents.find(agent => agent.id === created)?.session.header.cwd, '/repo')
+  assert.deepEqual(client.frames[1], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' })
+  assert.deepEqual(client.frames[2], { t: 'echo', text: '[turn 0] idle' })
+  assert.deepEqual(client.frames[3], { t: 'osc', data: '\u001b]7501;state=idle:id=session-1\u001b\\' })
+  assert.equal(client.frames.filter(frame => frame.t === 'welcome').length, 1)
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 5, 'the status line')
+  assert.deepEqual(client.frames[4], {
+    t: 'echo',
+    text: `session=${created ?? ''} state=idle turn=0 asks=-`,
+  })
+  host.dispose()
+})
+
+test('a non-attached live session is a child record that never moves the root turn', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+  assert.deepEqual(client.frames[1], { t: 'osc', data: '\u001b]7501;state=idle:id=session-2\u001b\\' })
+
+  host.emit('session-2', { type: 'turn/start', data: { turn: 1 } })
+  await until(() => client.frames.length === 3, 'the child turn start')
+  assert.deepEqual(client.frames[2], { t: 'osc', data: '\u001b]7501;state=working:id=session-2\u001b\\' })
+
+  host.emit('session-2', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await until(() => client.frames.length === 4, 'the child turn end')
+  assert.deepEqual(client.frames[3], { t: 'osc', data: '\u001b]7501;state=done:id=session-2\u001b\\' })
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 5, 'the root status')
+  assert.deepEqual(client.frames[4], { t: 'echo', text: 'session=session-1 state=idle turn=0 asks=-' })
+  host.dispose()
+})
+
+test('an in-process subagent reports sub/<session> and a switch clears every child record', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-child', '/repo')
+  host.add('session-3', '/repo/b')
+  host.subagentRoots = new Map([['session-child', 'session-1']])
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 3, 'both child records')
+  assert.deepEqual(client.frames[1], { t: 'osc', data: '\u001b]7501;state=idle:id=sub/session-child\u001b\\' })
+  assert.deepEqual(client.frames[2], { t: 'osc', data: '\u001b]7501;state=idle:id=session-3\u001b\\' })
+
+  host.emit('session-child', { type: 'turn/start', data: { turn: 1 } })
+  await until(() => client.frames.length === 4, 'the subagent turn start')
+  assert.deepEqual(client.frames[3], { t: 'osc', data: '\u001b]7501;state=working:id=sub/session-child\u001b\\' })
+
+  client.write({ t: 'line', text: '/attach session-3' })
+  await until(() => client.frames.length === 10, 'the switch and its child records')
+  assert.deepEqual(client.frames[4], { t: 'osc', data: '\u001b]7501;state=clear:id=sub/session-child\u001b\\' })
+  assert.deepEqual(client.frames[5], { t: 'osc', data: '\u001b]7501;state=clear:id=session-3\u001b\\' })
+  assert.deepEqual(client.frames[6], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=Yg==\u001b\\' })
   host.dispose()
 })
