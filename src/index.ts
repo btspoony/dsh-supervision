@@ -304,18 +304,23 @@ function askMsg(ask: ParkedAsk): string {
   return `${ask.toolName}${reason === '' ? '' : ` ${reason}`} [ask ${ask.id}]`
 }
 
+/** DSH's refusal while the profile boots without an agent factory yet. */
+const NO_FACTORY = 'no agent factory registered'
+/** 30 s of 500 ms retries: the agent loop registers its factory while a heavy profile boots. */
+const NO_FACTORY_ATTEMPTS = 60
+const NO_FACTORY_DELAY_MS = 500
+
 /**
  * Mount the plugin in two layers.
  *
- * The discovery layer always opens a reporting surface: the control socket plus
- * its registry entry for a forwarder to connect to, or — when this process is
- * itself inside a supervised terminal (`DSH_SUP_TERMINAL_ID`, or herdr-core's
- * `HC_TERMINAL_ID`) — the terminal it reports on.
- * A forwarder can only exist by connecting, so the socket layer cannot wait on
- * one, and it touches nothing on the agent. The effect layer — session
- * listeners, OSC, echo, stdin — opens per bridge, which is exactly "a forwarder
- * is connected", and a tty bridge is this process. A GUI-only `dsh web`
- * therefore exposes an inert socket and nothing else.
+ * The discovery layer opens the control socket plus its registry entry for a
+ * forwarder to connect to, and — when this process is itself inside a supervised
+ * terminal (`DSH_SUP_TERMINAL_ID`, or herdr-core's `HC_TERMINAL_ID`) — also
+ * reports on that terminal. A forwarder can only exist by connecting, so the
+ * socket layer cannot wait on one, and it touches nothing on the agent. The
+ * effect layer — session listeners, OSC, echo, stdin — opens per bridge, which
+ * is exactly "a forwarder is connected", and a tty bridge is this process. A
+ * GUI-only `dsh web` therefore exposes an inert socket and nothing else.
  * @param ctx - the host context.
  * @param config - the validated plugin row.
  * @param openTty - the terminal opener; a fake stands in for this process's own.
@@ -325,28 +330,33 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   // disable the plugin, because a disabled plugin is an unreachable socket.
   if (config.enabled === false) return
 
-  // A terminal id is this process being the terminal's own supervisor: no
-  // forwarder can connect to something that is not a socket, so the tty is the
-  // whole discovery surface and no registry entry is written. `||`, not `??`:
-  // an empty value falls through to herdr-core's `HC_TERMINAL_ID`.
+  // The socket discovery surface always opens: a forwarder can only exist by
+  // connecting, and a process started inside a supervised terminal may still
+  // be driven by `dsh-sup` from another one. A tty, when the process owns one,
+  // is an additional reporting surface rather than an exclusive mode. `||`, not
+  // `??`: an empty value falls through to herdr-core's `HC_TERMINAL_ID`.
+  const transports: Transport[] = [
+    new SocketTransport({
+      ...(config.socketDir === undefined ? {} : { dir: config.socketDir }),
+    }),
+  ]
   const open = (process.env['DSH_SUP_TERMINAL_ID'] || process.env['HC_TERMINAL_ID']) ? openTty() : undefined
-  // No terminal to report on: nothing mounts and nothing may throw, so the host
-  // keeps its sessions and the operator reads the reason on stderr.
+  // A terminal that cannot be opened drops only that surface: a full socket
+  // path or a hostile umask must not hide the socket too, and the host keeps
+  // its sessions either way.
   if (open !== undefined && !open.ok) {
     process.stderr.write(`dsh-supervision: no tty transport: ${open.reason}\n`)
-    return
+  } else if (open !== undefined) {
+    transports.push(new TtyTransport(open.io))
   }
-  const transport: Transport = open === undefined
-    ? new SocketTransport({
-      ...(config.socketDir === undefined ? {} : { dir: config.socketDir }),
-    })
-    : new TtyTransport(open.io)
 
   const { handlers, dispose, snapshot } = handlersFor(ctx, config)
   // A start failure (a full socket path, a hostile umask on the directory) must
   // not take the host process down: an unhandled rejection kills `dsh web`, and
   // the supervised session then loses its whole GUI, not just its supervisor.
-  void transport.start(handlers).catch(() => transport.close())
+  for (const transport of transports) {
+    void transport.start(handlers).catch(() => transport.close())
+  }
 
   // Read reflectively, not through `inject`: a CLI-only host mounts no webserver,
   // and a declared dependency would keep the plugin from loading there at all.
@@ -354,9 +364,9 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   if (server !== undefined) {
     ctx.effect(() => registerSupervisionRoutes(server, {
       snapshot,
-      // The transport's own bye callback is the cleanup: it drops the bridge's
-      // listeners and child records exactly as a forwarder disconnect does.
-      reclaim: session => transport.reclaim(session),
+      // Both surfaces share one bridge table, so the surface holding the
+      // session answers the reclaim and the other one reports no bridge.
+      reclaim: session => transports.some(transport => transport.reclaim(session)),
     }))
   }
 
@@ -364,7 +374,7 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
     // A disposed plugin cannot answer anything: the parked asks fail closed
     // before the sockets go, so no asker waits on a supervisor that is gone.
     dispose()
-    void transport.close()
+    for (const transport of transports) void transport.close()
   })
 }
 
@@ -410,12 +420,26 @@ function handlersFor(
     }
   }
 
-  /** Create a fresh session in the directory the forwarder named. */
+  /**
+   * Create a fresh session in the directory the forwarder named. The tty
+   * transport creates its first session while the profile is still booting,
+   * before the agent loop registers its factory, so that refusal is retried
+   * instead of reported.
+   */
   const create = async (cwd: string): Promise<AgentLike> => {
-    try {
-      return (await ctx.agents.create({ sessionId: `session-${randomUUID()}`, meta: { cwd } })).agent
-    } catch (error) {
-      throw new BindError(refusalCode(error, 'create-failed'), reasonOf(error))
+    // shortcut: the wait keys off DSH's "no agent factory registered" message;
+    // switch to an explicit readiness signal if dsh-agent exposes one.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return (await ctx.agents.create({ sessionId: `session-${randomUUID()}`, meta: { cwd } })).agent
+      } catch (error) {
+        const reason = reasonOf(error)
+        if (attempt < NO_FACTORY_ATTEMPTS && reason.includes(NO_FACTORY)) {
+          await new Promise<void>(resolve => { setTimeout(resolve, NO_FACTORY_DELAY_MS) })
+          continue
+        }
+        throw new BindError(refusalCode(error, 'create-failed'), reason)
+      }
     }
   }
 
@@ -736,6 +760,20 @@ function handlersFor(
     async hello(frame: HelloFrame, bridge: Bridge): Promise<void> {
       let agent: AgentLike
       pids.set(bridge, frame.pid)
+      // One bridge per session across both surfaces: an attach to a session the
+      // other surface holds is refused before it could overwrite that state.
+      if ('attach' in frame) {
+        const held = bridged.get(frame.attach)
+        if (held !== undefined && held.bridge !== bridge) {
+          bridge.send({
+            t: 'error',
+            code: 'busy',
+            message: `session ${frame.attach} is already bridged`,
+          })
+          bridge.close()
+          return
+        }
+      }
       try {
         agent = 'attach' in frame
           ? await bind(frame.attach)
@@ -829,13 +867,15 @@ function handlersFor(
       }
     },
 
-    list(cwd: string | undefined, isBridged: (session: string) => boolean): readonly SessionItem[] {
+    list(cwd: string | undefined): readonly SessionItem[] {
+      // The shared bridge table, not one transport's private one: with both
+      // surfaces mounted, a session held by the tty is bridged to the socket too.
       return ctx.agents.list()
         .map(agent => ({
           id: agent.session.id,
           cwd: agent.session.header?.cwd ?? '',
           live: true,
-          bridged: isBridged(agent.session.id),
+          bridged: bridged.has(agent.session.id),
         }))
         .filter(item => cwd === undefined || item.cwd === cwd)
     },

@@ -21,7 +21,7 @@
 
 | Supervisor | How it connects | What it needs |
 |---|---|---|
-| herdr-core (`hc`) | in-process tty via its own `HC_TERMINAL_ID` (or `DSH_SUP_TERMINAL_ID` when the host exports one), or the control socket with `dsh-sup` in its PTY | a `dsh web` started inside the supervised terminal, or any PTY for the forwarder |
+| herdr-core (`hc`) | in-process tty via its own `HC_TERMINAL_ID` (or `DSH_SUP_TERMINAL_ID` when the host exports one) **and** the control socket with `dsh-sup` in its PTY; both are open at once | a `dsh web` started inside the supervised terminal, plus any PTY for the forwarder |
 | Any supervisor that reads OSC 7501 | control socket + `dsh-sup` in its own PTY | it must read the PTY's OSC output and be able to write lines to that PTY's stdin |
 | Another supervisor wanting in-process mode | set `DSH_SUP_TERMINAL_ID` | the variable is read, never written, by this package; any supervisor can set it |
 | GUI-only `dsh web` | nothing | the plugin exposes an inert socket and nothing else |
@@ -80,18 +80,18 @@ While a session is bridged the GUI shows a supervision banner above the composer
 
 ## How it reports
 
-One `dsh web` process owns one session tree; the plugin mounts in it and opens exactly one transport.
+One `dsh web` process owns one session tree; the plugin mounts in it and opens its control socket, plus an in-process tty when the process runs inside a supervised terminal.
 
 ```text
 dsh web (the process you already run)
 └── dsh-supervision plugin
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
       │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo lines ──▶ supervisor (reads OSC 7501)
-      └── in-process tty   (only when DSH_SUP_TERMINAL_ID is set)
+      └── in-process tty   (added when DSH_SUP_TERMINAL_ID or HC_TERMINAL_ID is set)
             └── OSC 7501 written to this process's own /dev/tty
 ```
 
-**Activation.** In the socket path the plugin always opens its discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `DSH_SUP_TERMINAL_ID` non-empty (or herdr-core's `HC_TERMINAL_ID`) the process is its own supervisor: nothing is created, the terminal is the whole discovery surface. If that terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and mounts nothing, so the host keeps its sessions.
+**Activation.** The plugin always opens its socket discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `DSH_SUP_TERMINAL_ID` non-empty (or herdr-core's `HC_TERMINAL_ID`) the process also supervises the terminal it runs in: the same records go to its own `/dev/tty`, while the socket stays open for a `dsh-sup` elsewhere. A session still has exactly one bridge across both surfaces, so a second attach is refused as `busy`. If the terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and keeps the socket surface.
 
 ## For implementers & agents
 
@@ -160,7 +160,7 @@ Environment variables it reads:
 | Variable | Read by | Effect |
 |---|---|---|
 | `DSH_HOME` | plugin and `dsh-sup` | Registry directory base; defaults to `~/.dsh`. |
-| `DSH_SUP_TERMINAL_ID` | plugin | Non-empty ⇒ in-process tty transport. No socket, no registry entry, no forwarder. |
+| `DSH_SUP_TERMINAL_ID` | plugin | Non-empty ⇒ an additional in-process tty transport; the control socket and registry stay open. |
 | `DSH_SUP_TERMINAL_NAME` | plugin | The supervisor label the state route reports; defaults to `dsh-sup`. |
 | `HC_TERMINAL_ID` | plugin | herdr-core compatibility: the same transport, read only when `DSH_SUP_TERMINAL_ID` is unset or empty. |
 | `HC_TERMINAL_NAME` | plugin | herdr-core compatibility: the label, read only when `DSH_SUP_TERMINAL_NAME` is unset or empty. |

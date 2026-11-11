@@ -113,6 +113,8 @@ class FakeHost {
   readonly agents: FakeAgent[] = []
   readonly created: string[] = []
   readonly resumed: string[] = []
+  /** Creates still to fail with DSH's no-factory refusal, for the boot race. */
+  failCreate = 0
   /** Every steer the plugin delivered, with the session it went to. */
   readonly steered: { readonly session: string; readonly message: UserMessage }[] = []
   /** Every cancel the plugin delivered, with the session it went to. */
@@ -139,6 +141,10 @@ class FakeHost {
         get: (id: string) => this.agents.find(agent => agent.id === id),
         list: () => this.agents,
         create: async ({ sessionId, meta }) => {
+          if (this.failCreate > 0) {
+            this.failCreate -= 1
+            throw new Error('no agent factory registered (load an agent-loop plugin)')
+          }
           this.created.push(sessionId)
           return { agent: this.add(sessionId, meta.cwd) }
         },
@@ -371,7 +377,7 @@ async function withTerminal(
   }
 }
 
-test('a herdr-core terminal id mounts the tty transport and opens no socket', async () => {
+test('a herdr-core terminal id mounts the tty and the socket surface together', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   const tty = new FakeTty()
@@ -379,8 +385,8 @@ test('a herdr-core terminal id mounts the tty transport and opens no socket', as
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
     // The synthesized first hello creates a session and binds it to the tty.
     await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
-    // The tty is the whole discovery surface: no socket, no registry entry.
-    assert.deepEqual(readdirSync(dir), [])
+    // Both surfaces: the tty renders, and the socket answers discovery.
+    assert.ok(existsSync(await listening(dir)))
     assert.equal(host.created.length, 1)
     assert.ok(tty.out.length > 0)
 
@@ -402,7 +408,7 @@ test('a herdr-core terminal id mounts the tty transport and opens no socket', as
   })
 })
 
-test('DSH_SUP_TERMINAL_ID alone mounts the tty transport and opens no socket', async () => {
+test('DSH_SUP_TERMINAL_ID mounts the tty and keeps the socket surface', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   const tty = new FakeTty()
@@ -410,8 +416,7 @@ test('DSH_SUP_TERMINAL_ID alone mounts the tty transport and opens no socket', a
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
     // The synthesized first hello creates a session and binds it to the tty.
     await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
-    // The tty is the whole discovery surface: no socket, no registry entry.
-    assert.deepEqual(readdirSync(dir), [])
+    assert.ok(existsSync(await listening(dir)))
     host.dispose()
   })
 })
@@ -424,7 +429,7 @@ test('the plugin terminal id outranks the fallback, and an empty value falls thr
     const tty = new FakeTty()
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
     await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
-    assert.deepEqual(readdirSync(dir), [])
+    assert.ok(existsSync(await listening(dir)))
     host.dispose()
   })
   // An empty plugin id falls through to the fallback instead of mounting nothing.
@@ -434,7 +439,7 @@ test('the plugin terminal id outranks the fallback, and an empty value falls thr
     const tty = new FakeTty()
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
     await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
-    assert.deepEqual(readdirSync(dir), [])
+    assert.ok(existsSync(await listening(dir)))
     host.dispose()
   })
 })
@@ -454,7 +459,7 @@ test('without a terminal id the socket transport is used and no tty is opened', 
   })
 })
 
-test('a tty that cannot be opened says why on stderr and mounts nothing', async () => {
+test('a tty that cannot be opened says why on stderr and keeps the socket surface', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   const written: string[] = []
@@ -467,10 +472,45 @@ test('a tty that cannot be opened says why on stderr and mounts nothing', async 
       process.stderr.write = original
     }
     assert.deepEqual(written, ['dsh-supervision: no tty transport: no tty: nowhere to report\n'])
-    // Nothing mounts: no effect layer, no routes, no socket.
-    assert.equal(host.listenerCount, 0)
-    assert.deepEqual(host.server.paths, [])
-    assert.deepEqual(readdirSync(dir), [])
+    // Only the tty surface is dropped: the socket and its routes still mount.
+    assert.ok(existsSync(await listening(dir)))
+    assert.deepEqual(host.server.paths, ['/dsh-supervision/state', '/dsh-supervision/reclaim'])
+    host.dispose()
+  })
+})
+
+test('a socket attach to the session the tty already holds is refused as busy', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    const client = new Client(await listening(dir))
+    await client.ready()
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: host.created[0] ?? '' })
+    const [refusal] = await client.take(1)
+    assert.equal(refusal?.t, 'error')
+    assert.equal(refusal?.t === 'error' ? refusal.code : '', 'busy')
+    // The refusal never overwrote the tty's bridge: the session is still held.
+    assert.equal(tty.raw.at(-1), true)
+    host.dispose()
+  })
+})
+
+test('the tty first session retries while the agent factory is still missing', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.failCreate = 2
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    // The retries sleep on a real timer, so poll with one instead of setImmediate.
+    for (let attempt = 0; attempt < 100 && host.created.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.equal(host.created.length, 1)
+    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
     host.dispose()
   })
 })
