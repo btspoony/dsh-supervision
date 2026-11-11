@@ -1,16 +1,26 @@
 name: Release
 
 # PR-driven publish. Merging a `release vX.Y.Z` PR (opened by the Release prep
-# workflow) runs the whole release inline on the pull_request_target event:
+# workflow) runs the whole release inline on the `pull_request` closed event:
 # guard -> validate -> changelog gate -> build -> publish both packages
 # (provenance) -> tag -> GitHub Release. There is deliberately NO push:tags
 # auto-publish path: a manual `git tag && git push --tags` does not publish.
 #
-# `pull_request_target`, NOT `pull_request`: for this event GitHub runs the
-# workflow file from the base branch, so a same-repo PR cannot delete the job
-# guard below and still mint `contents: write` + `id-token: write` from its own
-# copy of this file. The guard is evaluated before the checkout, which is what
-# makes the merge commit safe to check out afterwards.
+# `pull_request`, NOT `pull_request_target`: npm's Trusted Publishing OIDC
+# exchange only accepts an id-token minted for the `pull_request` event. Under
+# `pull_request_target` every exchange is refused with "OIDC token exchange
+# error - package not found" (a 404 npm uses to mask the mismatch), so that
+# event makes publishing impossible.
+#
+# The price is that this event runs the workflow file from the PR merge commit,
+# so the job guard below has to carry the whole constraint itself. It does, in
+# five checks: the PR is merged, its head repo is this repository, its head
+# branch starts with `release/v`, its author is the prep actor or the repository
+# owner, and its title is `release v<version>`. This is not a wider permission
+# surface than `pull_request_target`: `main` has no branch protection, so
+# whoever can merge a release PR can already change this file on `main` — the
+# target event only bought a workflow-file pin at the cost of a release pipeline
+# that never publishes.
 #
 # No NPM_TOKEN / NODE_AUTH_TOKEN secret: npm auth is Trusted Publishing over
 # OIDC, which needs the `id-token: write` scope and setup-node's `registry-url`
@@ -24,7 +34,7 @@ name: Release
 # that breaks provenance with MODULE_NOT_FOUND: sigstore.
 
 on:
-  pull_request_target:
+  pull_request:
     types: [closed]
     branches: [main]
 
@@ -199,6 +209,12 @@ jobs:
       # failed on the second package can be re-run after the first one landed
       # instead of dying on an immutable version.
       #
+      # That existence probe is three-state: `npm view` also exits non-zero when
+      # the lookup itself fails, so only a successful lookup that returns
+      # exactly $VERSION skips; a failed lookup that is not E404 aborts instead
+      # of publishing blind (an already-present immutable version would fail
+      # with EEXIST/E403); E404 means "absent, go publish".
+      #
       # `npm publish`, not `pnpm publish`: pnpm's OIDC token exchange fails
       # against the registry (ERR_PNPM_AUTH_TOKEN_EXCHANGE / 404) and it then
       # dies on setup-node's placeholder token, while npm on Node 24 implements
@@ -237,9 +253,48 @@ jobs:
             echo "npmrc=$NPMRC missing"
           fi
           echo "registry=$(npm config get registry)"
-          if [ "$(npm view "dsh-supervision@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
-            echo "dsh-supervision@${VERSION} is already published; skipping."
-            exit 0
+          # npm refuses a mismatched exchange with a blanket "package not found",
+          # so the only way to tell "wrong event", "wrong workflow file", "wrong
+          # repository" and "publisher config not effective" apart is to print the
+          # identity the registry actually saw. Only the decoded payload is
+          # printed — never the token itself.
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            OIDC_JSON="$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" || true)"
+            printf '%s' "$OIDC_JSON" | node -e '
+              let s = ""
+              process.stdin.on("data", d => { s += d }).on("end", () => {
+                try {
+                  const payload = JSON.parse(s).value.split(".")[1]
+                  const c = JSON.parse(Buffer.from(payload, "base64url").toString())
+                  console.log("oidc-claims=" + JSON.stringify({
+                    repository: c.repository,
+                    job_workflow_ref: c.job_workflow_ref,
+                    workflow_ref: c.workflow_ref,
+                    ref: c.ref,
+                    event_name: c.event_name,
+                    sub: c.sub,
+                    aud: c.aud,
+                  }))
+                } catch (err) {
+                  console.log("oidc-claims=<decode failed: " + (err instanceof Error ? err.message : err) + ">")
+                }
+              })
+            '
+          else
+            echo "oidc-claims=<no id-token request url>"
+          fi
+          LOOKUP_ERR="$(mktemp)"
+          trap 'rm -f "$LOOKUP_ERR"' EXIT
+          if LOOKUP="$(npm view "dsh-supervision@${VERSION}" version 2>"$LOOKUP_ERR")"; then
+            if [ "$LOOKUP" = "$VERSION" ]; then
+              echo "dsh-supervision@${VERSION} is already published; skipping."
+              exit 0
+            fi
+          elif ! grep -q 'E404' "$LOOKUP_ERR"; then
+            echo "::error::Could not determine whether dsh-supervision@${VERSION} exists; refusing to publish blind."
+            cat "$LOOKUP_ERR"
+            exit 1
           fi
           node scripts/strip-workspace-deps.mjs
           npm publish --provenance --access public --tag "$TAG"
@@ -253,9 +308,17 @@ jobs:
         working-directory: packages/cli
         run: |
           set -euo pipefail
-          if [ "$(npm view "dsh-sup@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
-            echo "dsh-sup@${VERSION} is already published; skipping."
-            exit 0
+          LOOKUP_ERR="$(mktemp)"
+          trap 'rm -f "$LOOKUP_ERR"' EXIT
+          if LOOKUP="$(npm view "dsh-sup@${VERSION}" version 2>"$LOOKUP_ERR")"; then
+            if [ "$LOOKUP" = "$VERSION" ]; then
+              echo "dsh-sup@${VERSION} is already published; skipping."
+              exit 0
+            fi
+          elif ! grep -q 'E404' "$LOOKUP_ERR"; then
+            echo "::error::Could not determine whether dsh-sup@${VERSION} exists; refusing to publish blind."
+            cat "$LOOKUP_ERR"
+            exit 1
           fi
           # `working-directory` is packages/cli, so the script is addressed from
           # the workspace root and runs against this package's manifest.
