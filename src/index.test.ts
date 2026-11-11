@@ -21,12 +21,19 @@ import type {
   UserMessage,
 } from './index.js'
 import type { ApprovalOutcome } from './approval.js'
+import type { TtyIO } from './tty-transport.js'
 import { PROTO, readRegistry } from 'dsh-supervision-protocol'
 import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
 
 const roots: string[] = []
 /** Every client this file opened; a dangling socket would keep the runner alive. */
 const clients: Client[] = []
+/**
+ * The suite drives the socket path unless a case opts into the tty, so a real
+ * `HC_TERMINAL_ID` in the terminal running the tests must not choose for it.
+ */
+const outerTerminal = process.env['HC_TERMINAL_ID']
+delete process.env['HC_TERMINAL_ID']
 
 function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-supervision-plugin-'))
@@ -37,6 +44,7 @@ function tempDir(): string {
 after(() => {
   for (const client of clients) client.socket.destroy()
   for (const dir of roots) rmSync(dir, { recursive: true, force: true })
+  if (outerTerminal !== undefined) process.env['HC_TERMINAL_ID'] = outerTerminal
 })
 
 interface FakeAgent {
@@ -302,6 +310,118 @@ test('enabled: false registers nothing at all', async () => {
   await new Promise<void>(resolve => { setImmediate(resolve) })
   assert.deepEqual(readdirSync(dir), [])
   assert.equal(host.listenerCount, 0)
+})
+
+/** A terminal the plugin reports on, with no real tty anywhere. */
+class FakeTty implements TtyIO {
+  readonly out: string[] = []
+  readonly raw: boolean[] = []
+  closes = 0
+  #wake: (() => void) | undefined
+  #ended = false
+
+  write(text: string): void {
+    this.out.push(text)
+  }
+
+  setRaw(raw: boolean): void {
+    this.raw.push(raw)
+  }
+
+  close(): void {
+    this.closes += 1
+    this.#ended = true
+    this.#wake?.()
+  }
+
+  async *lines(): AsyncGenerator<string> {
+    // No keystrokes: the read loop parks until the transport closes.
+    while (!this.#ended) await new Promise<void>(resolve => { this.#wake = resolve })
+  }
+}
+
+/**
+ * Run `body` with `HC_TERMINAL_ID` set to `value` (or absent).
+ * @param value - the terminal id, or undefined to unset it.
+ * @param body - the assertions.
+ */
+async function withTerminal(value: string | undefined, body: () => Promise<void>): Promise<void> {
+  const previous = process.env['HC_TERMINAL_ID']
+  if (value === undefined) delete process.env['HC_TERMINAL_ID']
+  else process.env['HC_TERMINAL_ID'] = value
+  try {
+    await body()
+  } finally {
+    if (previous === undefined) delete process.env['HC_TERMINAL_ID']
+    else process.env['HC_TERMINAL_ID'] = previous
+  }
+}
+
+test('HC_TERMINAL_ID mounts the tty transport and opens no socket', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  await withTerminal('hc-tty', async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    // The synthesized first hello creates a session and binds it to the tty.
+    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    // The tty is the whole discovery surface: no socket, no registry entry.
+    assert.deepEqual(readdirSync(dir), [])
+    assert.equal(host.created.length, 1)
+    assert.ok(tty.out.length > 0)
+
+    // Routes answer for a tty bridge through the same seam.
+    const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
+    assert.deepEqual(Object.keys(sessions), host.created)
+    const reclaim = await host.server.call(
+      '/dsh-supervision/reclaim',
+      'POST',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ session: host.created[0] }),
+    )
+    assert.equal(reclaim.statusCode, 200)
+
+    host.dispose()
+    // Disposal releases the terminal and closes it.
+    assert.equal(tty.raw.at(-1), false)
+    assert.equal(tty.closes, 1)
+  })
+})
+
+test('without HC_TERMINAL_ID the socket transport is used and no tty is opened', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  let opened = 0
+  await withTerminal(undefined, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => {
+      opened += 1
+      return { ok: false, reason: 'must not be read' }
+    })
+    assert.ok(existsSync(await listening(dir)))
+    assert.equal(opened, 0)
+    host.dispose()
+  })
+})
+
+test('a tty that cannot be opened says why on stderr and mounts nothing', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const written: string[] = []
+  const original = process.stderr.write
+  await withTerminal('hc-tty', async () => {
+    process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
+    try {
+      apply(host.ctx, config({ socketDir: dir }), () => ({ ok: false, reason: 'no tty: nowhere to report' }))
+    } finally {
+      process.stderr.write = original
+    }
+    assert.deepEqual(written, ['dsh-supervision: no tty transport: no tty: nowhere to report\n'])
+    // Nothing mounts: no effect layer, no routes, no socket.
+    assert.equal(host.listenerCount, 0)
+    assert.deepEqual(host.server.paths, [])
+    assert.deepEqual(readdirSync(dir), [])
+    host.dispose()
+  })
 })
 
 test('a bare hello creates a session and answers welcome before anything else', async () => {
