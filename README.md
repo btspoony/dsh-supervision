@@ -21,9 +21,9 @@
 
 | Supervisor | How it connects | What it needs |
 |---|---|---|
-| herdr-core (`hc`) | in-process tty via `HC_TERMINAL_ID`, or the control socket with `dsh-sup` in its PTY | a `dsh web` started inside the supervised terminal, or any PTY for the forwarder |
+| herdr-core (`hc`) | in-process tty via its own `HC_TERMINAL_ID` (or `DSH_SUP_TERMINAL_ID` when the host exports one), or the control socket with `dsh-sup` in its PTY | a `dsh web` started inside the supervised terminal, or any PTY for the forwarder |
 | Any supervisor that reads OSC 7501 | control socket + `dsh-sup` in its own PTY | it must read the PTY's OSC output and be able to write lines to that PTY's stdin |
-| Another supervisor wanting in-process mode | set `HC_TERMINAL_ID` | the variable is read, never written, by this package; any supervisor can set it |
+| Another supervisor wanting in-process mode | set `DSH_SUP_TERMINAL_ID` | the variable is read, never written, by this package; any supervisor can set it |
 | GUI-only `dsh web` | nothing | the plugin exposes an inert socket and nothing else |
 
 ## Quick start
@@ -87,11 +87,11 @@ dsh web (the process you already run)
 └── dsh-supervision plugin
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
       │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo lines ──▶ supervisor (reads OSC 7501)
-      └── in-process tty   (only when HC_TERMINAL_ID is set)
+      └── in-process tty   (only when DSH_SUP_TERMINAL_ID is set)
             └── OSC 7501 written to this process's own /dev/tty
 ```
 
-**Activation.** In the socket path the plugin always opens its discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `HC_TERMINAL_ID` non-empty the process is its own supervisor: nothing is created, the terminal is the whole discovery surface. If that terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and mounts nothing, so the host keeps its sessions.
+**Activation.** In the socket path the plugin always opens its discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `DSH_SUP_TERMINAL_ID` non-empty (or herdr-core's `HC_TERMINAL_ID`) the process is its own supervisor: nothing is created, the terminal is the whole discovery surface. If that terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and mounts nothing, so the host keeps its sessions.
 
 ## For implementers & agents
 
@@ -160,10 +160,12 @@ Environment variables it reads:
 | Variable | Read by | Effect |
 |---|---|---|
 | `DSH_HOME` | plugin and `dsh-sup` | Registry directory base; defaults to `~/.dsh`. |
-| `HC_TERMINAL_ID` | plugin | Non-empty ⇒ in-process tty transport. No socket, no registry entry, no forwarder. |
-| `HC_TERMINAL_NAME` | plugin | The supervisor label the state route reports; defaults to `dsh-sup`. |
+| `DSH_SUP_TERMINAL_ID` | plugin | Non-empty ⇒ in-process tty transport. No socket, no registry entry, no forwarder. |
+| `DSH_SUP_TERMINAL_NAME` | plugin | The supervisor label the state route reports; defaults to `dsh-sup`. |
+| `HC_TERMINAL_ID` | plugin | herdr-core compatibility: the same transport, read only when `DSH_SUP_TERMINAL_ID` is unset or empty. |
+| `HC_TERMINAL_NAME` | plugin | herdr-core compatibility: the label, read only when `DSH_SUP_TERMINAL_NAME` is unset or empty. |
 
-Both `HC_*` variables are read, never written, by this package.
+Both `DSH_SUP_*` variables and their `HC_*` fallbacks are read, never written, by this package.
 
 ### Invariants
 
@@ -173,7 +175,7 @@ A change must not break these:
 - **A record is replaced whole.** Every report restates every field that still applies; a field left out is a field cleared.
 - **A parked approval outranks a live turn.** The root word order is `blocked` > `working` > `done` / `error` / `idle`, and a session switch (`/new`, `/attach`) is refused while an ask is parked.
 - **Teardown settles every parked ask before the socket closes.** Disconnect, dispose, reclaim or an asker's withdrawal resolves each ask as `cancelled`; fail closed, never leave one dangling.
-- **`HC_*` is read only.** The in-process transport is chosen by the environment, never by configuration, and nothing writes those variables.
+- **The terminal variables are read only.** The in-process transport and its label are chosen by the environment, never by configuration, and nothing writes those variables.
 - **Caps are hard limits.** The encoder drops a record it cannot express within its caps rather than truncating it, and a frame over 64 KiB is refused locally.
 
 ## Links

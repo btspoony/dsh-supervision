@@ -309,7 +309,8 @@ function askMsg(ask: ParkedAsk): string {
  *
  * The discovery layer always opens a reporting surface: the control socket plus
  * its registry entry for a forwarder to connect to, or — when this process is
- * itself inside an hc terminal (`HC_TERMINAL_ID`) — the terminal it reports on.
+ * itself inside a supervised terminal (`DSH_SUP_TERMINAL_ID`, or herdr-core's
+ * `HC_TERMINAL_ID`) — the terminal it reports on.
  * A forwarder can only exist by connecting, so the socket layer cannot wait on
  * one, and it touches nothing on the agent. The effect layer — session
  * listeners, OSC, echo, stdin — opens per bridge, which is exactly "a forwarder
@@ -324,10 +325,11 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   // disable the plugin, because a disabled plugin is an unreachable socket.
   if (config.enabled === false) return
 
-  // `HC_TERMINAL_ID` is this process being the terminal's own supervisor: no
+  // A terminal id is this process being the terminal's own supervisor: no
   // forwarder can connect to something that is not a socket, so the tty is the
-  // whole discovery surface and no registry entry is written.
-  const open = process.env['HC_TERMINAL_ID'] ? openTty() : undefined
+  // whole discovery surface and no registry entry is written. `||`, not `??`:
+  // an empty value falls through to herdr-core's `HC_TERMINAL_ID`.
+  const open = (process.env['DSH_SUP_TERMINAL_ID'] || process.env['HC_TERMINAL_ID']) ? openTty() : undefined
   // No terminal to report on: nothing mounts and nothing may throw, so the host
   // keeps its sessions and the operator reads the reason on stderr.
   if (open !== undefined && !open.ok) {
@@ -386,11 +388,11 @@ function handlersFor(
   /** The effect layer's listeners, open while at least one bridge is live. */
   let subscriptions: readonly (() => void)[] | undefined
   /**
-   * The label the browser sees for the supervisor. herdr-core's terminal name is
-   * not readable from the supervised process, so this is the forwarder's own
-   * fallback unless the host exports the name.
+   * The label the browser sees for the supervisor: the host's
+   * `DSH_SUP_TERMINAL_NAME`, then herdr-core's `HC_TERMINAL_NAME` as a
+   * compatibility fallback, then the forwarder's own `dsh-sup`.
    */
-  const terminal = process.env['HC_TERMINAL_NAME'] ?? 'dsh-sup'
+  const terminal = process.env['DSH_SUP_TERMINAL_NAME'] || process.env['HC_TERMINAL_NAME'] || 'dsh-sup'
   /**
    * The forwarder process behind each connection. `hello` is the only frame
    * that carries it, and a `/attach` or `/new` switch keeps the same process.

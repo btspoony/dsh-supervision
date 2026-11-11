@@ -30,9 +30,11 @@ const roots: string[] = []
 const clients: Client[] = []
 /**
  * The suite drives the socket path unless a case opts into the tty, so a real
- * `HC_TERMINAL_ID` in the terminal running the tests must not choose for it.
+ * terminal id in the process running the tests must not choose for it.
  */
-const outerTerminal = process.env['HC_TERMINAL_ID']
+const outerTerminalId = process.env['DSH_SUP_TERMINAL_ID']
+const outerHcTerminalId = process.env['HC_TERMINAL_ID']
+delete process.env['DSH_SUP_TERMINAL_ID']
 delete process.env['HC_TERMINAL_ID']
 
 function tempDir(): string {
@@ -44,7 +46,8 @@ function tempDir(): string {
 after(() => {
   for (const client of clients) client.socket.destroy()
   for (const dir of roots) rmSync(dir, { recursive: true, force: true })
-  if (outerTerminal !== undefined) process.env['HC_TERMINAL_ID'] = outerTerminal
+  if (outerTerminalId !== undefined) process.env['DSH_SUP_TERMINAL_ID'] = outerTerminalId
+  if (outerHcTerminalId !== undefined) process.env['HC_TERMINAL_ID'] = outerHcTerminalId
 })
 
 interface FakeAgent {
@@ -342,27 +345,37 @@ class FakeTty implements TtyIO {
 }
 
 /**
- * Run `body` with `HC_TERMINAL_ID` set to `value` (or absent).
- * @param value - the terminal id, or undefined to unset it.
+ * Run `body` with the terminal id variables set to the given values.
+ * @param ids - `dshSup` sets `DSH_SUP_TERMINAL_ID`, `hc` sets `HC_TERMINAL_ID`;
+ *   an omitted key leaves that variable absent for the duration.
  * @param body - the assertions.
  */
-async function withTerminal(value: string | undefined, body: () => Promise<void>): Promise<void> {
-  const previous = process.env['HC_TERMINAL_ID']
-  if (value === undefined) delete process.env['HC_TERMINAL_ID']
-  else process.env['HC_TERMINAL_ID'] = value
+async function withTerminal(
+  ids: { readonly dshSup?: string; readonly hc?: string },
+  body: () => Promise<void>,
+): Promise<void> {
+  const restore = [
+    ['DSH_SUP_TERMINAL_ID', process.env['DSH_SUP_TERMINAL_ID']],
+    ['HC_TERMINAL_ID', process.env['HC_TERMINAL_ID']],
+  ] as const
+  const set = (name: string, value: string | undefined): void => {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+  set('DSH_SUP_TERMINAL_ID', ids.dshSup)
+  set('HC_TERMINAL_ID', ids.hc)
   try {
     await body()
   } finally {
-    if (previous === undefined) delete process.env['HC_TERMINAL_ID']
-    else process.env['HC_TERMINAL_ID'] = previous
+    for (const [name, value] of restore) set(name, value)
   }
 }
 
-test('HC_TERMINAL_ID mounts the tty transport and opens no socket', async () => {
+test('a herdr-core terminal id mounts the tty transport and opens no socket', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   const tty = new FakeTty()
-  await withTerminal('hc-tty', async () => {
+  await withTerminal({ hc: 'hc-tty' }, async () => {
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
     // The synthesized first hello creates a session and binds it to the tty.
     await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
@@ -389,11 +402,48 @@ test('HC_TERMINAL_ID mounts the tty transport and opens no socket', async () => 
   })
 })
 
-test('without HC_TERMINAL_ID the socket transport is used and no tty is opened', async () => {
+test('DSH_SUP_TERMINAL_ID alone mounts the tty transport and opens no socket', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  await withTerminal({ dshSup: 'sup-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    // The synthesized first hello creates a session and binds it to the tty.
+    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    // The tty is the whole discovery surface: no socket, no registry entry.
+    assert.deepEqual(readdirSync(dir), [])
+    host.dispose()
+  })
+})
+
+test('the plugin terminal id outranks the fallback, and an empty value falls through', async () => {
+  // The fallback is empty, and the plugin's own id still selects the tty.
+  await withTerminal({ dshSup: 'sup-tty', hc: '' }, async () => {
+    const dir = tempDir()
+    const host = new FakeHost()
+    const tty = new FakeTty()
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    assert.deepEqual(readdirSync(dir), [])
+    host.dispose()
+  })
+  // An empty plugin id falls through to the fallback instead of mounting nothing.
+  await withTerminal({ dshSup: '', hc: 'hc-tty' }, async () => {
+    const dir = tempDir()
+    const host = new FakeHost()
+    const tty = new FakeTty()
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    assert.deepEqual(readdirSync(dir), [])
+    host.dispose()
+  })
+})
+
+test('without a terminal id the socket transport is used and no tty is opened', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   let opened = 0
-  await withTerminal(undefined, async () => {
+  await withTerminal({}, async () => {
     apply(host.ctx, config({ socketDir: dir }), () => {
       opened += 1
       return { ok: false, reason: 'must not be read' }
@@ -409,7 +459,7 @@ test('a tty that cannot be opened says why on stderr and mounts nothing', async 
   const host = new FakeHost()
   const written: string[] = []
   const original = process.stderr.write
-  await withTerminal('hc-tty', async () => {
+  await withTerminal({ hc: 'hc-tty' }, async () => {
     process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
     try {
       apply(host.ctx, config({ socketDir: dir }), () => ({ ok: false, reason: 'no tty: nowhere to report' }))
@@ -1080,8 +1130,11 @@ test('the state route reports one entry per live bridge and no entry without one
   const host = new FakeHost()
   host.add('session-1', '/repo')
   // The label reaches the browser from this env var; a literal pins that path.
+  // The plugin's own name stays absent, so herdr-core's fallback is what shows.
   const previous = process.env['HC_TERMINAL_NAME']
+  const previousPlugin = process.env['DSH_SUP_TERMINAL_NAME']
   process.env['HC_TERMINAL_NAME'] = 'hc-literal'
+  delete process.env['DSH_SUP_TERMINAL_NAME']
   try {
     apply(host.ctx, config({ socketDir: dir, programStatus: false }))
     assert.deepEqual(host.server.paths, ['/dsh-supervision/state', '/dsh-supervision/reclaim'])
@@ -1107,6 +1160,35 @@ test('the state route reports one entry per live bridge and no entry without one
   } finally {
     if (previous === undefined) delete process.env['HC_TERMINAL_NAME']
     else process.env['HC_TERMINAL_NAME'] = previous
+    if (previousPlugin === undefined) delete process.env['DSH_SUP_TERMINAL_NAME']
+    else process.env['DSH_SUP_TERMINAL_NAME'] = previousPlugin
+    host.dispose()
+  }
+})
+
+test("DSH_SUP_TERMINAL_NAME outranks herdr-core's terminal label", async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  const previous = process.env['DSH_SUP_TERMINAL_NAME']
+  const previousHc = process.env['HC_TERMINAL_NAME']
+  process.env['DSH_SUP_TERMINAL_NAME'] = 'sup-literal'
+  process.env['HC_TERMINAL_NAME'] = 'hc-literal'
+  try {
+    apply(host.ctx, config({ socketDir: dir, programStatus: false }))
+    const client = await attached(host, dir, 'session-1')
+    const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
+    const entry = sessions['session-1']
+    assert.ok(entry !== undefined)
+    assert.equal(entry.terminal, 'sup-literal')
+
+    client.socket.end()
+    await until(() => host.listenerCount === 0, 'the bridge to drop')
+  } finally {
+    if (previous === undefined) delete process.env['DSH_SUP_TERMINAL_NAME']
+    else process.env['DSH_SUP_TERMINAL_NAME'] = previous
+    if (previousHc === undefined) delete process.env['HC_TERMINAL_NAME']
+    else process.env['HC_TERMINAL_NAME'] = previousHc
     host.dispose()
   }
 })
