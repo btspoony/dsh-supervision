@@ -12,10 +12,10 @@ name: Release
 # copy of this file. The guard is evaluated before the checkout, which is what
 # makes the merge commit safe to check out afterwards.
 #
-# No NPM_TOKEN / NODE_AUTH_TOKEN: npm auth is Trusted Publishing (OIDC
-# id-token + registry-url; the npm-side Trusted Publisher entry must exist for
-# BOTH `dsh-supervision` and `dsh-sup`). The tag push and GitHub Release use
-# the built-in GITHUB_TOKEN.
+# No NPM_TOKEN / NODE_AUTH_TOKEN: npm auth is Trusted Publishing, which needs
+# the OIDC `id-token` scope and nothing else (the npm-side Trusted Publisher
+# entry must exist for BOTH `dsh-supervision` and `dsh-sup`). The tag push and
+# GitHub Release use the built-in GITHUB_TOKEN.
 #
 # NOTE: Node 24 ships npm with working Trusted Publishing / provenance
 # (sigstore). Do not use Node 22 or `npm install -g npm@latest` on Node 22 —
@@ -61,11 +61,17 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
+      # `registry-url` is deliberately absent: it makes setup-node write an
+      # `.npmrc` carrying `_authToken=${NODE_AUTH_TOKEN}` (the placeholder
+      # token) and `always-auth`, and npm then uses that placeholder instead of
+      # running the OIDC Trusted Publishing exchange. The registry answers the
+      # placeholder with a 404 on the publish PUT while provenance signing still
+      # succeeds, so the release fails only at authentication. npm's default
+      # registry is already registry.npmjs.org, so OIDC needs no auth config.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          registry-url: https://registry.npmjs.org
           cache: pnpm
 
       - name: Install dependencies

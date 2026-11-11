@@ -42,11 +42,13 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
+      # No `registry-url`: prep never authenticates to npm, and the `.npmrc` it
+      # writes would put a placeholder token in front of the OIDC publishing
+      # done by the Release workflow.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          registry-url: https://registry.npmjs.org
           cache: pnpm
 
       - name: Install dependencies
