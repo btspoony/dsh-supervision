@@ -1,0 +1,20 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="dsh-supervision-icon-ring" x1="6" y1="18" x2="30" y2="18" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#312E81"/>
+      <stop offset="1" stop-color="#A21CAF"/>
+    </linearGradient>
+    <linearGradient id="dsh-supervision-icon-core" x1="14.1" y1="14.1" x2="21.9" y2="21.9" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F59E0B"/>
+      <stop offset="1" stop-color="#EA580C"/>
+    </linearGradient>
+  </defs>
+  <!-- supervisor: an open ring, the gap is the way in -->
+  <path d="M28.05 23.8A11.6 11.6 0 1 1 28.05 12.2" stroke="url(#dsh-supervision-icon-ring)" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- the one supervised session: the single visual weight -->
+  <circle cx="18" cy="18" r="4.3" fill="url(#dsh-supervision-icon-core)"/>
+  <!-- takeover input: reach in through the gap, into the running session -->
+  <path d="M32.8 18H25.8M27.8 16.2L25.6 18L27.8 19.8" stroke="#1E1B4B" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- reported state: a signal leaving the ring -->
+  <path d="M6.4 6.4L3.87 3.87" stroke="#C026D3" stroke-width="2.2" stroke-linecap="round"/>
+</svg>
