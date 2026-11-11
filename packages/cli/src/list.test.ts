@@ -157,7 +157,7 @@ test('a frame refused locally exits 6, never 1', async (t) => {
   assert.match(result.stderr, /frame exceeds/);
 });
 
-test('a mixed loss and refusal exits 6 whichever backend the registry yields first', async (t) => {
+test('a mixed loss and refusal exits 1 whichever backend the registry yields first', async (t) => {
   const dir = mkdtempSync('/tmp/dsh-list-');
   const lost = dying(dir, 'a');
   const refused = answering(dir, 'b', { t: 'error', code: 'protocol', message: 'frame exceeds 65536 bytes' });
@@ -168,15 +168,58 @@ test('a mixed loss and refusal exits 6 whichever backend the registry yields fir
   });
 
   // The registry is unsorted `readdirSync`, so the file index decides which
-  // failure `Promise.all` reports first. A coded refusal outranks the bare loss
-  // either way: the exit must describe what happened, not directory order.
+  // failure `Promise.all` reports first. A bare loss outranks the coded refusal
+  // either way: exit 6 says the backend is alive, which would erase the backend
+  // that really is gone.
   const forward = await list([lost, refused]);
   const reversed = await list([refused, lost]);
 
-  assert.equal(forward.code, EXIT.protocol);
-  assert.equal(reversed.code, EXIT.protocol);
+  assert.equal(forward.code, EXIT.backendLost);
+  assert.equal(reversed.code, EXIT.backendLost);
   assert.deepEqual(rows(forward.stdout), [HEADER]);
+  // Both causes reach stderr, each naming its own socket: the exit reports the
+  // loss, not the refusal, so the operator must still see the refusal.
+  assert.ok(forward.stderr.includes(lost.socket), 'the loss names its backend');
   assert.match(forward.stderr, /protocol: frame exceeds/);
+});
+
+test('every failure coded: the ADR code decides, order-free', async (t) => {
+  const dir = mkdtempSync('/tmp/dsh-list-');
+  const busy = answering(dir, 'a', { t: 'error', code: 'busy', message: 'bridged elsewhere' });
+  const refused = answering(dir, 'b', { t: 'error', code: 'protocol', message: 'frame exceeds 65536 bytes' });
+  t.after(() => {
+    busy.close();
+    refused.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // With no bare loss in the batch, exitCodeFor decides. Two codes tie-break by
+  // name, so `busy` (3) wins in either registry order: a local refusal can still
+  // never claim a lost backend.
+  const forward = await list([busy, refused]);
+  const reversed = await list([refused, busy]);
+
+  assert.equal(forward.code, EXIT.busy);
+  assert.equal(reversed.code, EXIT.busy);
+  assert.deepEqual(rows(forward.stdout), [HEADER]);
+});
+
+test('every failure bare: the batch is one lost backend, not one per socket', async (t) => {
+  const dir = mkdtempSync('/tmp/dsh-list-');
+  const first = dying(dir, 'a');
+  const second = dying(dir, 'b');
+  t.after(() => {
+    first.close();
+    second.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const result = await list([first, second]);
+
+  assert.equal(result.code, EXIT.backendLost);
+  assert.deepEqual(rows(result.stdout), [HEADER]);
+  assert.ok(result.stderr.includes(first.socket), 'each loss names its backend');
+  assert.ok(result.stderr.includes(second.socket), 'each loss names its backend');
 });
 
 test('a backend answering bye explains itself on stderr and exits 1', async (t) => {

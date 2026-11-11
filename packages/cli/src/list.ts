@@ -39,7 +39,8 @@ export function listFrom(socket: string, cwd: string): Promise<ListResult> {
         }
       },
       onLost: (_msg, detail) => {
-        process.stderr.write(`${detail}\n`);
+        // Same attribution as the `bye` arm: several backends answer at once.
+        process.stderr.write(`${socket}: ${detail}\n`);
         settle({ ok: false });
       },
       onRefused: (detail) => {
@@ -54,8 +55,8 @@ export function listFrom(socket: string, cwd: string): Promise<ListResult> {
 /**
  * Prints the union of every live backend's sessions. A listing binds no bridge,
  * so it needs no welcome and takes no session; it still fails when a backend
- * the registry called live could not answer, with that failure's own code so a
- * local refusal never claims a lost backend.
+ * the registry called live could not answer. A genuinely lost backend outranks
+ * a local refusal, so that refusal never erases the loss.
  */
 export async function runList(entries: readonly RegistryEntry[], cwd: string): Promise<number> {
   const results = await Promise.all(entries.map((entry) => listFrom(entry.socket, cwd)));
@@ -64,11 +65,14 @@ export async function runList(entries: readonly RegistryEntry[], cwd: string): P
     .map((item) => `${item.id}\t${item.cwd}\t${item.live ? 'yes' : 'no'}\t${item.bridged ? 'yes' : '-'}`);
   process.stdout.write(`${[HEADER, ...rows].join('\n')}\n`);
   // The registry order is unsorted `readdirSync`, so the exit must not depend on
-  // which failure came first: any coded refusal outranks a bare loss, and only
-  // when every failure is bare does the listing say a backend was lost. Two
-  // distinct codes tie-break by name, which keeps even that case order-free.
-  const codes = results.flatMap((result) => (result.ok || result.code === undefined ? [] : [result.code])).sort();
-  const [code] = codes;
-  if (code !== undefined) return exitCodeFor(code);
-  return results.every((result) => result.ok) ? EXIT.ok : EXIT.backendLost;
+  // which failure came first. A bare loss outranks every coded refusal: exit 6
+  // means the backend is alive, so letting a local refusal win would erase a
+  // backend that really is gone. Only when every failure carries a code does
+  // that code decide; two distinct codes tie-break by name, which keeps even
+  // that case order-free.
+  const failed = results.filter((result) => !result.ok);
+  if (failed.some((result) => result.code === undefined)) return EXIT.backendLost;
+  if (failed.length === 0) return EXIT.ok;
+  const codes = failed.flatMap((result) => (result.code === undefined ? [] : [result.code])).sort();
+  return exitCodeFor(codes[0] ?? '');
 }
