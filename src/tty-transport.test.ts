@@ -318,6 +318,32 @@ test('a dead surface never replays the lines buffered behind an in-flight hello'
   assert.deepEqual(host.lines, [])
 })
 
+test('a dead surface with no bound session still closes the feed', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  host.refuse = 'create failed'
+  const transport = new TtyTransport(io)
+  await transport.start(host.handlers)
+  // The refused hello finished its own bridge: no session is bound here.
+  assert.equal(host.bridge?.session, undefined)
+
+  io.broken = true
+  // An unbridged stray line answers with an echo, and that write kills the
+  // surface. Nothing is bound, but the feed must still die with it: a resumed
+  // feed with no reader piles every later line into a queue this permanently
+  // dead transport can never drain.
+  io.type('stray')
+  await until(() => io.closes === 1)
+  assert.equal(io.rawNow, false)
+
+  // A dead transport never binds again, so those lines would create an orphan.
+  assert.equal(host.bridge?.claim('session-2'), false)
+  io.broken = false
+  io.type('/attach session-3')
+  await settle()
+  assert.equal(host.hellos.length, 1)
+})
+
 test('a line typed during an in-flight hello waits for the binding', async () => {
   const io = new FakeTty()
   const host = new Host()
