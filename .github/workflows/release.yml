@@ -77,7 +77,14 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
 
+      # setup-node's `registry-url` writes `${NODE_AUTH_TOKEN}` into the user
+      # npmrc, so every step that runs pnpm pins the variable instead of leaving
+      # it to the runner's environment: an empty value expands without a
+      # credential, keeps install/build on the public registry anonymously, and
+      # is the same empty value the publish steps rely on for the OIDC exchange.
       - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ""
         run: pnpm install --frozen-lockfile
 
       - name: Resolve version
@@ -112,6 +119,7 @@ jobs:
       - name: Validate release version
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          NODE_AUTH_TOKEN: ""
         run: |
           set -euo pipefail
           TAG="v${VERSION}"
@@ -164,6 +172,8 @@ jobs:
       # Both published packages are built here: the root `build` script only
       # builds the plugin, while `dsh-sup` ships its own `lib/`.
       - name: Build
+        env:
+          NODE_AUTH_TOKEN: ""
         run: pnpm -r build
 
       # The npm dist-tag is the channel signal and is derived from the version

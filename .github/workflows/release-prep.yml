@@ -45,11 +45,11 @@ jobs:
 
       # No `registry-url` here, and do NOT copy the Release workflow's
       # `registry-url` / `NODE_AUTH_TOKEN: ""` pair into prep: that pair exists
-      # only to give npm a credentialed registry for the OIDC publish, and prep
-      # makes no npm registry request at all — its version checks are local
-      # manifest and git logic. Writing `_authToken=${NODE_AUTH_TOKEN}` here
-      # would just leave a placeholder token in `.npmrc` for a later step to
-      # pick up.
+      # only to give npm a credentialed registry for the OIDC publish. Prep
+      # never authenticates to or publishes on the registry — its install reads
+      # public packages anonymously and its version checks are local manifest
+      # and git logic — so writing `_authToken=${NODE_AUTH_TOKEN}` here would
+      # only leave a placeholder token in `.npmrc` for a later step to pick up.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
