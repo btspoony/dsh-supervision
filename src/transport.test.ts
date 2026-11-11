@@ -5,7 +5,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connect } from 'node:net'
@@ -21,6 +21,7 @@ import {
   registryPaths,
   reclaimStale,
   supervisionDir,
+  writeRegistry,
 } from 'dsh-supervision-protocol'
 import type { HelloFrame, InFrame, OutFrame } from 'dsh-supervision-protocol'
 import { SocketTransport } from './transport.js'
@@ -139,7 +140,13 @@ test('the socket, registry entry and directory are private to this user', async 
   assert.equal(statSync(transport.socketPath).mode & 0o777, 0o600)
   const entry = readRegistry(dir)[0]
   assert.ok(entry !== undefined)
-  assert.equal(statSync(join(dir, `${String(process.pid)}-${transport.socketPath.slice(-13, -5)}.json`)).mode & 0o777, 0o600)
+  // Every entry this instance wrote is private; the names come from the
+  // directory, not from slicing the socket path.
+  const files = readdirSync(dir).filter(name => name.endsWith('.json'))
+  assert.equal(files.length, 1)
+  for (const name of files) {
+    assert.equal(statSync(join(dir, name)).mode & 0o777, 0o600)
+  }
   assert.equal(entry.socket, transport.socketPath)
   await transport.close()
 })
@@ -406,15 +413,54 @@ test('a live entry whose socket vanished is reclaimed', () => {
   assert.equal(existsSync(paths.json), false)
 })
 
-test('an unparseable registry file is treated as stale', () => {
+test('an unparseable registry entry beside a live socket survives reclaim', () => {
   const dir = tempDir()
   mkdirSync(dir, { recursive: true })
+  // This entry's own pid is alive and its socket exists; a half-written file
+  // must not cost a live instance its only record.
   const paths = registryPaths(dir, process.pid, 'cafebabe')
   writeFileSync(paths.json, '{ not json')
   writeFileSync(paths.socket, '')
   assert.deepEqual(reclaimStale(dir), [])
-  assert.equal(existsSync(paths.json), false)
-  assert.equal(existsSync(paths.socket), false)
+  assert.equal(existsSync(paths.json), true)
+  assert.equal(existsSync(paths.socket), true)
+})
+
+test('a registry entry of the wrong shape is left alone', () => {
+  const dir = tempDir()
+  mkdirSync(dir, { recursive: true })
+  const paths = registryPaths(dir, 2 ** 22 + 7, '0ddba11')
+  // A pid that is provably dead, in an entry that proves nothing else.
+  writeFileSync(paths.json, '{"proto":1,"pid":"nope"}')
+  writeFileSync(paths.socket, '')
+  assert.deepEqual(reclaimStale(dir), [])
+  assert.equal(existsSync(paths.json), true)
+})
+
+test('a registry write replaces the record whole and leaves no temp file', () => {
+  const dir = tempDir()
+  mkdirSync(dir, { recursive: true })
+  const paths = registryPaths(dir, process.pid, 'feedface')
+  const first = {
+    proto: PROTO,
+    pid: process.pid,
+    socket: paths.socket,
+    startedAt: 1,
+    dshVersion: '0.0.0-test',
+  }
+  writeRegistry(paths, first)
+  const handle = openSync(paths.json, 'r')
+  try {
+    writeRegistry(paths, { ...first, startedAt: 2 })
+    // A handle opened before the write still sees the record it was opened on;
+    // an in-place truncate would have exposed the new bytes through it.
+    assert.deepEqual(JSON.parse(readFileSync(handle, 'utf8')), first)
+  } finally {
+    closeSync(handle)
+  }
+  assert.deepEqual(readdirSync(dir), [`${String(process.pid)}-feedface.json`])
+  assert.equal(statSync(paths.json).mode & 0o777, 0o600)
+  assert.deepEqual(readRegistry(dir).map(entry => entry.startedAt), [2])
 })
 
 test('a line before hello is refused', async () => {
