@@ -1,6 +1,6 @@
 {
   "name": "dsh-supervision",
-  "version": "0.1.0-alpha.1",
+  "version": "0.0.0",
   "description": "Cordis plugin: expose a running DeepSeek Harness web session to herdr-core through the dsh-sup forwarder",
   "type": "module",
   "license": "MIT",

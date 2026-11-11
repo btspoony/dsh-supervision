@@ -43,9 +43,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
-      # No `registry-url`: prep never authenticates to npm, and the `.npmrc` it
-      # writes would put a placeholder token in front of the OIDC publishing
-      # done by the Release workflow.
+      # No `registry-url` (and no `Configure npm for Trusted Publishing` step,
+      # unlike the Release workflow): it writes `_authToken=${NODE_AUTH_TOKEN}`,
+      # a placeholder token, into `.npmrc`. Prep makes no npm registry request —
+      # version checks are local manifest/git logic — so no npm config is needed
+      # here, and writing one would only leave a token around for a later step to
+      # pick up.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
