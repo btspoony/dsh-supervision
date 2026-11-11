@@ -320,8 +320,9 @@ class FakeTty implements TtyIO {
   #wake: (() => void) | undefined
   #ended = false
 
-  write(text: string): void {
+  write(text: string): boolean {
     this.out.push(text)
+    return true
   }
 
   setRaw(raw: boolean): void {

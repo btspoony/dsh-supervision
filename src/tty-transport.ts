@@ -13,8 +13,12 @@ import type { Bridge, Transport, TransportHandlers } from './transport.js'
 
 /** The terminal a `TtyTransport` renders to and reads from. */
 export interface TtyIO {
-  /** Rendered bytes: whole OSC records and echo lines. */
-  write(text: string): void
+  /**
+   * Rendered bytes: whole OSC records and echo lines.
+   * @returns false when the surface is gone (a pty that threw, a closed fd);
+   *   the caller stops reporting rather than letting the write reach the host.
+   */
+  write(text: string): boolean
   /** Complete input lines from the owning keyboard, already split. */
   lines(): AsyncIterable<string>
   /** Raw mode while a bridge is bound; the previous mode otherwise. */
@@ -37,6 +41,7 @@ export class TtyTransport implements Transport {
   #handlers: TransportHandlers | undefined
   #session: string | undefined
   #closed = false
+  #dead = false
 
   constructor(io: TtyIO) {
     this.#io = io
@@ -84,19 +89,28 @@ export class TtyTransport implements Transport {
 
   async close(): Promise<void> {
     this.#closed = true
-    const session = this.#session
-    if (session !== undefined) {
+    try {
+      const session = this.#session
+      if (session === undefined) return
       this.#release()
       this.#handlers?.bye(session)
       this.#write({ t: 'bye', reason: 'plugin-disposed' })
+    } catch {
+      // Disposal has no recovery path: the terminal is released below whatever
+      // a host teardown callback did, and a rejected close would reach the host
+      // as an unhandled rejection.
+    } finally {
+      // The terminal is released even when a teardown step throws: an attached
+      // feed and an open fd would otherwise outlive the plugin.
+      this.#io.close()
     }
-    this.#io.close()
   }
 
   /** Binds `session` here; the seam's single-owner rule. */
   #bind(session: string): boolean {
     // A hello that settles after disposal must not bind: nothing can answer it.
-    if (this.#closed) return false
+    // Neither must one that settles after the terminal died.
+    if (this.#closed || this.#dead) return false
     const previous = this.#session
     this.#session = session
     this.#io.setRaw(true)
@@ -113,8 +127,34 @@ export class TtyTransport implements Transport {
 
   /** Renders one frame to the terminal; frames with no tty rendering are dropped. */
   #write(frame: OutFrame): void {
+    // A dead surface has nothing left to say, and a failing write must never
+    // reach the host that called `send`.
+    if (this.#dead) return
     const bytes = renderFrame(frame)
-    if (bytes !== undefined) this.#io.write(bytes)
+    if (bytes === undefined) return
+    let written: boolean
+    try {
+      written = this.#io.write(bytes)
+    } catch {
+      // `EIO`/`EBADF` from a vanished pty is a state, not an exception: letting
+      // it propagate would land in a host emitter and take `dsh web` down.
+      written = false
+    }
+    if (written) return
+    this.#dead = true
+    const session = this.#session
+    if (this.#closed || session === undefined) return
+    // The surface this bridge reported through is gone, so the bridge is
+    // finished: release (raw mode back), stop reading the dead feed, then run
+    // the same `bye` a socket drop does — it drops the session's listeners and
+    // fails its parked asks closed. The transport stays mounted, not the bridge.
+    this.#release()
+    try {
+      this.#io.close()
+    } catch {
+      // Nothing left to release.
+    }
+    this.#handlers?.bye(session)
   }
 
   /** Reads lines one at a time, so an in-flight hello holds the lines behind it. */
@@ -125,10 +165,17 @@ export class TtyTransport implements Transport {
         try {
           await this.#handle(line)
         } catch (error) {
-          // Reported as the socket transport reports it; the bridge is finished
-          // and the operator retries from the same keyboard.
+          // The socket path's teardown, in its order: report the failure, then
+          // finish this bridge. `bye` is what drops the session's listeners and
+          // child records; releasing alone would orphan them. The transport
+          // stays mounted, so the operator retries from the same keyboard.
+          const session = this.#session
           this.#write({ t: 'error', code: 'internal', message: String(error) })
-          this.#release()
+          // A failed write above has already finished the bridge.
+          if (session !== undefined && this.#session === session) {
+            this.#release()
+            this.#handlers?.bye(session)
+          }
         }
       }
     } catch {

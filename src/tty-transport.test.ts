@@ -10,8 +10,8 @@ import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
 import { PROTO } from 'dsh-supervision-protocol'
 import type { HelloFrame } from 'dsh-supervision-protocol'
-import { lineFeed } from './tty.js'
-import type { LineSource } from './tty.js'
+import { lineFeed, openTtyIO } from './tty.js'
+import type { LineSource, TtyStdin } from './tty.js'
 import { TtyTransport } from './tty-transport.js'
 import type { TtyIO } from './tty-transport.js'
 import type { Bridge, TransportHandlers } from './transport.js'
@@ -51,12 +51,16 @@ class FakeTty implements TtyIO {
   readonly out: string[] = []
   readonly raw: boolean[] = []
   closes = 0
+  /** When set, every write throws: a pty the process can no longer reach. */
+  broken = false
   #queue: string[] = []
   #wake: (() => void) | undefined
   #ended = false
 
-  write(text: string): void {
+  write(text: string): boolean {
+    if (this.broken) throw new Error('EIO: terminal is gone')
     this.out.push(text)
+    return true
   }
 
   setRaw(raw: boolean): void {
@@ -104,6 +108,10 @@ class Host {
   refuse: string | undefined
   /** A hello waits on this latch before binding, to prove line serialization. */
   hold: Latch | undefined
+  /** Throws from the line handler, as a host callback that failed would. */
+  failLine = false
+  /** Throws from `bye`, as a host disposer that failed would. */
+  failBye = false
 
   readonly handlers: TransportHandlers = {
     hello: async (frame: HelloFrame, bridge: Bridge): Promise<void> => {
@@ -122,10 +130,12 @@ class Host {
     },
     line: (text: string, bridge: Bridge): void => {
       this.lines.push({ text, session: bridge.session })
+      if (this.failLine) throw new Error('steer failed')
     },
     list: () => [],
     bye: (session: string): void => {
       this.byes.push(session)
+      if (this.failBye) throw new Error('disposer failed')
     },
   }
 }
@@ -325,6 +335,8 @@ class FakeStdin extends EventEmitter implements LineSource {
   encoding: BufferEncoding | undefined
   resumed = false
   paused = false
+  /** A terminal stdin; `undefined` models a pipe, as the real field does. */
+  isTTY: boolean | undefined = true
 
   /**
    * The real stdin's `setRawMode` only exists on a terminal; this fake offers it
@@ -401,4 +413,82 @@ test('lineFeed ends on end-of-input and stop() detaches the listeners', async ()
   const never: string[] = []
   for await (const line of other.lines()) never.push(line)
   assert.deepEqual(never, [])
+})
+
+test('lineFeed frames a single large paste without a spread over its lines', async () => {
+  const stdin = new FakeStdin()
+  const feed = lineFeed(stdin)
+  // Past the engine's spread-argument ceiling (~124k on this Node build):
+  // `push(...split.lines)` throws `RangeError` right here, inside a stdin
+  // listener, which would kill the host. The whole chunk must frame instead.
+  const count = 130_000
+  assert.doesNotThrow(() => { stdin.emit('data', 'pasted\n'.repeat(count)) })
+
+  // The buffered lines still come out in order behind the paste.
+  const seen: string[] = []
+  for await (const line of feed.lines()) {
+    seen.push(line)
+    if (seen.length === 3) break
+  }
+  assert.deepEqual(seen, ['pasted', 'pasted', 'pasted'])
+  feed.stop()
+})
+
+test('a write that throws ends the bridge instead of reaching the caller', async () => {
+  const { io, host, transport } = await mounted()
+  io.out.length = 0
+  // A pty the process can no longer reach: `EIO` out of a host emitter would
+  // take the whole `dsh web` down, so the transport must contain it.
+  io.broken = true
+  assert.doesNotThrow(() => { transport.send({ t: 'echo', text: 'boom' }) })
+
+  // The bridge is finished through the same teardown a socket drop runs …
+  assert.deepEqual(host.byes, ['session-1'])
+  assert.equal(io.rawNow, false)
+  // … the dead surface is released, and nothing more is ever written to it.
+  assert.equal(io.closes, 1)
+  io.broken = false
+  assert.doesNotThrow(() => { transport.send({ t: 'echo', text: 'after' }) })
+  assert.deepEqual(io.out, [])
+  assert.deepEqual(host.byes, ['session-1'])
+})
+
+test('a throw from the line handler runs bye for the bound session, then releases', async () => {
+  const { io, host } = await mounted()
+  io.out.length = 0
+  host.failLine = true
+  io.type('steer this')
+  await until(() => host.byes.length === 1)
+
+  // The handlers' bridge is finished, not just the transport's binding: without
+  // `bye` the session's listeners and parked asks outlive it.
+  assert.deepEqual(host.byes, ['session-1'])
+  assert.equal(io.rawNow, false)
+  // The failure is still reported to the terminal, and that record stands.
+  assert.match(io.out.at(-1) ?? '', /state=error/)
+})
+
+test('close releases the terminal even when a teardown callback throws', async () => {
+  const { io, host, transport } = await mounted()
+  host.failBye = true
+  // No rejection reaches the host's dispose path.
+  await transport.close()
+  assert.deepEqual(host.byes, ['session-1'])
+  assert.equal(io.closes, 1)
+})
+
+test('openTtyIO fails closed when stdin is not a terminal', () => {
+  const pipe = new FakeStdin()
+  pipe.isTTY = undefined
+  const open = openTtyIO(pipe as TtyStdin)
+  assert.equal(open.ok, false)
+  assert.match(open.ok ? '' : open.reason, /stdin is not a terminal/)
+  // Nothing was mounted: a redirected stdin is never read as owner input.
+  assert.equal(pipe.listenerCount('data'), 0)
+  assert.equal(pipe.resumed, false)
+
+  const no = new FakeStdin()
+  no.isTTY = false
+  assert.equal(openTtyIO(no as TtyStdin).ok, false)
+  assert.equal(no.listenerCount('data'), 0)
 })

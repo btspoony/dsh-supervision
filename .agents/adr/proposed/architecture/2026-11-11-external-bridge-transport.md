@@ -102,24 +102,33 @@ with the process's own tty; § In-process transport covers that path.
 
 The tty path needs no forwarder: the process renders its `OutFrame`s through
 `renderFrame` and reads the same `parseLine` grammar the forwarder feeds, so no
-protocol rule exists twice. It claims its first session through the bare `hello`
-a plain `dsh-sup` sends (create in `process.cwd()`), and a refusal or a
-`reclaim` ends the bridge, not the transport: the owner re-enters with `/new` or
+protocol rule exists twice. It claims its first session through a synthesized
+`hello` carrying a create arm in `process.cwd()`, and a refusal or a `reclaim`
+ends the bridge, not the transport: the owner re-enters with `/new` or
 `/attach` from the same keyboard, and raw mode holds only while a session is
-bound. A terminal that cannot be opened writes the reason to stderr and mounts
-nothing, so the host keeps its sessions.
+bound. A terminal that cannot be opened — including a stdin that is not a
+terminal, since a pipe any writer can feed must never become the owner's
+command channel — writes the reason to stderr and mounts nothing, so the host
+keeps its sessions.
 
 Limits, each deliberate:
 
 - **One bridge per process.** The owner's keyboard is the single input, so
   `/attach` switches the bound session rather than adding a second; the
   seam's single-owner rule holds unchanged.
+- **One web process per terminal.** Two `dsh web` processes started inside the
+  same hc terminal both mount this transport: each synthesizes its own first
+  session, both read the same stdin and both write root records to the same
+  `/dev/tty`. This path has no registry, so nothing discovers or refuses the
+  collision; run one supervised process per terminal.
 - **No socket and no registry entry.** `dsh-sup list` cannot see a process
   started this way, and neither can a forwarder: the terminal is the only
   surface.
 - **No automatic reconnect.** A `reclaim` or a refused `hello` leaves the
   transport mounted and idle; rebinding is an explicit `/new` or `/attach`, never
-  a silent take-back of a session the supervisor no longer holds.
+  a silent take-back of a session the supervisor no longer holds. A terminal
+  that fails a write is dead rather than reconnecting: that bridge ends and
+  nothing more is reported.
 
 ### Why the forwarder owns no logic
 
@@ -317,19 +326,23 @@ by the environment:
 
 ```
 discovery = config.enabled !== false && HC_TERMINAL_ID is empty   // create socket + registry entry
-effect    = config.enabled !== false && (HC_TERMINAL_ID is set || a bridge is connected)
+effect    = config.enabled !== false && a bridge has completed `welcome`
 ```
 
 - **With `HC_TERMINAL_ID` set, nothing is created.** The tty itself is the
   discovery surface: the process reports on the terminal it was started in,
   writes no socket and no registry entry, and leaves no file a forwarder could
-  connect to.
+  connect to. Opening that terminal is the tty path's only discovery step, and
+  a terminal that cannot be opened — or a stdin that is not a terminal — mounts
+  neither layer, so the host keeps its sessions.
 - Emptied of that case, the **discovery layer** runs for a process without
   `HC_TERMINAL_ID`. It creates the `0600` socket and the registry entry, and
   nothing else: no OSC, no event subscription, no stdin read, no approval
   listener.
-- The **effect layer** mounts only with `HC_TERMINAL_ID` or a bridge that has
-  completed `welcome`. It is what scopes the emitter, the line reader and the
+- The **effect layer** mounts only after a bridge has completed `welcome` — a
+  forwarder on the socket path, this process's own synthesized `hello` on the
+  tty path. `HC_TERMINAL_ID` alone mounts no agent-facing behaviour: it is not a
+  bridge. The layer is what scopes the emitter, the line reader and the
   prepended approval answerer to the bridged session tree.
 
 A GUI-only `dsh web` has neither effect signal, so the plugin registers no
@@ -352,7 +365,7 @@ behaviour; a process inside an hc terminal exposes no such surface at all.
 | stdin line over `MAX_FRAME` | `encodeFrame` refuses it locally: nothing is written, `error:msg` names the oversized line, exit 6. The backend is alive, so this is never `backend offline` |
 | usage/no candidate/multiple `dsh web` processes | print candidates, exit 2 |
 | `hc kill w1` | kills the forwarder only. The agent, session and browser GUI keep running; approvals return to the GUI answerer |
-| browser `reclaim` | host sends `bye/reclaimed`, closes the socket; forwarder writes `clear` and exits 0; approvals return to the GUI immediately; UI banner disappears on the next poll |
+| browser `reclaim` | host sends `bye/reclaimed` and drops that bridge only. Forwarder path: the socket closes, the forwarder writes `clear` and exits 0. tty path: the process writes `clear`, restores cooked mode and stays mounted for `/new` or `/attach` — it must not exit, because exiting would drop every session the host is running. Approvals return to the GUI immediately in both cases; the UI banner disappears on the next poll |
 
 No automatic reconnect: a restarted `dsh web` is a new process with a new
 socket; the supervisor starts a new forwarder. Reconnecting would silently
@@ -394,9 +407,13 @@ back to the person already looking at the session.
 
 **Reclaim semantics**
 
-1. Host sends `{"t":"bye","reason":"reclaimed"}` and closes that bridge's socket.
-2. `dsh-sup` writes `state=clear`, exits 0; hc records a finished terminal with
-   exit 0, so the supervisor sees an explicit, non-error end.
+1. Host sends `{"t":"bye","reason":"reclaimed"}` and drops that bridge — closing
+   its socket on the forwarder path, and releasing it while the transport stays
+   mounted on the tty path.
+2. The tty path writes `state=clear` and restores cooked mode in place; the
+   forwarder writes `state=clear` and exits 0, so hc records a finished terminal
+   with exit 0. Only the forwarder exits: the host process keeps every session
+   it hosts.
 3. Approvals for that session and its subagent tree immediately fall back to the
    browser answerer; the next gated tool shows its normal card.
 4. Reconnecting is allowed: a new `dsh-sup` takes the session again and the

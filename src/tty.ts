@@ -1,9 +1,11 @@
 /**
  * The production `TtyIO`: the process's own terminal. The write side is
  * `/dev/tty` (what herdr-core reads), falling back to stdout when it is a TTY;
- * the read side is stdin, split with `splitLines` so CRLF across chunks and
- * bracketed pastes behave exactly as they do for the forwarder. Nothing here
- * throws: a missing terminal is a reported reason, not a dead `dsh web`.
+ * the read side is stdin, and only a terminal stdin is accepted, split with
+ * `splitLines` so CRLF across chunks and bracketed pastes behave exactly as
+ * they do for the forwarder. Nothing here throws: a missing terminal is a
+ * reported reason, not a dead `dsh web`, and a failed write is reported to the
+ * caller rather than raised into the host.
  */
 
 import { closeSync, openSync, writeSync } from 'node:fs'
@@ -25,6 +27,13 @@ export interface LineSource {
   pause(): unknown
 }
 
+/** The stdin surface `openTtyIO` needs, so a stub can stand in for a real one. */
+export type TtyStdin = LineSource & {
+  readonly isTTY?: boolean
+  readonly isRaw?: boolean
+  setRawMode?(raw: boolean): void
+}
+
 /**
  * stdin as an async feed of complete lines, with a way to stop waiting on it.
  * Data read before anyone reads the feed is buffered, so a line typed during
@@ -39,7 +48,8 @@ export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; s
   const onData = (chunk: string): void => {
     const split = splitLines(rest, chunk)
     rest = split.rest
-    complete.push(...split.lines)
+    // A loop, not a spread: one large paste is more lines than the argument cap.
+    for (const line of split.lines) complete.push(line)
     wake?.()
   }
   const onEnd = (): void => {
@@ -79,15 +89,37 @@ export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; s
 
 /**
  * Opens the reporting surface and the owning keyboard.
+ * @param stdin - the process's own stdin, or a stub in a test.
  * @returns the io, or the reason neither surface exists.
  */
-export function openTtyIO(): TtyOpen {
-  let write: (text: string) => void
+export function openTtyIO(stdin: TtyStdin = process.stdin): TtyOpen {
+  // The read side is the owner's keyboard or nothing: a redirected stdin is a
+  // pipe any writer can feed, and treating it as the owner would hand it the
+  // command channel. Checked first, so a refusal opens no fd.
+  if (stdin.isTTY !== true) {
+    return { ok: false, reason: 'no tty: stdin is not a terminal' }
+  }
+
+  let write: (text: string) => boolean
   let closeWriter: () => void
 
   try {
     const fd = openSync('/dev/tty', 'w')
-    write = text => { writeSync(fd, text) }
+    // shortcut: the write is still synchronous, so a stopped pty (Ctrl-S) will
+    // stall this process's event loop. An async sink would buffer without bound
+    // instead, which is worse in-process; upgrade when the terminal can be
+    // written from a child process or with bounded buffering.
+    write = text => {
+      try {
+        writeSync(fd, text)
+        return true
+      } catch {
+        // A pty that went away (`EIO`) or a stale fd (`EBADF`) is a dead
+        // surface; the caller finishes the bridge instead of throwing here,
+        // where a host emitter would turn it into a dead `dsh web`.
+        return false
+      }
+    }
     closeWriter = () => {
       try {
         closeSync(fd)
@@ -101,17 +133,21 @@ export function openTtyIO(): TtyOpen {
     if (process.stdout.isTTY !== true) {
       return { ok: false, reason: 'no tty: /dev/tty is unavailable and stdout is not a terminal' }
     }
-    write = text => { process.stdout.write(text) }
+    write = text => {
+      // A full stdout buffer is backpressure, not a dead surface; a vanished
+      // pipe reports through `error` on the stream, never through this value.
+      process.stdout.write(text)
+      return true
+    }
     closeWriter = () => {}
   }
 
-  const input = process.stdin
-  // `setRawMode` exists only on a terminal; a piped stdin has no mode to change.
-  const setMode = typeof input.setRawMode === 'function'
-    ? (raw: boolean): void => { input.setRawMode(raw) }
-    : undefined
+  // A terminal stdin is guaranteed above, so `setRawMode` is present in
+  // production; the optional call keeps a test stub without it usable.
+  const input = stdin
   /** The mode the host was in when we mounted; restored whenever unbridged. */
   const previousRaw = input.isRaw === true
+  const setMode = (raw: boolean): void => { input.setRawMode?.(raw) }
   const feed = lineFeed(input)
   let closed = false
 
@@ -122,12 +158,12 @@ export function openTtyIO(): TtyOpen {
       lines: () => feed.lines(),
       // Raw only while a bridge is bound: cooked mode keeps line editing normal
       // for the `/new` and `/attach` re-entry lines.
-      setRaw: raw => { setMode?.(raw ? true : previousRaw) },
+      setRaw: raw => { setMode(raw ? true : previousRaw) },
       close: () => {
         if (closed) return
         closed = true
         feed.stop()
-        setMode?.(previousRaw)
+        setMode(previousRaw)
         closeWriter()
       },
     },
