@@ -12,7 +12,15 @@ import { connect } from 'node:net'
 import type { Socket } from 'node:net'
 import { after, test } from 'node:test'
 import { DEFAULTS, apply, validateConfig } from './index.js'
-import type { Config, PluginContext, SessionEvent, UserMessage } from './index.js'
+import type {
+  ApprovalListener,
+  ApprovalRequest,
+  Config,
+  PluginContext,
+  SessionEvent,
+  UserMessage,
+} from './index.js'
+import type { ApprovalOutcome } from './approval.js'
 import { PROTO, readRegistry } from 'dsh-supervision-protocol'
 import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
 
@@ -52,8 +60,12 @@ class FakeHost {
   subagentRoots: Map<string, string> | undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
+  /** The options each approval listener registered with, for the prepend check. */
+  readonly approvalOptions: { readonly prepend?: boolean }[] = []
   readonly #sessionListeners = new Set<(session: { id: string }, event: SessionEvent) => void>()
   readonly #statusListeners = new Set<(payload: { agent: FakeAgent; status: 'idle' | 'running' }) => void>()
+  /** DSH's answerer chain for `approval/request`, in dispatch order. */
+  readonly #approvalListeners: ApprovalListener[] = []
   #disposer: (() => void) | undefined
 
   readonly ctx: PluginContext = {
@@ -78,7 +90,15 @@ class FakeHost {
           return root === undefined ? agent : this.agents.find(candidate => candidate.id === root) ?? agent
         },
       },
-    on: ((name: string, listener: never) => {
+    on: ((name: string, listener: never, options?: { readonly prepend?: boolean }) => {
+      if (name === 'approval/request') {
+        this.#approvalListeners.push(listener)
+        this.approvalOptions.push(options ?? {})
+        return () => {
+          const index = this.#approvalListeners.indexOf(listener)
+          if (index >= 0) this.#approvalListeners.splice(index, 1)
+        }
+      }
       const set = name === 'session/event' ? this.#sessionListeners : this.#statusListeners
       set.add(listener)
       return () => { set.delete(listener) }
@@ -103,7 +123,25 @@ class FakeHost {
     for (const listener of this.#sessionListeners) listener({ id: session }, event)
   }
 
-  /** @returns how many listeners the plugin still holds. */
+  /**
+   * Dispatch one approval question the way the host's waterfall does.
+   * @param request - the pending question.
+   * @returns the first answer, or `unavailable` when no answerer claims it.
+   */
+  async ask(request: ApprovalRequest): Promise<ApprovalOutcome> {
+    const step = async (index: number): Promise<ApprovalOutcome> => {
+      const listener = this.#approvalListeners[index]
+      return listener === undefined ? 'unavailable' : listener(request, () => step(index + 1))
+    }
+    return step(0)
+  }
+
+  /** @returns how many approval listeners the plugin holds. */
+  get approvalCount(): number {
+    return this.#approvalListeners.length
+  }
+
+  /** @returns how many session and status listeners the plugin holds. */
   get listenerCount(): number {
     return this.#sessionListeners.size + this.#statusListeners.size
   }
@@ -296,11 +334,13 @@ test('a bridge that disconnects releases its listeners', async () => {
   client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
   await client.take(1)
   assert.equal(host.listenerCount, 2)
+  assert.equal(host.approvalCount, 1, 'a live bridge is the only reason the ask listener exists')
   client.socket.end()
   for (let attempt = 0; attempt < 200 && host.listenerCount > 0; attempt += 1) {
     await new Promise<void>(resolve => { setImmediate(resolve) })
   }
   assert.equal(host.listenerCount, 0)
+  assert.equal(host.approvalCount, 0)
   host.dispose()
 })
 
@@ -560,5 +600,218 @@ test('an in-process subagent reports sub/<session> and a switch clears every chi
   assert.deepEqual(client.frames[4], { t: 'osc', data: '\u001b]7501;state=clear:id=sub/session-child\u001b\\' })
   assert.deepEqual(client.frames[5], { t: 'osc', data: '\u001b]7501;state=clear:id=session-3\u001b\\' })
   assert.deepEqual(client.frames[6], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=Yg==\u001b\\' })
+  host.dispose()
+})
+
+/** The ask id an echo line names. */
+function askIdOf(text: string): string {
+  const matched = /\[ask ([0-9a-f]{6})\]/.exec(text)
+  assert.ok(matched?.[1] !== undefined, `no ask id in: ${text}`)
+  return matched?.[1] ?? ''
+}
+
+/** The text of an echo frame, `''` for any other frame. */
+function echoText(frame: OutFrame | undefined): string {
+  return frame !== undefined && frame.t === 'echo' ? frame.text : ''
+}
+
+/** The payload of an osc frame, `''` for any other frame. */
+function oscData(frame: OutFrame | undefined): string {
+  return frame !== undefined && frame.t === 'osc' ? frame.data : ''
+}
+
+/** The `msg` of one OSC 7501 report, base64-decoded. */
+function reportedMsg(data: string): string {
+  const matched = /msg=([^:\u001b]+)/.exec(data)
+  return matched?.[1] === undefined ? '' : Buffer.from(matched[1], 'base64').toString('utf8')
+}
+
+test('a bridged ask parks as blocked, is decided by id, and a bare /y decides the next one', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+
+  // No bridge yet: no listener, so the browser's own answerer still answers.
+  assert.equal(host.approvalCount, 0)
+  assert.equal(await host.ask({ agent, toolName: 'bash', reason: 'write' }), 'unavailable')
+
+  const client = await attached(host, dir, 'session-1')
+  assert.deepEqual(host.approvalOptions, [{ prepend: true }])
+
+  const first = host.ask({ agent, toolName: 'bash', reason: 'write outside the workspace' })
+  await until(() => client.frames.length === 4, 'the parked ask')
+  const id = askIdOf(echoText(client.frames[1]))
+  assert.deepEqual(client.frames[1], { t: 'echo', text: `[ask ${id}] bash parked (session-1)` })
+  assert.match(oscData(client.frames[2]), /^\u001b\]7501;state=blocked:kind=permission:app=dsh:title=cmVwbw==:msg=/)
+  assert.equal(reportedMsg(oscData(client.frames[2])), `bash write outside the workspace [ask ${id}]`)
+  assert.deepEqual(client.frames[3], { t: 'echo', text: '[turn 0] blocked' })
+
+  client.write({ t: 'line', text: `/approve ${id}` })
+  assert.equal(await first, 'allowed-once')
+  await until(() => client.frames.length === 7, 'the decision')
+  assert.deepEqual(client.frames.slice(4), [
+    { t: 'echo', text: `[ask ${id}] bash → allowed-once (source=supervisor)` },
+    { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' },
+    { t: 'echo', text: '[turn 0] idle' },
+  ])
+
+  const second = host.ask({ agent, toolName: 'edit' })
+  await until(() => client.frames.length === 10, 'the second ask')
+  const other = askIdOf(echoText(client.frames[7]))
+  assert.equal(reportedMsg(oscData(client.frames[8])), `edit [ask ${other}]`)
+
+  client.write({ t: 'line', text: '/y' })
+  assert.equal(await second, 'allowed-once')
+  await until(() => client.frames.length === 13, 'the bare decision')
+  assert.deepEqual(client.frames[12], { t: 'echo', text: '[turn 0] idle' })
+
+  client.write({ t: 'line', text: '/approve zzz' })
+  await until(() => client.frames.length === 14, 'the unknown id')
+  assert.deepEqual(client.frames[13], { t: 'echo', text: 'no ask zzz' })
+  host.dispose()
+})
+
+test('two parked asks are named by /status, and bare /y refuses to guess', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const first = host.ask({ agent, toolName: 'bash', reason: 'one' })
+  await until(() => client.frames.length === 4, 'the first ask')
+  const second = host.ask({ agent, toolName: 'edit', reason: 'two' })
+  await until(() => client.frames.length === 5, 'the second ask')
+  const ids = [askIdOf(echoText(client.frames[1])), askIdOf(echoText(client.frames[4]))]
+  assert.notEqual(ids[0], ids[1])
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 6, 'the status line')
+  assert.deepEqual(client.frames[5], {
+    t: 'echo',
+    text: `session=session-1 state=blocked turn=0 asks=${ids.join(',')}`,
+  })
+
+  client.write({ t: 'line', text: '/y' })
+  await until(() => client.frames.length === 7, 'the refusal')
+  assert.deepEqual(client.frames[6], { t: 'echo', text: '2 asks pending; name one' })
+
+  // The older ask still names the blocked root, so settling the newer one
+  // changes nothing on the wire but the audit line.
+  client.write({ t: 'line', text: `/approve ${ids[1] ?? ''}` })
+  assert.equal(await second, 'allowed-once')
+  await until(() => client.frames.length === 8, 'the newer decision')
+  assert.deepEqual(client.frames[7], {
+    t: 'echo',
+    text: `[ask ${ids[1] ?? ''}] edit → allowed-once (source=supervisor)`,
+  })
+
+  client.write({ t: 'line', text: `/reject ${ids[0] ?? ''}` })
+  assert.equal(await first, 'rejected')
+  await until(() => client.frames.length === 11, 'the older decision')
+  assert.deepEqual(client.frames.slice(8), [
+    { t: 'echo', text: `[ask ${ids[0] ?? ''}] bash → rejected (source=supervisor)` },
+    { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' },
+    { t: 'echo', text: '[turn 0] idle' },
+  ])
+  host.dispose()
+})
+
+test('only the bridged tree claims an ask', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  const elsewhere = host.add('session-other', '/repo/other')
+  const child = host.add('session-child', '/repo')
+  host.subagentRoots = new Map([['session-child', 'session-1']])
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 3, 'both seeded child records')
+
+  assert.equal(await host.ask({ agent: elsewhere, toolName: 'bash' }), 'unavailable')
+  assert.deepEqual(client.frames.length, 3, 'another tree keeps its own answerer')
+
+  const claimed = host.ask({ agent: child, toolName: 'probe', reason: 'tree' })
+  await until(() => client.frames.length === 6, 'the tree ask')
+  const id = askIdOf(echoText(client.frames[3]))
+  assert.equal(reportedMsg(oscData(client.frames[4])), `probe tree [ask ${id}]`)
+
+  client.write({ t: 'line', text: '/y' })
+  assert.equal(await claimed, 'allowed-once')
+  host.dispose()
+})
+
+test('an asker that withdraws its ask settles it cancelled and clears the root', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const controller = new AbortController()
+  const answered = host.ask({ agent, toolName: 'bash', reason: 'write', signal: controller.signal })
+  await until(() => client.frames.length === 4, 'the parked ask')
+  const id = askIdOf(echoText(client.frames[1]))
+
+  controller.abort()
+  assert.equal(await answered, 'cancelled')
+  await until(() => client.frames.length === 7, 'the withdrawal')
+  assert.deepEqual(client.frames.slice(4), [
+    { t: 'echo', text: `[ask ${id}] bash → cancelled (source=attached)` },
+    { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' },
+    { t: 'echo', text: '[turn 0] idle' },
+  ])
+  host.dispose()
+})
+
+test('a bridge that goes away settles its parked ask cancelled', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const answered = host.ask({ agent, toolName: 'bash' })
+  await until(() => client.frames.length === 4, 'the parked ask')
+  client.socket.end()
+  assert.equal(await answered, 'cancelled')
+  host.dispose()
+})
+
+test('disposing the plugin settles a parked ask cancelled', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  await attached(host, dir, 'session-1')
+
+  const answered = host.ask({ agent, toolName: 'probe' })
+  await until(() => host.approvalCount === 1, 'the approval listener')
+  host.dispose()
+  assert.equal(await answered, 'cancelled')
+})
+
+test('a session switch is refused while an ask is parked', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  const answered = host.ask({ agent, toolName: 'bash' })
+  await until(() => client.frames.length === 5, 'the parked ask')
+  client.write({ t: 'line', text: '/attach session-2' })
+  await until(() => client.frames.length === 6, 'the refusal')
+  assert.deepEqual(client.frames[5], { t: 'echo', text: 'refused: 1 approval(s) parked' })
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 7, 'the status line')
+  assert.match(echoText(client.frames[6]), /^session=session-1 state=blocked/)
+
+  client.write({ t: 'line', text: '/n' })
+  assert.equal(await answered, 'rejected')
   host.dispose()
 })
