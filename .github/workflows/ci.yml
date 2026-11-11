@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # No explicit version: pnpm/action-setup@v4 reads `packageManager` from
+      # the root package.json, so CI runs the same pnpm the lockfile was
+      # generated with.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Workspace-wide: `includeWorkspaceRoot` makes `-r` visit the root
+      # package as well, so the plugin and both packages/* are covered.
+      - run: pnpm -r typecheck
+
+      - run: pnpm -r build
+
+      - run: pnpm -r test

@@ -16,7 +16,8 @@
   ],
   "scripts": {
     "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown",
-    "test": "pnpm build && node --test 'lib/*.test.js'"
+    "test": "pnpm build && node --test 'lib/*.test.js'",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
