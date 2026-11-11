@@ -157,6 +157,28 @@ test('a frame refused locally exits 6, never 1', async (t) => {
   assert.match(result.stderr, /frame exceeds/);
 });
 
+test('a mixed loss and refusal exits 6 whichever backend the registry yields first', async (t) => {
+  const dir = mkdtempSync('/tmp/dsh-list-');
+  const lost = dying(dir, 'a');
+  const refused = answering(dir, 'b', { t: 'error', code: 'protocol', message: 'frame exceeds 65536 bytes' });
+  t.after(() => {
+    lost.close();
+    refused.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The registry is unsorted `readdirSync`, so the file index decides which
+  // failure `Promise.all` reports first. A coded refusal outranks the bare loss
+  // either way: the exit must describe what happened, not directory order.
+  const forward = await list([lost, refused]);
+  const reversed = await list([refused, lost]);
+
+  assert.equal(forward.code, EXIT.protocol);
+  assert.equal(reversed.code, EXIT.protocol);
+  assert.deepEqual(rows(forward.stdout), [HEADER]);
+  assert.match(forward.stderr, /protocol: frame exceeds/);
+});
+
 test('a backend answering bye explains itself on stderr and exits 1', async (t) => {
   const dir = mkdtempSync('/tmp/dsh-list-');
   const good = healthy(dir, 'a', items);
@@ -170,8 +192,10 @@ test('a backend answering bye explains itself on stderr and exits 1', async (t) 
   const result = await list([good, leaving]);
 
   // A disposing backend is a lost backend for this listing, but the operator
-  // must be able to tell it from a vanished one.
+  // must be able to tell it from a vanished one — and, with several live
+  // backends answering at once, which socket said it.
   assert.equal(result.code, EXIT.backendLost);
   assert.match(result.stderr, /plugin-disposed/);
+  assert.ok(result.stderr.includes(leaving.socket), 'the bye line names its backend');
   assert.deepEqual(rows(result.stdout), expected);
 });

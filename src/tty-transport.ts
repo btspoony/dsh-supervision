@@ -155,18 +155,21 @@ export class TtyTransport implements Transport {
     }
     if (written) return
     this.#dead = true
-    const session = this.#session
-    if (this.#closed || session === undefined) return
-    // The surface this bridge reported through is gone, so the bridge is
-    // finished: release (raw mode back), stop reading the dead feed, then run
-    // the same `bye` a socket drop does — it drops the session's listeners and
-    // fails its parked asks closed. The transport stays mounted, not the bridge.
-    this.#release()
+    // The surface is gone whether or not a session is bound: close the feed
+    // first, so no line piles up in a queue this permanently dead transport can
+    // never read. `close` is idempotent, so disposal's own close stays safe.
     try {
       this.#io.close()
     } catch {
       // Nothing left to release.
     }
+    const session = this.#session
+    if (this.#closed || session === undefined) return
+    // The surface this bridge reported through is gone, so the bridge is
+    // finished: release (raw mode back), then run the same `bye` a socket drop
+    // does — it drops the session's listeners and fails its parked asks closed.
+    // The transport stays mounted, not the bridge.
+    this.#release()
     this.#teardown(session)
   }
 

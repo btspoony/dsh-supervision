@@ -28,7 +28,9 @@ export function listFrom(socket: string, cwd: string): Promise<ListResult> {
       onFrame: (frame) => {
         if (frame.t === 'sessions') settle({ ok: true, items: frame.items });
         if (frame.t === 'bye') {
-          process.stderr.write(`${frame.reason}\n`);
+          // Several backends answer at once, so the reason alone would leave the
+          // operator guessing which one left; the socket names it.
+          process.stderr.write(`${socket}: ${frame.reason}\n`);
           settle({ ok: false });
         }
         if (frame.t === 'error') {
@@ -61,7 +63,12 @@ export async function runList(entries: readonly RegistryEntry[], cwd: string): P
     .flatMap((result) => (result.ok ? result.items : []))
     .map((item) => `${item.id}\t${item.cwd}\t${item.live ? 'yes' : 'no'}\t${item.bridged ? 'yes' : '-'}`);
   process.stdout.write(`${[HEADER, ...rows].join('\n')}\n`);
-  const failed = results.find((result) => !result.ok);
-  if (failed === undefined) return EXIT.ok;
-  return failed.code === undefined ? EXIT.backendLost : exitCodeFor(failed.code);
+  // The registry order is unsorted `readdirSync`, so the exit must not depend on
+  // which failure came first: any coded refusal outranks a bare loss, and only
+  // when every failure is bare does the listing say a backend was lost. Two
+  // distinct codes tie-break by name, which keeps even that case order-free.
+  const codes = results.flatMap((result) => (result.ok || result.code === undefined ? [] : [result.code])).sort();
+  const [code] = codes;
+  if (code !== undefined) return exitCodeFor(code);
+  return results.every((result) => result.ok) ? EXIT.ok : EXIT.backendLost;
 }
