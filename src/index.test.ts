@@ -12,7 +12,15 @@ import { connect } from 'node:net'
 import type { Socket } from 'node:net'
 import { after, test } from 'node:test'
 import { DEFAULTS, apply, validateConfig } from './index.js'
-import type { Config, PluginContext, SessionEvent } from './index.js'
+import type {
+  ApprovalListener,
+  ApprovalRequest,
+  Config,
+  PluginContext,
+  SessionEvent,
+  UserMessage,
+} from './index.js'
+import type { ApprovalOutcome } from './approval.js'
 import { PROTO, readRegistry } from 'dsh-supervision-protocol'
 import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
 
@@ -35,6 +43,58 @@ interface FakeAgent {
   id: string
   status: 'idle' | 'running'
   session: { id: string; header: { cwd?: string } }
+  steer(message: UserMessage): void
+  cancel(cause: { readonly kind: 'user' }): void
+}
+
+/** One fake response: status, headers and body the handler wrote. */
+class FakeResponse {
+  statusCode = 0
+  readonly headers = new Map<string, string>()
+  body = ''
+
+  setHeader(name: string, value: string): void {
+    this.headers.set(name.toLowerCase(), value)
+  }
+
+  end(body?: string): void {
+    this.body = body ?? ''
+  }
+
+  /** @returns the parsed JSON body. */
+  get json(): unknown {
+    return JSON.parse(this.body) as unknown
+  }
+}
+
+/** A fake `ctx.webServer` that answers a request through its registered route. */
+class FakeServer {
+  readonly #handlers = new Map<string, (req: unknown, res: FakeResponse) => void | Promise<void>>()
+
+  /** The paths currently registered. */
+  get paths(): readonly string[] {
+    return [...this.#handlers.keys()]
+  }
+
+  register(route: {
+    readonly kind: 'exact'
+    readonly path: string
+    readonly handler: (req: never, res: never) => void | Promise<void>
+  }): () => void {
+    this.#handlers.set(route.path, route.handler as (req: unknown, res: FakeResponse) => void | Promise<void>)
+    return () => { this.#handlers.delete(route.path) }
+  }
+
+  /** Call the route at `path` with a request of `method`, `headers` and `body`. */
+  async call(path: string, method: string, headers: Record<string, string>, body = ''): Promise<FakeResponse> {
+    const handler = this.#handlers.get(path)
+    assert.ok(handler !== undefined, `no route at ${path}`)
+    const chunks = [Buffer.from(body, 'utf8')]
+    const req = { method, headers, async *[Symbol.asyncIterator]() { yield* chunks } }
+    const res = new FakeResponse()
+    await handler(req, res)
+    return res
+  }
 }
 
 /** A host context whose agents are in-memory and whose events the test emits. */
@@ -42,34 +102,77 @@ class FakeHost {
   readonly agents: FakeAgent[] = []
   readonly created: string[] = []
   readonly resumed: string[] = []
+  /** Every steer the plugin delivered, with the session it went to. */
+  readonly steered: { readonly session: string; readonly message: UserMessage }[] = []
+  /** Every cancel the plugin delivered, with the session it went to. */
+  readonly cancelled: string[] = []
+  /** Stands in for `ctx.get('subagents')`; undefined mimics a host without one. */
+  subagentRoots: Map<string, string> | undefined
+  /** Sessions whose resume must fail, for the attach-failure branch. */
+  readonly failResume = new Set<string>()
+  /** The options each approval listener registered with, for the prepend check. */
+  readonly approvalOptions: { readonly prepend?: boolean }[] = []
+  /** The fake webserver; `attachServer: false` mimics a CLI-only host. */
+  readonly server = new FakeServer()
+  attachServer = true
   readonly #sessionListeners = new Set<(session: { id: string }, event: SessionEvent) => void>()
   readonly #statusListeners = new Set<(payload: { agent: FakeAgent; status: 'idle' | 'running' }) => void>()
+  /** DSH's answerer chain for `approval/request`, in dispatch order. */
+  readonly #approvalListeners: ApprovalListener[] = []
   #disposer: (() => void) | undefined
 
-  readonly ctx: PluginContext = {
-    agents: {
-      get: (id: string) => this.agents.find(agent => agent.id === id),
-      list: () => this.agents,
-      create: async ({ sessionId, meta }) => {
-        this.created.push(sessionId)
-        return { agent: this.add(sessionId, meta.cwd) }
+  /** The context `apply` receives; a CLI-only host mounts no webserver. */
+  get ctx(): PluginContext {
+    return {
+      agents: {
+        get: (id: string) => this.agents.find(agent => agent.id === id),
+        list: () => this.agents,
+        create: async ({ sessionId, meta }) => {
+          this.created.push(sessionId)
+          return { agent: this.add(sessionId, meta.cwd) }
+        },
+        resume: async ({ resumeSessionId }) => {
+          if (this.failResume.has(resumeSessionId)) throw new Error('no such session')
+          this.resumed.push(resumeSessionId)
+          return { agent: this.add(resumeSessionId, '/repo/resumed') }
+        },
       },
-      resume: async ({ resumeSessionId }) => {
-        this.resumed.push(resumeSessionId)
-        return { agent: this.add(resumeSessionId, '/repo/resumed') }
+      get: (name: string) => {
+        if (name === 'webServer') return this.attachServer ? this.server : undefined
+        if (name !== 'subagents' || this.subagentRoots === undefined) return undefined
+        return {
+          rootOf: (agent: FakeAgent) => {
+            const root = this.subagentRoots?.get(agent.id)
+            return root === undefined ? agent : this.agents.find(candidate => candidate.id === root) ?? agent
+          },
+        }
       },
-    },
-    on: ((name: string, listener: never) => {
-      const set = name === 'session/event' ? this.#sessionListeners : this.#statusListeners
-      set.add(listener)
-      return () => { set.delete(listener) }
-    }) as PluginContext['on'],
-    effect: setup => { this.#disposer = setup() },
+      on: ((name: string, listener: never, options?: { readonly prepend?: boolean }) => {
+        if (name === 'approval/request') {
+          this.#approvalListeners.push(listener)
+          this.approvalOptions.push(options ?? {})
+          return () => {
+            const index = this.#approvalListeners.indexOf(listener)
+            if (index >= 0) this.#approvalListeners.splice(index, 1)
+          }
+        }
+        const set = name === 'session/event' ? this.#sessionListeners : this.#statusListeners
+        set.add(listener)
+        return () => { set.delete(listener) }
+      }) as PluginContext['on'],
+      effect: setup => { this.#disposer = setup() },
+    }
   }
 
   /** Register an agent without going through `apply`. */
   add(id: string, cwd: string): FakeAgent {
-    const agent: FakeAgent = { id, status: 'idle', session: { id, header: { cwd } } }
+    const agent: FakeAgent = {
+      id,
+      status: 'idle',
+      session: { id, header: { cwd } },
+      steer: message => { this.steered.push({ session: id, message }) },
+      cancel: cause => { this.cancelled.push(`${id}:${cause.kind}`) },
+    }
     this.agents.push(agent)
     return agent
   }
@@ -78,7 +181,25 @@ class FakeHost {
     for (const listener of this.#sessionListeners) listener({ id: session }, event)
   }
 
-  /** @returns how many listeners the plugin still holds. */
+  /**
+   * Dispatch one approval question the way the host's waterfall does.
+   * @param request - the pending question.
+   * @returns the first answer, or `unavailable` when no answerer claims it.
+   */
+  async ask(request: ApprovalRequest): Promise<ApprovalOutcome> {
+    const step = async (index: number): Promise<ApprovalOutcome> => {
+      const listener = this.#approvalListeners[index]
+      return listener === undefined ? 'unavailable' : listener(request, () => step(index + 1))
+    }
+    return step(0)
+  }
+
+  /** @returns how many approval listeners the plugin holds. */
+  get approvalCount(): number {
+    return this.#approvalListeners.length
+  }
+
+  /** @returns how many session and status listeners the plugin holds. */
   get listenerCount(): number {
     return this.#sessionListeners.size + this.#statusListeners.size
   }
@@ -125,6 +246,14 @@ class Client {
   async take(count: number): Promise<readonly OutFrame[]> {
     while (this.#frames.length < count) await new Promise<void>(resolve => { this.#wake = resolve })
     return this.#frames.slice(0, count)
+  }
+
+  /** Resolve once the peer closed the connection. */
+  async closed(): Promise<void> {
+    await new Promise<void>(resolve => {
+      if (this.socket.destroyed) { resolve(); return }
+      this.socket.once('close', () => { resolve() })
+    })
   }
 
   /** Frames received so far, for assertions that expect no more. */
@@ -271,11 +400,13 @@ test('a bridge that disconnects releases its listeners', async () => {
   client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
   await client.take(1)
   assert.equal(host.listenerCount, 2)
+  assert.equal(host.approvalCount, 1, 'a live bridge is the only reason the ask listener exists')
   client.socket.end()
   for (let attempt = 0; attempt < 200 && host.listenerCount > 0; attempt += 1) {
     await new Promise<void>(resolve => { setImmediate(resolve) })
   }
   assert.equal(host.listenerCount, 0)
+  assert.equal(host.approvalCount, 0)
   host.dispose()
 })
 
@@ -341,5 +472,511 @@ test('programStatus off sends no OSC at all', async () => {
   const frames = await client.take(2)
   assert.equal(frames.some(frame => frame.t === 'osc'), false)
   assert.deepEqual(frames[1], { t: 'echo', text: '[turn 0] working' })
+  host.dispose()
+})
+
+/** The session map of a state payload, for assertions on one entry. */
+function sessionsOf(payload: unknown): Record<string, { bridged: true; terminal: string; pid: number; since: number; asks: readonly string[] }> {
+  assert.ok(payload !== null && typeof payload === 'object')
+  const sessions = Reflect.get(payload, 'sessions') as unknown
+  assert.ok(sessions !== null && typeof sessions === 'object' && !Array.isArray(sessions))
+  return sessions as Record<string, { bridged: true; terminal: string; pid: number; since: number; asks: readonly string[] }>
+}
+
+/** Poll without timers: the runner only moves forward on `setImmediate`. */
+async function until(predicate: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+  }
+  throw new Error(`timed out waiting for ${what}`)
+}
+
+/** A client already attached and past its welcome. */
+async function attached(host: FakeHost, dir: string, session: string): Promise<Client> {
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: session })
+  await client.take(1)
+  return client
+}
+
+test('a plain line steers the attached session and a blank one does nothing', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '   ' })
+  client.write({ t: 'line', text: 'run the tests\r\n' })
+  await until(() => host.steered.length === 1, 'one steer')
+  await new Promise<void>(resolve => { setImmediate(resolve) })
+
+  assert.equal(host.steered.length, 1)
+  const [delivered] = host.steered
+  assert.equal(delivered?.session, 'session-1')
+  assert.equal(delivered?.message.role, 'user')
+  assert.equal(delivered?.message.source.kind, 'user')
+  assert.deepEqual(delivered?.message.content, [{ type: 'text', text: 'run the tests' }])
+  assert.ok(Object.isFrozen(delivered?.message))
+  assert.deepEqual(client.frames.map(frame => frame.t), ['welcome'], 'a line alone reports nothing')
+  host.dispose()
+})
+
+test('/cancel cancels the attached agent as the operator', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  client.write({ t: 'line', text: '/cancel' })
+  await until(() => host.cancelled.length === 1, 'one cancel')
+  assert.deepEqual(host.cancelled, ['session-1:user'])
+  assert.deepEqual(host.steered, [])
+  host.dispose()
+})
+
+test('/status echoes one line and malformed input never reaches the agent', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '/status' })
+  client.write({ t: 'line', text: '/help' })
+  client.write({ t: 'line', text: '/attach nope' })
+  client.write({ t: 'line', text: '/y' })
+  await until(() => client.frames.length === 5, 'four echoes')
+  assert.deepEqual(client.frames.slice(1), [
+    { t: 'echo', text: 'session=session-1 state=idle turn=0 asks=-' },
+    { t: 'echo', text: 'unknown command /help' },
+    { t: 'echo', text: 'unknown command /attach' },
+    { t: 'echo', text: 'no approval pending' },
+  ])
+  assert.deepEqual(host.steered, [], 'no diagnostic reaches the agent')
+  host.dispose()
+})
+
+test('/attach switches the bridge without a second welcome or a leaked listener', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  client.write({ t: 'line', text: '/attach session-2' })
+  await until(() => client.frames.length === 6, 'the switch')
+  assert.deepEqual(client.frames.map(frame => frame.t), ['welcome', 'osc', 'osc', 'osc', 'echo', 'osc'])
+  // The old child record is cleared, the new root reported, then the old session is a child.
+  assert.deepEqual(client.frames[2], { t: 'osc', data: '\u001b]7501;state=clear:id=session-2\u001b\\' })
+  assert.deepEqual(client.frames[3], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=d2Vi\u001b\\' })
+  assert.deepEqual(client.frames[5], { t: 'osc', data: '\u001b]7501;state=idle:id=session-1\u001b\\' })
+  assert.equal(client.frames.filter(frame => frame.t === 'welcome').length, 1, 'a switch never re-welcomes')
+  assert.equal(host.listenerCount, 2, 'the previous session listeners were released')
+
+  client.write({ t: 'line', text: 'after the switch' })
+  await until(() => host.steered.length === 1, 'the steer')
+  assert.equal(host.steered[0]?.session, 'session-2')
+  host.dispose()
+})
+
+test('a failed attach echoes the reason and keeps the current session', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.failResume.add('session-gone')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '/attach session-gone' })
+  await until(() => client.frames.length === 2, 'the refusal')
+  assert.deepEqual(client.frames[1], { t: 'echo', text: 'attach failed: no such session' })
+
+  client.write({ t: 'line', text: 'still here' })
+  await until(() => host.steered.length === 1, 'the steer')
+  assert.equal(host.steered[0]?.session, 'session-1')
+  host.dispose()
+})
+
+test('/new creates a session in the current cwd, attaches it, and does not re-welcome', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '/new' })
+  await until(() => client.frames.length === 4, 'the new root and the old session as its child')
+  const created = host.created[0]
+  assert.ok(created !== undefined && created.startsWith('session-'))
+  assert.equal(host.agents.find(agent => agent.id === created)?.session.header.cwd, '/repo')
+  assert.deepEqual(client.frames[1], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' })
+  assert.deepEqual(client.frames[2], { t: 'echo', text: '[turn 0] idle' })
+  assert.deepEqual(client.frames[3], { t: 'osc', data: '\u001b]7501;state=idle:id=session-1\u001b\\' })
+  assert.equal(client.frames.filter(frame => frame.t === 'welcome').length, 1)
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 5, 'the status line')
+  assert.deepEqual(client.frames[4], {
+    t: 'echo',
+    text: `session=${created ?? ''} state=idle turn=0 asks=-`,
+  })
+  host.dispose()
+})
+
+test('a non-attached live session is a child record that never moves the root turn', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+  assert.deepEqual(client.frames[1], { t: 'osc', data: '\u001b]7501;state=idle:id=session-2\u001b\\' })
+
+  host.emit('session-2', { type: 'turn/start', data: { turn: 1 } })
+  await until(() => client.frames.length === 3, 'the child turn start')
+  assert.deepEqual(client.frames[2], { t: 'osc', data: '\u001b]7501;state=working:id=session-2\u001b\\' })
+
+  host.emit('session-2', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await until(() => client.frames.length === 4, 'the child turn end')
+  assert.deepEqual(client.frames[3], { t: 'osc', data: '\u001b]7501;state=done:id=session-2\u001b\\' })
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 5, 'the root status')
+  assert.deepEqual(client.frames[4], { t: 'echo', text: 'session=session-1 state=idle turn=0 asks=-' })
+  host.dispose()
+})
+
+test('an in-process subagent reports sub/<session> and a switch clears every child record', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-child', '/repo')
+  host.add('session-3', '/repo/b')
+  host.subagentRoots = new Map([['session-child', 'session-1']])
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 3, 'both child records')
+  assert.deepEqual(client.frames[1], { t: 'osc', data: '\u001b]7501;state=idle:id=sub/session-child\u001b\\' })
+  assert.deepEqual(client.frames[2], { t: 'osc', data: '\u001b]7501;state=idle:id=session-3\u001b\\' })
+
+  host.emit('session-child', { type: 'turn/start', data: { turn: 1 } })
+  await until(() => client.frames.length === 4, 'the subagent turn start')
+  assert.deepEqual(client.frames[3], { t: 'osc', data: '\u001b]7501;state=working:id=sub/session-child\u001b\\' })
+
+  client.write({ t: 'line', text: '/attach session-3' })
+  await until(() => client.frames.length === 10, 'the switch and its child records')
+  assert.deepEqual(client.frames[4], { t: 'osc', data: '\u001b]7501;state=clear:id=sub/session-child\u001b\\' })
+  assert.deepEqual(client.frames[5], { t: 'osc', data: '\u001b]7501;state=clear:id=session-3\u001b\\' })
+  assert.deepEqual(client.frames[6], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=Yg==\u001b\\' })
+  host.dispose()
+})
+
+/** The ask id an echo line names. */
+function askIdOf(text: string): string {
+  const matched = /\[ask ([0-9a-f]{6})\]/.exec(text)
+  assert.ok(matched?.[1] !== undefined, `no ask id in: ${text}`)
+  return matched?.[1] ?? ''
+}
+
+/** The text of an echo frame, `''` for any other frame. */
+function echoText(frame: OutFrame | undefined): string {
+  return frame !== undefined && frame.t === 'echo' ? frame.text : ''
+}
+
+/** The payload of an osc frame, `''` for any other frame. */
+function oscData(frame: OutFrame | undefined): string {
+  return frame !== undefined && frame.t === 'osc' ? frame.data : ''
+}
+
+/** The `msg` of one OSC 7501 report, base64-decoded. */
+function reportedMsg(data: string): string {
+  const matched = /msg=([^:\u001b]+)/.exec(data)
+  return matched?.[1] === undefined ? '' : Buffer.from(matched[1], 'base64').toString('utf8')
+}
+
+test('a bridged ask parks as blocked, is decided by id, and a bare /y decides the next one', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+
+  // No bridge yet: no listener, so the browser's own answerer still answers.
+  assert.equal(host.approvalCount, 0)
+  assert.equal(await host.ask({ agent, toolName: 'bash', reason: 'write' }), 'unavailable')
+
+  const client = await attached(host, dir, 'session-1')
+  assert.deepEqual(host.approvalOptions, [{ prepend: true }])
+
+  const first = host.ask({ agent, toolName: 'bash', reason: 'write outside the workspace' })
+  await until(() => client.frames.length === 4, 'the parked ask')
+  const id = askIdOf(echoText(client.frames[1]))
+  assert.deepEqual(client.frames[1], { t: 'echo', text: `[ask ${id}] bash parked (session-1)` })
+  assert.match(oscData(client.frames[2]), /^\u001b\]7501;state=blocked:kind=permission:app=dsh:title=cmVwbw==:msg=/)
+  assert.equal(reportedMsg(oscData(client.frames[2])), `bash write outside the workspace [ask ${id}]`)
+  assert.deepEqual(client.frames[3], { t: 'echo', text: '[turn 0] blocked' })
+
+  client.write({ t: 'line', text: `/approve ${id}` })
+  assert.equal(await first, 'allowed-once')
+  await until(() => client.frames.length === 7, 'the decision')
+  assert.deepEqual(client.frames.slice(4), [
+    { t: 'echo', text: `[ask ${id}] bash → allowed-once (source=supervisor)` },
+    { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' },
+    { t: 'echo', text: '[turn 0] idle' },
+  ])
+
+  const second = host.ask({ agent, toolName: 'edit' })
+  await until(() => client.frames.length === 10, 'the second ask')
+  const other = askIdOf(echoText(client.frames[7]))
+  assert.equal(reportedMsg(oscData(client.frames[8])), `edit [ask ${other}]`)
+
+  client.write({ t: 'line', text: '/y' })
+  assert.equal(await second, 'allowed-once')
+  await until(() => client.frames.length === 13, 'the bare decision')
+  assert.deepEqual(client.frames[12], { t: 'echo', text: '[turn 0] idle' })
+
+  client.write({ t: 'line', text: '/approve zzz' })
+  await until(() => client.frames.length === 14, 'the unknown id')
+  assert.deepEqual(client.frames[13], { t: 'echo', text: 'no ask zzz' })
+  host.dispose()
+})
+
+test('two parked asks are named by /status, and bare /y refuses to guess', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const first = host.ask({ agent, toolName: 'bash', reason: 'one' })
+  await until(() => client.frames.length === 4, 'the first ask')
+  const second = host.ask({ agent, toolName: 'edit', reason: 'two' })
+  await until(() => client.frames.length === 5, 'the second ask')
+  const ids = [askIdOf(echoText(client.frames[1])), askIdOf(echoText(client.frames[4]))]
+  assert.notEqual(ids[0], ids[1])
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 6, 'the status line')
+  assert.deepEqual(client.frames[5], {
+    t: 'echo',
+    text: `session=session-1 state=blocked turn=0 asks=${ids.join(',')}`,
+  })
+
+  client.write({ t: 'line', text: '/y' })
+  await until(() => client.frames.length === 7, 'the refusal')
+  assert.deepEqual(client.frames[6], { t: 'echo', text: '2 asks pending; name one' })
+
+  // The older ask still names the blocked root, so settling the newer one
+  // changes nothing on the wire but the audit line.
+  client.write({ t: 'line', text: `/approve ${ids[1] ?? ''}` })
+  assert.equal(await second, 'allowed-once')
+  await until(() => client.frames.length === 8, 'the newer decision')
+  assert.deepEqual(client.frames[7], {
+    t: 'echo',
+    text: `[ask ${ids[1] ?? ''}] edit → allowed-once (source=supervisor)`,
+  })
+
+  client.write({ t: 'line', text: `/reject ${ids[0] ?? ''}` })
+  assert.equal(await first, 'rejected')
+  await until(() => client.frames.length === 11, 'the older decision')
+  assert.deepEqual(client.frames.slice(8), [
+    { t: 'echo', text: `[ask ${ids[0] ?? ''}] bash → rejected (source=supervisor)` },
+    { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' },
+    { t: 'echo', text: '[turn 0] idle' },
+  ])
+  host.dispose()
+})
+
+test('only the bridged tree claims an ask', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  const elsewhere = host.add('session-other', '/repo/other')
+  const child = host.add('session-child', '/repo')
+  host.subagentRoots = new Map([['session-child', 'session-1']])
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 3, 'both seeded child records')
+
+  assert.equal(await host.ask({ agent: elsewhere, toolName: 'bash' }), 'unavailable')
+  assert.deepEqual(client.frames.length, 3, 'another tree keeps its own answerer')
+
+  const claimed = host.ask({ agent: child, toolName: 'probe', reason: 'tree' })
+  await until(() => client.frames.length === 6, 'the tree ask')
+  const id = askIdOf(echoText(client.frames[3]))
+  assert.equal(reportedMsg(oscData(client.frames[4])), `probe tree [ask ${id}]`)
+
+  client.write({ t: 'line', text: '/y' })
+  assert.equal(await claimed, 'allowed-once')
+  host.dispose()
+})
+
+test('an asker that withdraws its ask settles it cancelled and clears the root', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const controller = new AbortController()
+  const answered = host.ask({ agent, toolName: 'bash', reason: 'write', signal: controller.signal })
+  await until(() => client.frames.length === 4, 'the parked ask')
+  const id = askIdOf(echoText(client.frames[1]))
+
+  controller.abort()
+  assert.equal(await answered, 'cancelled')
+  await until(() => client.frames.length === 7, 'the withdrawal')
+  assert.deepEqual(client.frames.slice(4), [
+    { t: 'echo', text: `[ask ${id}] bash → cancelled (source=attached)` },
+    { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' },
+    { t: 'echo', text: '[turn 0] idle' },
+  ])
+  host.dispose()
+})
+
+test('a bridge that goes away settles its parked ask cancelled', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const answered = host.ask({ agent, toolName: 'bash' })
+  await until(() => client.frames.length === 4, 'the parked ask')
+  client.socket.end()
+  assert.equal(await answered, 'cancelled')
+  host.dispose()
+})
+
+test('disposing the plugin settles a parked ask cancelled', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  await attached(host, dir, 'session-1')
+
+  const answered = host.ask({ agent, toolName: 'probe' })
+  await until(() => host.approvalCount === 1, 'the approval listener')
+  host.dispose()
+  assert.equal(await answered, 'cancelled')
+})
+
+test('a session switch is refused while an ask is parked', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  const answered = host.ask({ agent, toolName: 'bash' })
+  await until(() => client.frames.length === 5, 'the parked ask')
+  client.write({ t: 'line', text: '/attach session-2' })
+  await until(() => client.frames.length === 6, 'the refusal')
+  assert.deepEqual(client.frames[5], { t: 'echo', text: 'refused: 1 approval(s) parked' })
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 7, 'the status line')
+  assert.match(echoText(client.frames[6]), /^session=session-1 state=blocked/)
+
+  client.write({ t: 'line', text: '/n' })
+  assert.equal(await answered, 'rejected')
+  host.dispose()
+})
+
+test('the state route reports one entry per live bridge and no entry without one', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir, programStatus: false }))
+  assert.deepEqual(host.server.paths, ['/dsh-supervision/state', '/dsh-supervision/reclaim'])
+
+  const empty = await host.server.call('/dsh-supervision/state', 'GET', {})
+  assert.deepEqual(empty.json, { proto: 1, sessions: {} })
+
+  const client = await attached(host, dir, 'session-1')
+  const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
+  assert.deepEqual(Object.keys(sessions), ['session-1'])
+  const entry = sessions['session-1']
+  assert.ok(entry !== undefined)
+  assert.equal(entry.bridged, true)
+  assert.equal(entry.terminal, process.env['HC_TERMINAL_NAME'] ?? 'dsh-sup')
+  assert.equal(entry.pid, process.pid)
+  assert.equal(typeof entry.since, 'number')
+  assert.deepEqual(entry.asks, [])
+
+  client.socket.end()
+  await until(() => host.listenerCount === 0, 'the bridge to drop')
+  const after = await host.server.call('/dsh-supervision/state', 'GET', {})
+  assert.deepEqual(after.json, { proto: 1, sessions: {} })
+  host.dispose()
+})
+
+test('reclaim hands the session back, tells the forwarder why, and is idempotent', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  assert.equal(host.listenerCount, 2)
+
+  const body = JSON.stringify({ session: 'session-1' })
+  const first = await host.server.call('/dsh-supervision/reclaim', 'POST', { 'content-type': 'application/json' }, body)
+  assert.equal(first.statusCode, 200)
+  assert.deepEqual(first.json, { reclaimed: true })
+
+  // The forwarder reads the goodbye and its socket is closed behind it.
+  await until(() => client.frames.some(frame => frame.t === 'bye'), 'the goodbye frame')
+  assert.deepEqual(client.frames.at(-1), { t: 'bye', reason: 'reclaimed' })
+  await client.closed()
+
+  // Cleanup ran with the hand-back: listeners are gone and the state is empty.
+  assert.equal(host.listenerCount, 0)
+  assert.deepEqual((await host.server.call('/dsh-supervision/state', 'GET', {})).json, { proto: 1, sessions: {} })
+
+  const second = await host.server.call('/dsh-supervision/reclaim', 'POST', { 'content-type': 'application/json' }, body)
+  assert.equal(second.statusCode, 409)
+  assert.deepEqual(second.json, { reclaimed: false })
+  host.dispose()
+})
+
+test('reclaim answers 415 without a JSON content type and 400 for a bad body', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir, programStatus: false }))
+  const client = await attached(host, dir, 'session-1')
+  const state = await host.server.call('/dsh-supervision/state', 'GET', {})
+
+  const wrongType = await host.server.call(
+    '/dsh-supervision/reclaim',
+    'POST',
+    { 'content-type': 'text/plain' },
+    '{"session":"session-1"}',
+  )
+  assert.equal(wrongType.statusCode, 415)
+  const badBody = await host.server.call('/dsh-supervision/reclaim', 'POST', { 'content-type': 'application/json' }, '{}')
+  assert.equal(badBody.statusCode, 400)
+
+  // Neither attempt touched the bridge.
+  assert.equal(host.listenerCount, 2)
+  assert.deepEqual((await host.server.call('/dsh-supervision/state', 'GET', {})).json, state.json)
+  client.socket.end()
+  host.dispose()
+})
+
+test('a host without a webserver mounts no routes and keeps its socket', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.attachServer = false
+  apply(host.ctx, config({ socketDir: dir }))
+  assert.deepEqual(host.server.paths, [])
+  assert.ok(existsSync(await listening(dir)))
   host.dispose()
 })

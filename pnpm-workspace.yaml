@@ -2,3 +2,7 @@ packages:
   - "packages/*"
 
 includeWorkspaceRoot: true
+
+permissions:
+  tsdown:
+    skills: true

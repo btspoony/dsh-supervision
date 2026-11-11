@@ -58,6 +58,12 @@ export interface TransportHandlers {
 export interface Transport {
   start(handlers: TransportHandlers): Promise<void>
   send(frame: OutFrame, session?: string): void
+  /**
+   * Hand one session back to its GUI owner: tell the forwarder why, end its
+   * socket, and drop the binding.
+   * @returns whether a live bridge held the session.
+   */
+  reclaim(session: string): boolean
   close(): Promise<void>
 }
 
@@ -173,6 +179,21 @@ export class SocketTransport implements Transport {
     this.#bridged.get(session)?.send(frame)
   }
 
+  reclaim(session: string): boolean {
+    const connection = this.#bridged.get(session)
+    if (connection === undefined) return false
+    // Detach first: the answer the browser polls must agree with the answer this
+    // call returns, whether or not the peer has read its goodbye yet.
+    this.#bridged.delete(session)
+    connection.session = undefined
+    // Cleanup runs before the socket ends, so the child-record frames it writes
+    // still leave; the forwarder then reads the goodbye and reports `clear`.
+    this.#handlers?.bye(session)
+    connection.send({ t: 'bye', reason: 'reclaimed' })
+    connection.close()
+    return true
+  }
+
   async close(): Promise<void> {
     const server = this.#server
     this.#server = undefined
@@ -205,6 +226,11 @@ export class SocketTransport implements Transport {
   }
 
   #claim(connection: Connection, session: string): boolean {
+    // A `hello`, `/new` or `/attach` can finish binding after the forwarder died.
+    // Binding it then would report the session `bridged` with no owner and
+    // refuse every later attach, so a connection the transport no longer owns
+    // (or whose socket is already gone) never claims.
+    if (!this.#connections.has(connection) || connection.socket.destroyed) return false
     const held = this.#bridged.get(session)
     if (held !== undefined && held !== connection) return false
     // A connection that switches sessions releases the old one: leaving it

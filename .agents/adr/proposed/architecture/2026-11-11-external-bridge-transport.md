@@ -240,6 +240,14 @@ is parked. `steer()` starts a turn on an idle agent
 (`packages/core/agent/src/runtime-types.ts:254`), so there is no separate
 follow-up branch.
 
+The ask id is assigned by the plugin, not read from DSH: `ApprovalRequestEvent`
+carries no id (`packages/interaction/user-approval/src/types.ts:80`), and the
+internal `ApprovalRequestId` exists only in the `approval/asked` session event.
+Pairing by `toolName`/`callId` is rejected as racy for concurrent asks. The
+plugin mints a 6-hex id per parked ask, unique among live asks, and reports it in
+the root `msg`, `/status` and the audit echo, so one supervisor command settles
+any ask in the bridged tree without routing.
+
 While the root is `blocked`, hc refuses `send` without `--force`. That is the
 human gate by design: a supervisor escalates deliberately with
 `hc send --force w1 "/approve <id>"`, and the plugin echoes one audit line per
@@ -315,13 +323,18 @@ A takeover that the person in the browser cannot see is unacceptable: they would
 watch approvals disappear with no explanation. Two surfaces are therefore part
 of the product, not an optional extra.
 
-**Host routes** (registered on `ctx.webserver`, which accepts named routes from
-any plugin — `packages/host/webserver/src/index.ts:445`):
+**Host routes** (registered on `ctx.webServer`, which accepts named routes from
+any plugin — `packages/host/webserver/src/index.ts:398,445`; the service is
+registered as `'webServer'`, so `ctx.get('webServer')` is the reflective read):
 
 | Route | Method | Body |
 |---|---|---|
 | `/dsh-supervision/state` | GET | `{"sessions":{"<id>":{"bridged":true,"terminal":"w1","pid":51234,"since":1762…,"asks":["3f9a"]}}}` |
 | `/dsh-supervision/reclaim` | POST | `{"session":"<id>"}` → 200 `{"reclaimed":true}`; 409 when no bridge |
+
+`terminal` is `HC_TERMINAL_NAME` when the host exports it, else `dsh-sup`:
+herdr-core's chosen terminal name is not readable from the supervised process, so
+the `w1` in the examples is illustrative input, not a receivable field.
 
 `reclaim` requires `Content-Type: application/json` so a cross-origin simple
 form post cannot reach it; the only consequence it can cause is handing control
@@ -361,7 +374,7 @@ GUI and hc are two views of one session, not two sessions.
 |---|---|---|
 | Plugin (host) | Root package `dsh-supervision`, TypeScript → `lib/` via `tsc`, ESM, `exports` map | Matches DSH package shape; loaders resolve built JS |
 | Plugin (browser) | Same package, `./client` export, `dsh.client` roster entry, React slot components | The shipped DSH way to add UI (`packages/client/ui-approval` is the model) |
-| UI → host channel | `ctx.webserver` named routes (`GET /dsh-supervision/state`, `POST /dsh-supervision/reclaim`) | No Typert generator, no remote-event allowlist change; the webserver accepts plugin routes |
+| UI → host channel | `ctx.webServer` named routes (`GET /dsh-supervision/state`, `POST /dsh-supervision/reclaim`) | No Typert generator, no remote-event allowlist change; the webserver accepts plugin routes |
 | Forwarder | Separate package `dsh-sup` under `packages/cli/`: TypeScript in `src`, bundled to `lib/main.js`, executed through `bin/dsh-sup.mjs` (3-line shebang shim) | Typed, testable implementation while the installed executable is still an `.mjs`; publishes independently of the plugin |
 | Forwarder runtime dependencies | none | Node built-ins only: `node:net`, `node:fs`, `node:path`, `node:os`, `node:process`, `node:readline` |
 | Shared protocol | `packages/protocol` (`dsh-supervision-protocol`, `private: true`) holds the OSC encoder, frame codec with guards, and registry schema. Both publishable packages import it as a workspace devDependency and **bundle** it into their output | One implementation of the contract instead of two drifting copies, while the published `dsh-supervision` and `dsh-sup` keep empty `dependencies` and never reference a private package at install time |
