@@ -94,10 +94,39 @@ jobs:
           fi
           echo "PR title and package.json agree on ${VERSION}"
 
+      # A resumed release must be able to finish: the tag is created before the
+      # GitHub Release, so a failure after the tag push leaves a tag that points
+      # at this very merge commit. That is a legitimate resume, not a duplicate
+      # release. The waiver is made here, only for a tag that peels to this
+      # commit: `release:validate` keeps refusing any existing tag, and Release
+      # prep still refuses the tag before it prepares anything.
       - name: Validate release version
         env:
           VERSION: ${{ steps.ver.outputs.version }}
-        run: pnpm release:validate -- "v${VERSION}"
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if TAG_SHA="$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}")"; then
+            if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+              echo "::error::Tag $TAG already exists at $TAG_SHA, not at this merge commit ($HEAD_SHA); refusing to publish a different commit under the same version."
+              exit 1
+            fi
+            echo "Tag $TAG already points at this merge commit: resuming an interrupted release; waiving the tag-exists check."
+            # Only the tag check is waived; the version surfaces still have to
+            # agree, so run the same validator with the tag state neutralised
+            # and ignore its tag note.
+            node --input-type=module -e "
+              import { readVersions } from './scripts/release-version.mjs'
+              import { validateReleaseVersion } from './scripts/validate-release-version.mjs'
+              const result = validateReleaseVersion(process.env.VERSION, readVersions(), null)
+              for (const error of result.errors) console.error(error)
+              if (!result.ok) process.exit(1)
+              console.log('OK manifests agree on ' + process.env.VERSION)
+            "
+          else
+            pnpm release:validate -- "$TAG"
+          fi
 
       # Extract and REQUIRE the changelog section before anything irreversible:
       # publishing first would leave the registry ahead of the release record,
@@ -186,7 +215,9 @@ jobs:
 
       # Probe the tag ref only (any other ref named `v<version>` must not skip
       # the tag) and skip only when it already points at this merge commit: a
-      # tag at another commit is a release collision, not a retry.
+      # tag at another commit is a release collision, not a retry. `^{commit}`
+      # peels the annotated tag object to the commit it tags — without it the
+      # object SHA never equals HEAD and every resume would fail.
       - name: Create + push tag
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -194,7 +225,7 @@ jobs:
           set -euo pipefail
           TAG="v${VERSION}"
           HEAD_SHA="$(git rev-parse HEAD)"
-          if TAG_SHA="$(git rev-parse --verify --quiet "refs/tags/$TAG")"; then
+          if TAG_SHA="$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}")"; then
             if [ "$TAG_SHA" = "$HEAD_SHA" ]; then
               echo "Tag $TAG already points at this merge commit; skipping tag creation."
               exit 0
