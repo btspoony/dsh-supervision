@@ -323,8 +323,9 @@ A takeover that the person in the browser cannot see is unacceptable: they would
 watch approvals disappear with no explanation. Two surfaces are therefore part
 of the product, not an optional extra.
 
-**Host routes** (registered on `ctx.webserver`, which accepts named routes from
-any plugin — `packages/host/webserver/src/index.ts:445`):
+**Host routes** (registered on `ctx.webServer`, which accepts named routes from
+any plugin — `packages/host/webserver/src/index.ts:398,445`; the service is
+registered as `'webServer'`, so `ctx.get('webServer')` is the reflective read):
 
 | Route | Method | Body |
 |---|---|---|
@@ -373,7 +374,7 @@ GUI and hc are two views of one session, not two sessions.
 |---|---|---|
 | Plugin (host) | Root package `dsh-supervision`, TypeScript → `lib/` via `tsc`, ESM, `exports` map | Matches DSH package shape; loaders resolve built JS |
 | Plugin (browser) | Same package, `./client` export, `dsh.client` roster entry, React slot components | The shipped DSH way to add UI (`packages/client/ui-approval` is the model) |
-| UI → host channel | `ctx.webserver` named routes (`GET /dsh-supervision/state`, `POST /dsh-supervision/reclaim`) | No Typert generator, no remote-event allowlist change; the webserver accepts plugin routes |
+| UI → host channel | `ctx.webServer` named routes (`GET /dsh-supervision/state`, `POST /dsh-supervision/reclaim`) | No Typert generator, no remote-event allowlist change; the webserver accepts plugin routes |
 | Forwarder | Separate package `dsh-sup` under `packages/cli/`: TypeScript in `src`, bundled to `lib/main.js`, executed through `bin/dsh-sup.mjs` (3-line shebang shim) | Typed, testable implementation while the installed executable is still an `.mjs`; publishes independently of the plugin |
 | Forwarder runtime dependencies | none | Node built-ins only: `node:net`, `node:fs`, `node:path`, `node:os`, `node:process`, `node:readline` |
 | Shared protocol | `packages/protocol` (`dsh-supervision-protocol`, `private: true`) holds the OSC encoder, frame codec with guards, and registry schema. Both publishable packages import it as a workspace devDependency and **bundle** it into their output | One implementation of the contract instead of two drifting copies, while the published `dsh-supervision` and `dsh-sup` keep empty `dependencies` and never reference a private package at install time |
