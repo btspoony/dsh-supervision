@@ -1,6 +1,13 @@
 import type { Socket } from 'node:net';
 import { connect as netConnect } from 'node:net';
-import { decodeChunk, type InFrame, type HelloFrame, type OutFrame } from 'dsh-supervision-protocol';
+import {
+  ProtocolError,
+  decodeChunk,
+  encodeFrame,
+  type InFrame,
+  type HelloFrame,
+  type OutFrame,
+} from 'dsh-supervision-protocol';
 
 /** How long the first reply may take before the backend counts as unreachable (ADR: 5 s). */
 export const REPLY_TIMEOUT_MS = 5000;
@@ -19,10 +26,16 @@ export interface ConnectionHandlers {
    * root record text; `detail` carries the underlying cause for stderr.
    */
   onLost(msg: string, detail: string): void;
+  /**
+   * `encodeFrame` refused a frame before it reached the socket. Nothing was
+   * written and the backend is untouched, so this is a local refusal, never a
+   * lost backend. `detail` is the encoder's own reason.
+   */
+  onRefused(detail: string): void;
 }
 
 export interface Connection {
-  /** Writes one JSON frame plus its newline; a closed socket drops it. */
+  /** Encodes and writes one frame; a refused frame goes to `onRefused`. */
   send(frame: InFrame): void;
   /** Ends the socket; the peer sees EOF. */
   close(): void;
@@ -56,8 +69,25 @@ export function connect(
     handlers.onLost(msg, detail);
   }
 
+  /**
+   * Every outbound frame takes the one encoder, so `MAX_FRAME` governs both
+   * halves. A refusal is reported, not escalated: the socket and the bridge
+   * stay up, and the caller decides what a refused frame means for it.
+   */
+  function write(frame: InFrame): void {
+    let line: string;
+    try {
+      line = encodeFrame(frame);
+    } catch (error) {
+      if (!(error instanceof ProtocolError)) throw error;
+      handlers.onRefused(error.message);
+      return;
+    }
+    socket.write(line);
+  }
+
   socket.on('connect', () => {
-    if (hello !== undefined) socket.write(`${JSON.stringify(hello)}\n`);
+    if (hello !== undefined) write(hello);
   });
   socket.on('error', (error: Error) => finish(BACKEND_OFFLINE, error.message));
   socket.on('close', () => finish(BACKEND_OFFLINE, 'socket closed'));
@@ -81,7 +111,7 @@ export function connect(
   return {
     send(frame: InFrame): void {
       if (settled || socket.destroyed) return;
-      socket.write(`${JSON.stringify(frame)}\n`);
+      write(frame);
     },
     close(): void {
       settled = true;

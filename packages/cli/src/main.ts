@@ -1,36 +1,13 @@
 import { parseArgs, usageText } from './args.js';
 import { connect, type Connection } from './connection.js';
+import { EXIT, exitCodeFor } from './exit.js';
 import { liveEntries, selectEntry } from './registry.js';
-import { splitLines } from './lines.js';
+import { lineForwarder } from './lines.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry, SessionItem } from 'dsh-supervision-protocol';
 
-/** Process exit codes, as the ADR fixes them. */
-const EXIT = {
-  ok: 0,
-  backendLost: 1,
-  usage: 2,
-  busy: 3,
-  locked: 4,
-  createFailed: 5,
-} as const;
-
 const HEADER = ['SESSION', 'CWD', 'LIVE', 'BRIDGED'].join('\t');
-
-/** Maps a plugin `error.code` onto its exit code (ADR); anything else is a lost backend. */
-function exitCodeFor(code: string): number {
-  switch (code) {
-    case 'busy':
-      return EXIT.busy;
-    case 'locked':
-      return EXIT.locked;
-    case 'create-failed':
-      return EXIT.createFailed;
-    default:
-      return EXIT.backendLost;
-  }
-}
 
 /** A root record restates `app`, because hc replaces the record whole. */
 function rootReport(state: string, extra: { readonly title?: string; readonly msg?: string } = {}): string {
@@ -109,6 +86,10 @@ function listFrom(socket: string, cwd: string): Promise<readonly SessionItem[]> 
         process.stderr.write(`${detail}\n`);
         settle([]);
       },
+      onRefused: (detail) => {
+        process.stderr.write(`${detail}\n`);
+        settle([]);
+      },
     });
     connection.send({ t: 'list', cwd });
   });
@@ -139,7 +120,6 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
     return Promise.resolve(EXIT.backendLost);
   }
 
-  let rest = '';
   let settled = false;
   /** Kept so the closing error record can restate `title`, which hc replaces. */
   let title = '';
@@ -154,12 +134,24 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
       resolve(code);
     };
 
+    /**
+     * Bytes of the line currently being sent, so a local refusal can name the
+     * input the user actually submitted rather than the encoder's frame cap.
+     */
+    let sending = 0;
+
+    /** Sends one line; a frame this process refused ends the bridge without blaming the backend. */
+    const sendLine = (text: string): void => {
+      sending = Buffer.byteLength(text, 'utf8');
+      connection.send({ t: 'line', text });
+    };
+
     const connection: Connection = connect(socket, hello, {
       onFrame: (frame: OutFrame) => {
         if (frame.t === 'welcome') {
           title = frame.title;
           tty.write(rootReport('idle', { title }));
-          pump((text) => connection.send({ t: 'line', text }));
+          pump(sendLine);
           return;
         }
         // `osc.data` is opaque: written verbatim, never inspected or re-encoded.
@@ -183,16 +175,20 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
         process.stderr.write(`${detail}\n`);
         settle(EXIT.backendLost);
       },
+      // A refused frame never reached the socket, so the backend is alive and
+      // the honest cause is the input, not a lost bridge.
+      onRefused: (detail) => {
+        const msg = sending === 0 ? detail : `input line of ${String(sending)} bytes was not sent: ${detail}`;
+        process.stderr.write(`${msg}\n`);
+        tty.write(rootReport('error', title === '' ? { msg } : { title, msg }));
+        settle(EXIT.protocol);
+      },
     });
 
     /** Forwards stdin lines; CR and LF both terminate, and 2004 is never enabled. */
     function pump(forward: (text: string) => void): void {
       process.stdin.setEncoding('utf8');
-      process.stdin.on('data', (chunk: string) => {
-        const split = splitLines(rest, chunk);
-        rest = split.rest;
-        for (const line of split.lines) if (line !== '') forward(line);
-      });
+      process.stdin.on('data', lineForwarder(forward));
       process.stdin.resume();
     }
   });

@@ -90,12 +90,12 @@ function isErrorCode(value: unknown): value is ErrorCode {
 }
 
 /**
- * Encode one outbound frame.
+ * Encode one frame for the wire, in either direction.
  * @param frame - the frame to send.
  * @returns the frame plus its newline.
  * @throws ProtocolError `protocol` when the frame exceeds {@link MAX_FRAME}.
  */
-export function encodeFrame(frame: OutFrame): string {
+export function encodeFrame(frame: InFrame | OutFrame): string {
   const line = `${JSON.stringify(frame)}\n`
   if (Buffer.byteLength(line, 'utf8') > MAX_FRAME) {
     throw new ProtocolError('protocol', `frame exceeds ${String(MAX_FRAME)} bytes`)

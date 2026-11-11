@@ -309,6 +309,7 @@ behaviour.
 | session busy | `error:code=busy`, exit 3 |
 | unknown/resumable session | resume; if the writer lock is held elsewhere, `error:code=locked`, exit 4 |
 | create fails (no factory, no default model, bad cwd) | `error:code=create-failed` with the reason, exit 5 |
+| stdin line over `MAX_FRAME` | `encodeFrame` refuses it locally: nothing is written, `error:msg` names the oversized line, exit 6. The backend is alive, so this is never `backend offline` |
 | usage/no candidate/multiple `dsh web` processes | print candidates, exit 2 |
 | `hc kill w1` | kills the forwarder only. The agent, session and browser GUI keep running; approvals return to the GUI answerer |
 | browser `reclaim` | host sends `bye/reclaimed`, closes the socket; forwarder writes `clear` and exits 0; approvals return to the GUI immediately; UI banner disappears on the next poll |
