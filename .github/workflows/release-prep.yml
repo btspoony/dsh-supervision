@@ -8,13 +8,14 @@ name: Release prep
 #
 # Trigger: Actions -> "Release prep" -> Run workflow. Pass an explicit target
 # version (e.g. 0.1.0-alpha.1) or leave the input empty for an auto bump
-# (`--patch`: X.Y.Z-pre.N -> N+1, stays in the prerelease line).
+# (`--patch`: X.Y.Z-pre.N -> N+1 and stays prerelease; a stable X.Y.Z -> the
+# next patch, a stable release published to npm `latest`).
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Target version (e.g. 0.1.0-alpha.1). Leave empty for auto pre-release bump."
+        description: "Target version, e.g. 0.1.0-alpha.1. Empty = --patch: a prerelease bumps only N; a stable version becomes the next patch (npm latest)."
         required: false
         type: string
 
