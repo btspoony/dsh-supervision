@@ -13,9 +13,10 @@ name: Release
 # makes the merge commit safe to check out afterwards.
 #
 # No NPM_TOKEN / NODE_AUTH_TOKEN: npm auth is Trusted Publishing, which needs
-# the OIDC `id-token` scope and nothing else (the npm-side Trusted Publisher
-# entry must exist for BOTH `dsh-supervision` and `dsh-sup`). The tag push and
-# GitHub Release use the built-in GITHUB_TOKEN.
+# the OIDC `id-token` scope plus a registry line and NO auth token (the
+# `Configure npm for Trusted Publishing` step writes exactly that; the npm-side
+# Trusted Publisher entry must exist for BOTH `dsh-supervision` and `dsh-sup`).
+# The tag push and GitHub Release use the built-in GITHUB_TOKEN.
 #
 # NOTE: Node 24 ships npm with working Trusted Publishing / provenance
 # (sigstore). Do not use Node 22 or `npm install -g npm@latest` on Node 22 —
@@ -61,18 +62,25 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
-      # `registry-url` is deliberately absent: it makes setup-node write an
-      # `.npmrc` carrying `_authToken=${NODE_AUTH_TOKEN}` (the placeholder
-      # token) and `always-auth`, and npm then uses that placeholder instead of
-      # running the OIDC Trusted Publishing exchange. The registry answers the
-      # placeholder with a 404 on the publish PUT while provenance signing still
-      # succeeds, so the release fails only at authentication. npm's default
-      # registry is already registry.npmjs.org, so OIDC needs no auth config.
+      # No `registry-url` here: it writes `_authToken=${NODE_AUTH_TOKEN}` (a
+      # placeholder) into `.npmrc`, and npm then publishes with whatever token
+      # it finds instead of asking GitHub for an OIDC token. The step below
+      # writes the registry line without one.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: pnpm
+
+      # npm reaches the registry without an auth token: an `_authToken` line
+      # (setup-node's `registry-url` writes a placeholder one) makes npm publish
+      # with that placeholder instead of asking GitHub for the OIDC token, while
+      # no registry line at all makes it refuse with ENEEDAUTH before it tries.
+      # `registry=` alone is the state npm treats as "authenticate via OIDC".
+      - name: Configure npm for Trusted Publishing
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
