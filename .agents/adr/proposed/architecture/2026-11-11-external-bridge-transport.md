@@ -88,16 +88,17 @@ hc core
 Nothing in DSH or herdr-core changes. The forwarder is an ordinary program; the
 plugin is an ordinary Cordis plugin with a host half and a browser half.
 
-A `dsh web` started inside an hc terminal replaces the forwarder and its socket
-with the process's own tty; § In-process transport covers that path.
+A `dsh web` started inside an hc terminal gains the process's own terminal as an
+additional reporting surface while its socket stays open; § In-process transport
+covers that path.
 
 ### In-process transport
 
-`apply()` chooses the transport from the environment, not from configuration:
+`apply()` chooses the transports from the environment, not from configuration:
 
-| `HC_TERMINAL_ID` | Transport | Surface opened at startup |
+| `HC_TERMINAL_ID` | Transports | Surfaces opened at startup |
 |---|---|---|
-| set and non-empty | `TtyTransport` over this process's terminal | the terminal |
+| set and non-empty | `SocketTransport` + `TtyTransport` | `0600` socket + registry entry, and this process's terminal |
 | unset or empty | `SocketTransport` | `0600` socket + registry entry |
 
 The tty path needs no forwarder: the process renders its `OutFrame`s through
@@ -113,17 +114,19 @@ keeps its sessions.
 
 Limits, each deliberate:
 
-- **One bridge per process.** The owner's keyboard is the single input, so
-  `/attach` switches the bound session rather than adding a second; the
-  seam's single-owner rule holds unchanged.
+- **One bridge per session.** The owner's keyboard is one bridge per process,
+  and `dsh-sup` may hold another session at the same time; the shared bridge
+  table refuses a second claim on either surface with `busy`.
 - **One web process per terminal.** Two `dsh web` processes started inside the
   same hc terminal both mount this transport: each synthesizes its own first
   session, both read the same stdin and both write root records to the same
-  `/dev/tty`. This path has no registry, so nothing discovers or refuses the
-  collision; run one supervised process per terminal.
-- **No socket and no registry entry.** `dsh-sup list` cannot see a process
-  started this way, and neither can a forwarder: the terminal is the only
-  surface.
+  `/dev/tty`. Each process still writes its own registry entry, but nothing
+  refuses two processes on one terminal, so run one supervised process per
+  terminal.
+- **Two surfaces, one registry.** The socket and registry entry open in every
+  mode, so a process started inside a supervised terminal is discoverable by
+  `dsh-sup`; the in-process tty is an additional reporting surface, not a
+  replacement.
 - **No automatic reconnect.** A `reclaim` or a refused `hello` leaves the
   transport mounted and idle; rebinding is an explicit `/new` or `/attach`, never
   a silent take-back of a session the supervisor no longer holds. A terminal

@@ -42,6 +42,8 @@ export interface Bridge {
   claim(session: string): boolean
   send(frame: OutFrame): void
   close(): void
+  /** True only for the tty's synthesized first hello, which may wait for the factory. */
+  readonly retryOnNoFactory?: boolean
 }
 
 export interface TransportHandlers {

@@ -21,7 +21,7 @@
 
 | Supervisor | 连接方式 | 需要什么 |
 |---|---|---|
-| herdr-core（`hc`） | 进程内 tty，走它自己的 `HC_TERMINAL_ID`（宿主导出 `DSH_SUP_TERMINAL_ID` 时也可用）；或走控制套接口，让 `dsh-sup` 跑在它的 PTY 里 | 被监督的终端里有一个 `dsh web`，或任意 PTY |
+| herdr-core（`hc`） | 进程内 tty，走它自己的 `HC_TERMINAL_ID`（宿主导出 `DSH_SUP_TERMINAL_ID` 时也可用）**并且**走控制套接口，让 `dsh-sup` 跑在它的 PTY 里；两条通路同时可用 | 被监督的终端里有一个 `dsh web`，外加任意 PTY |
 | 任何读 OSC 7501 的 supervisor | 控制套接口 + 把它自己的 PTY 交给 `dsh-sup` | 能读到该 PTY 的 OSC 输出，并能往该 PTY 的 stdin 写行 |
 | 另一种想用进程内模式的 supervisor | 设置 `DSH_SUP_TERMINAL_ID` | 这个变量只被本包读取、从不写入；任何 supervisor 都可以设置它 |
 | 只开 GUI 的 `dsh web` | 不需要任何东西 | 插件只暴露一个不干活的套接口，别的什么都没有 |
@@ -80,18 +80,18 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 ## 如何上报
 
-一个 `dsh web` 进程拥有一棵会话树，插件挂在其中，并且只开一条通路。
+一个 `dsh web` 进程拥有一棵会话树，插件挂在其中，开控制套接口；当进程本身跑在被监督的终端里时，再叠加一条进程内 tty 通路。
 
 ```text
 dsh web (the process you already run)
 └── dsh-supervision plugin
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
       │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo lines ──▶ supervisor (reads OSC 7501)
-      └── in-process tty   (only when DSH_SUP_TERMINAL_ID is set)
+      └── in-process tty   (added when DSH_SUP_TERMINAL_ID or HC_TERMINAL_ID is set)
             └── OSC 7501 written to this process's own /dev/tty
 ```
 
-**挂载规则。**套接口这条路上，插件总是先把发现面打开——监听器、`0600` 套接口，以及指向它的 `<pid>-<8hex>.json` 注册表条目——这样转发器才有东西可连。效果层（会话监听、OSC 上报、echo 行、stdin 处理）按桥接打开，"有一条桥接"和"有转发器已连接"是同一件事。因此一个只开 GUI 的 `dsh web` 只暴露一个不干活的套接口，别的什么都没有。当 `DSH_SUP_TERMINAL_ID` 非空（或 herdr-core 的 `HC_TERMINAL_ID` 非空）时，进程自己就是 supervisor：不创建任何东西，终端本身就是完整的发现面。如果这个终端打不开——既没有 `/dev/tty`、stdout 也不是 TTY，或者 stdin 不是终端——插件把原因写到 stderr 并完全不挂载，宿主因此保住它的会话。
+**挂载规则。**插件总是先把套接口发现面打开——监听器、`0600` 套接口，以及指向它的 `<pid>-<8hex>.json` 注册表条目——这样转发器才有东西可连。效果层（会话监听、OSC 上报、echo 行、stdin 处理）按桥接打开，"有一条桥接"和"有转发器已连接"是同一件事。因此一个只开 GUI 的 `dsh web` 只暴露一个不干活的套接口，别的什么都没有。当 `DSH_SUP_TERMINAL_ID` 非空（或 herdr-core 的 `HC_TERMINAL_ID` 非空）时，进程同时监督自己所在的终端：同样的记录写到自己的 `/dev/tty`，套接口仍然为别处的 `dsh-sup` 开着。一个会话在两条通路上仍只有一条桥接，第二个认领者会收到 `busy`。如果终端打不开——既没有 `/dev/tty`、stdout 也不是 TTY，或者 stdin 不是终端——插件把原因写到 stderr，并保留套接口这条路。
 
 ## 写给实现者与 agent
 
@@ -160,7 +160,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 | 变量 | 读取方 | 作用 |
 |---|---|---|
 | `DSH_HOME` | 插件与 `dsh-sup` | 注册表目录的基路径，默认 `~/.dsh`。 |
-| `DSH_SUP_TERMINAL_ID` | 插件 | 非空 ⇒ 进程内 tty 通路。无套接口、无注册表条目、无转发器。 |
+| `DSH_SUP_TERMINAL_ID` | 插件 | 非空 ⇒ 额外叠加一条进程内 tty 通路；控制套接口与注册表照常打开。 |
 | `DSH_SUP_TERMINAL_NAME` | 插件 | 状态路由上报的 supervisor 标签，默认 `dsh-sup`。 |
 | `HC_TERMINAL_ID` | 插件 | herdr-core 兼容：同一条通路，仅在 `DSH_SUP_TERMINAL_ID` 未设置或为空时读取。 |
 | `HC_TERMINAL_NAME` | 插件 | herdr-core 兼容：标签，仅在 `DSH_SUP_TERMINAL_NAME` 未设置或为空时读取。 |
@@ -171,7 +171,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 
 改动不能破坏这些：
 
-1. **一个会话一条桥接。**第二个认领者拿到 `busy` 并被断开；没有第二条并行通路。
+1. **一个会话一条桥接。**第二个认领者拿到 `busy` 并被断开；套接口与进程内 tty 可以同时分别桥接不同会话，但同一会话在两条通路上仍只有一条桥接。
 2. **一条记录整体替换。**每次上报都要重述每个字段，清除也一样；没有增量更新。
 3. **挂起的审批压过正在跑的一轮。**根词优先级 `blocked` > `working` > `done` / `error` / `idle`。
 4. **卸载先结账。**桥接离开、回收、插件卸载或提问方撤回时，每个挂起的提问都以 `cancelled` 结掉——失败关闭，绝不留下悬挂。
