@@ -9,28 +9,24 @@
 ![node](https://img.shields.io/badge/node-%3E%3D22-339933.svg)
 ![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-4B32C3.svg)
 
-Supervise the `dsh web` process you already have running from herdr-core (`hc`). The plugin lives inside that process: it reports the supervised session as **OSC 7501** records on a terminal and takes operator input — steer a running turn, cancel it, create or attach a session, approve or reject a parked tool approval — back into that same session, so a supervisor watches the session you actually work in instead of a second copy of it. Two transports carry it: a **control socket** driven by the small `dsh-sup` forwarder that runs in the `hc` PTY, or — when `dsh web` itself is started inside an `hc` terminal — the **process's own tty**, with no forwarder and no socket at all. Neither DSH nor herdr-core changes.
+**Bridge a running DSH session into any terminal supervisor — it sees the state, and it can steer.** The plugin mounts inside the `dsh web` process you already run: **OSC 7501** records go out on the terminal, and operator input comes back into that same session. herdr-core is one supported supervisor — it named the `HC_*` variables — but any supervisor that reads OSC 7501 and can write lines back works just as well, with no changes to DSH or the supervisor.
 
-## Topology
+## What you get
 
-One `dsh web` process owns one session tree; the plugin mounts in it and opens exactly one transport.
+- **One status record per session.** The bridged session is the root record — `idle`, `working`, `done`, `blocked` or `error`; other sessions in the same process are child records carrying `id=`.
+- **Operator input goes back in.** Bare text steers a running turn, `/cancel` ends it, `/status`, `/new` and `/attach` inspect and switch sessions, and `/approve` or `/reject` settle parked asks — all from the terminal.
+- **Approvals stop living in another surface.** A parked ask turns the root record into `blocked · kind=permission`, is settled from the terminal, and the GUI shows a supervision banner with **Take back control** — so the person in the browser always sees who holds the session and has a way to take it back.
 
-```text
-dsh web (the process you already run)
-└── dsh-supervision plugin
-      ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
-      │     └── dsh-sup in the hc PTY ── OSC 7501 + echo lines ──▶ herdr-core
-      └── in-process tty   (only when HC_TERMINAL_ID is set)
-            └── OSC 7501 written to this process's own /dev/tty
-```
+## Works with
 
-**Activation.** In the socket path the plugin always opens its discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `HC_TERMINAL_ID` non-empty the process is its own supervisor: nothing is created, the terminal is the whole discovery surface. If that terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and mounts nothing, so the host keeps its sessions.
+| Supervisor | How it connects | What it needs |
+|---|---|---|
+| herdr-core (`hc`) | in-process tty via `HC_TERMINAL_ID`, or the control socket with `dsh-sup` in its PTY | a `dsh web` started inside the supervised terminal, or any PTY for the forwarder |
+| Any supervisor that reads OSC 7501 | control socket + `dsh-sup` in its own PTY | it must read the PTY's OSC output and be able to write lines to that PTY's stdin |
+| Another supervisor wanting in-process mode | set `HC_TERMINAL_ID` | the variable is read, never written, by this package; the name comes from herdr-core, and any supervisor can set it |
+| GUI-only `dsh web` | nothing | the plugin exposes an inert socket and nothing else |
 
-**Approvals park the root report.** While a bridge is live the plugin prepends an `approval/request` listener for that session's tree. An ask is parked under a six-hex id and the root record becomes `state=blocked:kind=permission` with `msg=<tool> <reason> [ask <id>]`; the ask is settled by `/approve <ask>` (`allowed-once`) or `/reject <ask>` (`rejected`), by `/y` / `/n` when exactly one is parked, or as `cancelled` when the asker withdraws. A session switch (`/new`, `/attach`) is refused while an ask is parked, and teardown fails every parked ask closed before the socket goes.
-
-**stdin relay.** The forwarder splits its own stdin on `\r`, `\n` or `\r\n` and sends each line as a `line` frame; the plugin parses it and acts: bare text steers the agent, `/cancel` cancels the turn, `/status` answers `session=… state=… turn=… asks=…`, `/new <absolute path>` and `/attach <session-…>` switch sessions, `/approve` / `/reject` answer a named ask. `/dev/tty` is the reporting surface on both paths (stdout when it is a TTY); that is what herdr-core reads, not our stdout.
-
-**Taking the session back.** While a session is bridged the GUI shows a supervision banner above the composer — `Supervised from <terminal> (pid <n>) · approvals are answered there` — with a **Take back control** button. It posts to the reclaim route; the bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
+OSC 7501 is a standard terminal channel, not a product API, and `dsh-sup` depends on nothing herdr-core-specific.
 
 ## Quick start
 
@@ -42,10 +38,10 @@ dsh web (the process you already run)
 
 ```sh
 dsh plugin --profile web add dsh-supervision   # the plugin, into the web profile
-npm i -g dsh-sup                               # the forwarder, for the hc PTY
+npm i -g dsh-sup                               # the forwarder, for the supervisor's PTY
 ```
 
-`dsh-sup` is a separate package because it runs as its own program in the `hc` PTY. Pin a version with `@<version>`.
+`dsh-sup` is a separate package because it runs as its own program in the supervisor's PTY. Pin a version with `@<version>`.
 
 ### Connect a session
 
@@ -80,11 +76,47 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 `/y` and `/n` answer the only parked ask; with more than one parked they refuse and ask you to name it.
 
-## Supervision protocol
+### Take back control
+
+While a session is bridged the GUI shows a supervision banner above the composer — `Supervised from <terminal> (pid <n>) · approvals are answered there` — with a **Take back control** button. It posts to the reclaim route; the bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
+
+## How it reports
+
+One `dsh web` process owns one session tree; the plugin mounts in it and opens exactly one transport.
+
+```text
+dsh web (the process you already run)
+└── dsh-supervision plugin
+      ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
+      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo lines ──▶ supervisor (reads OSC 7501)
+      └── in-process tty   (only when HC_TERMINAL_ID is set)
+            └── OSC 7501 written to this process's own /dev/tty
+```
+
+**Activation.** In the socket path the plugin always opens its discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `HC_TERMINAL_ID` non-empty the process is its own supervisor: nothing is created, the terminal is the whole discovery surface. If that terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and mounts nothing, so the host keeps its sessions.
+
+## For implementers & agents
+
+This half is reference material for implementers and coding agents; if you only want to use the plugin, jump to [Links](#links).
+
+### Repo map
+
+| Path | What lives there |
+|---|---|
+| `src/` | the host plugin and the browser supervision banner (`src/client/`) |
+| `packages/protocol` | the OSC 7501 encoder and the NDJSON frame codec |
+| `packages/cli` | the `dsh-sup` forwarder |
+| `lib/` | build output |
+| `docs/` | figures and their captions |
+| `.agents/adr` and `.agents/knowledge` | decisions and the architecture notes behind them |
+| `.changes/` | release fragments |
+| `locale/` | plugin-page strings |
+
+### Supervision protocol
 
 The facts a supervisor needs, all of them on this repository's wire:
 
-**Socket and registry.** One Unix socket per `dsh web` process, mode `0600`, at `$DSH_HOME/supervision/<pid>-<8hex>.sock`, next to a `<pid>-<8hex>.json` entry `{proto, pid, socket, startedAt, dshVersion}` written atomically and mode `0600`. A session has exactly one bridge: a second connection claiming it is refused with `error` code `busy` and closed. Frames are NDJSON, `PROTO` is `1`, one frame is at most 64 KiB.
+**Socket and registry.** One Unix socket per `dsh web` process, mode `0600`, at `$DSH_HOME/supervision/<pid>-<8hex>.sock`, next to a `<pid>-<8hex>.json` entry `{proto, pid, socket, startedAt, dshVersion}` written atomically and mode `0600`. A session has exactly one bridge: a second connection claiming it is refused with `error` code `busy` and closed. Frames are NDJSON, `PROTO` is `1`, one frame is at most 64 KiB; the forwarder splits its own stdin on `\r`, `\n` or `\r\n` and sends one `line` frame per input line.
 
 | Direction | Frames |
 |---|---|
@@ -99,7 +131,7 @@ The facts a supervisor needs, all of them on this repository's wire:
 ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<permission|question|auth>][ :app=<word>][ :title=<base64>][ :msg=<base64>] ST
 ```
 
-A clear is `state=clear` for the root, `state=clear:id=<id>` for one child record. `kind` is legal only on `blocked`. Caps: sequence under 4096 bytes, title 192 bytes, `msg` 2048 bytes, id 128 bytes as `/`-joined segments of at most 32 bytes each (8 segments). The root word is `blocked` > `working` > `done` / `error` / `idle`, and a parked approval outranks a live turn.
+A clear is `state=clear` for the root, `state=clear:id=<id>` for one child record. `kind` is legal only on `blocked`; a parked approval is the root `blocked:kind=permission` record carrying `msg=<tool> <reason> [ask <id>]`. Caps: sequence under 4096 bytes, title 192 bytes, `msg` 2048 bytes, id 128 bytes as `/`-joined segments of at most 32 bytes each (8 segments). The root word is `blocked` > `working` > `done` / `error` / `idle`, and a parked approval outranks a live turn. The reporting surface is `/dev/tty` on both paths (stdout when it is a TTY); that is what the supervisor reads, not the plugin's or the forwarder's stdout.
 
 **Routes**, served only when the host mounts a webserver:
 
@@ -112,7 +144,7 @@ A clear is `state=clear` for the root, `state=clear:id=<id>` for one child recor
 
 **Exit codes of `dsh-sup`:** `0` clean `bye`, `1` backend lost, `2` usage or no live backend, `3` `busy`, `4` `locked`, `5` `create-failed`, `6` `protocol` (a frame this process refused, so the backend is alive).
 
-## Configuration
+### Configuration
 
 Six keys, all of them read by `src/index.ts`; an unknown shape is refused with a field-level issue instead of half-applying.
 
@@ -135,6 +167,17 @@ Environment variables it reads:
 
 Both `HC_*` variables are read, never written, by this package.
 
+### Invariants
+
+A change must not break these:
+
+- **One bridge per session.** A second connection claiming a bridged session is refused with `busy`; the in-process path holds one binding per process, and `/attach` switches it rather than adding a second.
+- **A record is replaced whole.** Every report restates every field that still applies; a field left out is a field cleared.
+- **A parked approval outranks a live turn.** The root word order is `blocked` > `working` > `done` / `error` / `idle`, and a session switch (`/new`, `/attach`) is refused while an ask is parked.
+- **Teardown settles every parked ask before the socket closes.** Disconnect, dispose, reclaim or an asker's withdrawal resolves each ask as `cancelled`; fail closed, never leave one dangling.
+- **`HC_*` is read only.** The in-process transport is chosen by the environment, never by configuration, and nothing writes those variables.
+- **Caps are hard limits.** The encoder drops a record it cannot express within its caps rather than truncating it, and a frame over 64 KiB is refused locally.
+
 ## Links
 
 | Doc | Content |
@@ -142,6 +185,8 @@ Both `HC_*` variables are read, never written, by this package.
 | [docs/DETAIL.md](docs/DETAIL.md) | the one-screen figure caption: topology, both transports, approval parking, stdin relay |
 | [docs/preview.svg](docs/preview.svg) | the figure shown at the top of this page |
 | [docs/preview.zh.svg](docs/preview.zh.svg) | the Chinese figure, same geometry |
+| [.agents/adr/proposed/architecture/2026-11-11-external-bridge-transport.md](.agents/adr/proposed/architecture/2026-11-11-external-bridge-transport.md) | the ADR: why the bridge exists and how it is shaped |
+| [.agents/knowledge/architecture-patterns/in-process-supervisor-transport.md](.agents/knowledge/architecture-patterns/in-process-supervisor-transport.md) | the architecture note: one seam, two owners of the same protocol |
 | [CHANGELOG.md](CHANGELOG.md) | released changes |
 
 ## License

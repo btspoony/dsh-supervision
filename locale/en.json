@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Supervision",
-    "description": "Supervise a running dsh web session from herdr-core: the plugin reports the session as OSC 7501 records and relays operator input for steering, cancelling, session switching and parked tool approvals.",
+    "description": "Bridge a running dsh web session to any terminal supervisor that reads OSC 7501: the plugin reports state on the terminal and relays operator input for steering, cancelling, session switching and parked tool approvals.",
     "detail": "docs/DETAIL.md"
   }
 }
