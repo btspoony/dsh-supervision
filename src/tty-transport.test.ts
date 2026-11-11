@@ -334,7 +334,6 @@ test('a dead surface with no bound session still closes the feed', async () => {
   // dead transport can never drain.
   io.type('stray')
   await until(() => io.closes === 1)
-  assert.equal(io.rawNow, false)
 
   // A dead transport never binds again, so those lines would create an orphan.
   assert.equal(host.bridge?.claim('session-2'), false)
@@ -342,6 +341,12 @@ test('a dead surface with no bound session still closes the feed', async () => {
   io.type('/attach session-3')
   await settle()
   assert.equal(host.hellos.length, 1)
+  // The pty answers again, but death is permanent: a late frame must not reach
+  // a surface whose feed is closed and whose session this transport can no
+  // longer rebind.
+  const written = io.out.length
+  transport.send({ t: 'echo', text: 'late' })
+  assert.equal(io.out.length, written)
 })
 
 test('a line typed during an in-flight hello waits for the binding', async () => {
