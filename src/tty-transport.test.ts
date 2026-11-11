@@ -256,6 +256,68 @@ test('an unbridged stray line gets one guidance echo; a blank line gets none', a
   assert.deepEqual(host.lines, [])
 })
 
+test('reclaim still clears the record when the teardown bye throws', async () => {
+  const { io, host, transport } = await mounted()
+  io.out.length = 0
+  host.failBye = true
+
+  // The host's disposer failed, but the reclaim route must not escape with it
+  // and the browser must still be told the supervisor is gone.
+  assert.equal(transport.reclaim('session-1'), true)
+  assert.deepEqual(host.byes, ['session-1'])
+  assert.match(io.out.at(-1) ?? '', /state=clear/)
+  assert.equal(io.rawNow, false)
+})
+
+test('a throwing bye does not escape a write that killed the surface', async () => {
+  const { io, host, transport } = await mounted()
+  host.failBye = true
+  io.broken = true
+
+  // A host teardown that throws must not reach the emitter that produced the
+  // frame; the bridge is finished either way.
+  assert.doesNotThrow(() => { transport.send({ t: 'echo', text: 'boom' }) })
+  assert.deepEqual(host.byes, ['session-1'])
+  assert.equal(io.rawNow, false)
+})
+
+test('a throwing bye does not escape a bind that switches sessions', async () => {
+  const { host } = await mounted()
+  host.failBye = true
+
+  // A hello may claim a different session over a bound one; the old session's
+  // teardown runs on that switch and must be contained like disposal's.
+  assert.doesNotThrow(() => { host.bridge?.claim('session-2') })
+  assert.deepEqual(host.byes, ['session-1'])
+  assert.equal(host.bridge?.session, 'session-2')
+})
+
+test('a dead surface never replays the lines buffered behind an in-flight hello', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  const hold = new Latch()
+  host.hold = hold
+  const transport = new TtyTransport(io)
+  const started = transport.start(host.handlers)
+  await until(() => host.hellos.length === 1)
+
+  // Typed while the first hello is still in flight: they wait in the feed.
+  io.type('/attach session-2')
+  io.type('/new /tmp')
+  // The pty goes away; the next write marks this transport dead for good.
+  io.broken = true
+  host.bridge?.send({ t: 'echo', text: 'boom' })
+
+  hold.open()
+  await started
+  await settle()
+
+  // A dead transport can never bind again, so those lines must not drive a
+  // second hello: the session it created would have no bridge and no bye.
+  assert.equal(host.hellos.length, 1)
+  assert.deepEqual(host.lines, [])
+})
+
 test('a line typed during an in-flight hello waits for the binding', async () => {
   const io = new FakeTty()
   const host = new Host()
@@ -413,6 +475,19 @@ test('lineFeed ends on end-of-input and stop() detaches the listeners', async ()
   const never: string[] = []
   for await (const line of other.lines()) never.push(line)
   assert.deepEqual(never, [])
+})
+
+test('lineFeed drops the buffered queue when stopped', async () => {
+  const stdin = new FakeStdin()
+  const feed = lineFeed(stdin)
+  // Typed during an in-flight hello, then the feed is stopped: these lines have
+  // no reader left, and replaying them is how an orphan session gets created.
+  stdin.emit('data', '/attach session-2\n/new /tmp\n')
+  feed.stop()
+
+  const seen: string[] = []
+  for await (const line of feed.lines()) seen.push(line)
+  assert.deepEqual(seen, [])
 })
 
 test('lineFeed frames a single large paste without a spread over its lines', async () => {

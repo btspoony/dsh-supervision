@@ -79,6 +79,11 @@ export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; s
     stop(): void {
       if (stopped) return
       stopped = true
+      // The buffered lines were typed for a session that no longer has a
+      // reader: replaying them onto a stopped feed is how an orphan session
+      // gets created, so the queue dies with the feed.
+      complete.length = 0
+      rest = ''
       input.off('data', onData)
       input.off('end', onEnd)
       input.pause()
