@@ -180,14 +180,17 @@ jobs:
       # failed on the second package can be re-run after the first one landed
       # instead of dying on an immutable version.
       #
-      # `pnpm publish`, not `npm publish`: both manifests carry a
-      # `workspace:*` devDependency that npm would copy into the tarball
-      # verbatim; pnpm rewrites it to the real version at pack time.
+      # `npm publish`, not `pnpm publish`: pnpm's OIDC token exchange fails
+      # against the registry (ERR_PNPM_AUTH_TOKEN_EXCHANGE / 404) and it then
+      # dies on setup-node's placeholder token, while npm on Node 24 implements
+      # Trusted Publishing. npm does not understand the pnpm `workspace:`
+      # protocol at all, so each manifest's `workspace:*` specifier is stripped
+      # before the pack: that script is what keeps an unresolved `workspace:*`
+      # out of the manifest that gets published (the protocol package is
+      # bundled into the build output, so it is not a runtime dependency).
       #
       # `--tag "$TAG"`: npm >= 11 hard-throws when publishing a prerelease
-      # without an explicit --tag. `--no-git-checks`: the job checks out the
-      # detached merge commit, so pnpm's "branch is in sync" check does not
-      # apply (the tree is clean by construction).
+      # without an explicit --tag.
       #
       # Pure OIDC (Trusted Publishing): no NODE_AUTH_TOKEN / NPM_TOKEN anywhere.
       - name: Publish dsh-supervision to npm
@@ -200,7 +203,8 @@ jobs:
             echo "dsh-supervision@${VERSION} is already published; skipping."
             exit 0
           fi
-          pnpm publish --provenance --access public --tag "$TAG" --no-git-checks
+          node scripts/strip-workspace-deps.mjs
+          npm publish --provenance --access public --tag "$TAG"
 
       - name: Publish dsh-sup to npm
         env:
@@ -213,7 +217,10 @@ jobs:
             echo "dsh-sup@${VERSION} is already published; skipping."
             exit 0
           fi
-          pnpm publish --provenance --access public --tag "$TAG" --no-git-checks
+          # `working-directory` is packages/cli, so the script is addressed from
+          # the workspace root and runs against this package's manifest.
+          node "$GITHUB_WORKSPACE/scripts/strip-workspace-deps.mjs"
+          npm publish --provenance --access public --tag "$TAG"
 
       - name: Configure git identity
         run: |
