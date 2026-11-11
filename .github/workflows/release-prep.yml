@@ -101,13 +101,22 @@ jobs:
       - name: Build (release smoke)
         run: pnpm -r build
 
+      # The awk output always starts with the matched heading, so a non-empty
+      # file is not enough: require one non-heading line (a bullet) or the
+      # release would carry content-empty notes into the PR body and the
+      # GitHub Release.
       - name: Extract changelog notes
         run: |
+          set -euo pipefail
           awk -v v="${{ steps.ver.outputs.version }}" '
             /^## \[/ { if (found) exit }
             index($0, "## [" v "]") == 1 { found = 1 }
             found { print }
           ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if [ ! -s "$RUNNER_TEMP/notes.md" ] || ! grep -Eq '^[^#[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::No changelog content found for v${{ steps.ver.outputs.version }}; refusing to open a release PR without release notes."
+            exit 1
+          fi
 
       - name: Commit prepared release
         run: |
@@ -119,7 +128,16 @@ jobs:
           # version/changelog/fragment changes, never stray files.
           git add package.json packages/cli/package.json CHANGELOG.md .changes/
           git commit -m "chore(release): prepare v${{ steps.ver.outputs.version }}"
-          git push --force-with-lease origin "$BRANCH"
+          # `--force-with-lease` needs the remote ref fetched first (checkout
+          # only fetched the triggering ref, so an existing release branch would
+          # be rejected with "stale info"). Lease against the fetched SHA; a
+          # brand-new branch has nothing to lease against and pushes normally.
+          if git fetch --no-tags origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"; then
+            LEASE="$(git rev-parse "refs/remotes/origin/$BRANCH")"
+            git push --force-with-lease="$BRANCH:$LEASE" origin "$BRANCH"
+          else
+            git push origin "$BRANCH"
+          fi
 
       - name: Ensure release label
         env:

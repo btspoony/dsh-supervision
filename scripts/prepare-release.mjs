@@ -179,8 +179,19 @@ export function main() {
     console.error('Pass an explicit <version> (e.g. 0.1.0-alpha.1) or --patch for an auto bump.')
     process.exit(1)
   }
-  const [{ version: current }] = readVersions()
-  if (!current) throw new Error('package.json has no version')
+  // Every version surface must agree before anything is written: a drifted
+  // manifest would otherwise leave a half-prepared tree (changelog written,
+  // bump refused) that the next run cannot finish.
+  const versions = readVersions()
+  const current = versions[0]?.version
+  if (!current) throw new Error(`${versions[0]?.path} has no version`)
+  const drifted = versions.filter((surface) => surface.version !== current)
+  if (drifted.length) {
+    throw new Error(
+      `Version surfaces drifted: ${versions.map((v) => `${v.path}=${v.version ?? '<missing>'}`).join(', ')}. ` +
+        'Sync both manifests before preparing a release.',
+    )
+  }
 
   const version = explicit ?? autoBumpPatch(current)
   if (!VERSION_RE.test(version)) {

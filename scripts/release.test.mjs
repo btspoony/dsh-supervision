@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { autoBumpPatch, buildSectionBody, insertSection, parseFragment } from './prepare-release.mjs'
+import { distTagFor } from './release-version.mjs'
 import { tagExists, validateReleaseVersion } from './validate-release-version.mjs'
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url))
@@ -153,6 +154,36 @@ test('tagExists is null outside a repository and distinguishes created tags', (t
 
   assert.equal(tagExists('1.0.0', dir), true)
   assert.equal(tagExists('2.0.0', dir), false)
+})
+
+test('distTagFor publishes stable versions on latest', () => {
+  assert.equal(distTagFor('1.0.0'), 'latest')
+  assert.equal(distTagFor('0.1.2'), 'latest')
+})
+
+test('distTagFor maps a prerelease to the channel before the first dot', () => {
+  assert.equal(distTagFor('0.1.0-alpha.1'), 'alpha')
+  assert.equal(distTagFor('1.0.0-rc.1'), 'rc')
+})
+
+test('distTagFor refuses a latest, digit-only or empty prerelease channel', () => {
+  assert.throws(() => distTagFor('1.0.0-latest'), /must not publish under "latest"/)
+  assert.throws(() => distTagFor('1.0.0-latest.1'), /must not publish under "latest"/)
+  assert.throws(() => distTagFor('1.0.0-1'), /SemVer range, not a dist-tag/)
+  assert.throws(() => distTagFor('1.0.0-.1'), /empty prerelease channel/)
+  assert.throws(() => distTagFor('not-a-version'), /not a release version/)
+})
+
+test('prepare refuses drifted manifests before writing anything', (t) => {
+  const dir = fixture(t)
+  writeFileSync(join(dir, 'packages/cli/package.json'), JSON.stringify({ name: 'dsh-sup', version: '0.0.1' }, null, 2))
+  const changelogBefore = readFileSync(join(dir, 'CHANGELOG.md'), 'utf8')
+
+  const run = runPrepare(dir, '0.1.0-alpha.1')
+  assert.equal(run.status, 1)
+  assert.match(run.stderr, /Version surfaces drifted: package\.json=0\.0\.0, packages\/cli\/package\.json=0\.0\.1/)
+  assert.equal(readFileSync(join(dir, 'CHANGELOG.md'), 'utf8'), changelogBefore)
+  assert.equal(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version, '0.0.0')
 })
 
 test('prepare bumps both manifests, inserts the section and archives the fragment', (t) => {
