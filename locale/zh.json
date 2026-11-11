@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "会话监督",
-    "description": "把正在运行的 dsh web 会话交给 herdr-core 监督：插件把会话上报为 OSC 7501 记录，并转发操作者输入，用于 steer、取消、切换会话以及应答挂起的工具审批。",
+    "description": "把正在运行的 dsh web 会话桥接到任意读 OSC 7501 的终端 supervisor：插件在终端上报状态，并转发操作者输入，用于 steer、取消、切换会话以及应答挂起的工具审批（如 herdr-core）。",
     "detail": "docs/DETAIL.zh.md"
   }
 }
