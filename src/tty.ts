@@ -14,12 +14,23 @@ export type TtyOpen =
   | { readonly ok: true; readonly io: TtyIO }
   | { readonly ok: false; readonly reason: string }
 
+/** The stdin surface `lineFeed` needs, so a fake stream can stand in for it. */
+export interface LineSource {
+  setEncoding(encoding: BufferEncoding): unknown
+  on(event: 'data', listener: (chunk: string) => void): unknown
+  on(event: 'end', listener: () => void): unknown
+  off(event: 'data', listener: (chunk: string) => void): unknown
+  off(event: 'end', listener: () => void): unknown
+  resume(): unknown
+  pause(): unknown
+}
+
 /**
  * stdin as an async feed of complete lines, with a way to stop waiting on it.
  * Data read before anyone reads the feed is buffered, so a line typed during
  * the initial hello is handled in order afterwards.
  */
-function lineFeed(input: NodeJS.ReadStream): { lines(): AsyncIterable<string>; stop(): void } {
+export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; stop(): void } {
   const complete: string[] = []
   let rest = ''
   let stopped = false

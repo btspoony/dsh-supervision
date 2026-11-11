@@ -6,9 +6,12 @@
  */
 
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
 import { PROTO } from 'dsh-supervision-protocol'
 import type { HelloFrame } from 'dsh-supervision-protocol'
+import { lineFeed } from './tty.js'
+import type { LineSource } from './tty.js'
 import { TtyTransport } from './tty-transport.js'
 import type { TtyIO } from './tty-transport.js'
 import type { Bridge, TransportHandlers } from './transport.js'
@@ -314,4 +317,88 @@ test('close says bye for the bound session, clears, and releases the terminal', 
   io.type('after close')
   await settle()
   assert.deepEqual(host.lines, [])
+})
+
+/** stdin's shape for `lineFeed`: only the events and mode calls it uses. */
+class FakeStdin extends EventEmitter implements LineSource {
+  readonly modes: boolean[] = []
+  encoding: BufferEncoding | undefined
+  resumed = false
+  paused = false
+
+  /**
+   * The real stdin's `setRawMode` only exists on a terminal; this fake offers it
+   * so `setRaw`'s delegation can be observed.
+   */
+  setRawMode(mode: boolean): void {
+    this.modes.push(mode)
+  }
+
+  get isRaw(): boolean {
+    return this.modes.at(-1) ?? false
+  }
+
+  setEncoding(encoding: BufferEncoding): this {
+    this.encoding = encoding
+    return this
+  }
+
+  resume(): this {
+    this.resumed = true
+    return this
+  }
+
+  pause(): this {
+    this.paused = true
+    return this
+  }
+}
+
+test('lineFeed buffers a line typed before the first read, then replays it in order', async () => {
+  const stdin = new FakeStdin()
+  const feed = lineFeed(stdin)
+  // Arrives during the initial hello, before anyone iterates the feed.
+  stdin.emit('data', 'first\n')
+  stdin.emit('data', 'second\r\n')
+  const seen: string[] = []
+  for await (const line of feed.lines()) {
+    seen.push(line)
+    if (seen.length === 2) break
+  }
+  assert.deepEqual(seen, ['first', 'second'])
+  assert.equal(stdin.encoding, 'utf8')
+  assert.equal(stdin.resumed, true)
+})
+
+test('lineFeed carries a partial line across chunks', async () => {
+  const stdin = new FakeStdin()
+  const feed = lineFeed(stdin)
+  stdin.emit('data', 'one\r\nthr')
+  stdin.emit('data', 'ee\n')
+  const seen: string[] = []
+  for await (const line of feed.lines()) {
+    seen.push(line)
+    if (seen.length === 2) break
+  }
+  // The unterminated tail is held, not delivered: no half line is ever read.
+  assert.deepEqual(seen, ['one', 'three'])
+})
+
+test('lineFeed ends on end-of-input and stop() detaches the listeners', async () => {
+  const stdin = new FakeStdin()
+  const feed = lineFeed(stdin)
+  stdin.emit('data', 'tail\n')
+  stdin.emit('end')
+  const seen: string[] = []
+  for await (const line of feed.lines()) seen.push(line)
+  assert.deepEqual(seen, ['tail'])
+
+  const stopped = new FakeStdin()
+  const other = lineFeed(stopped)
+  other.stop()
+  assert.equal(stopped.paused, true)
+  assert.equal(stopped.listenerCount('data'), 0)
+  const never: string[] = []
+  for await (const line of other.lines()) never.push(line)
+  assert.deepEqual(never, [])
 })
