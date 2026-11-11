@@ -256,6 +256,74 @@ test('a second hello for the same session is busy, and the first keeps its bridg
   await transport.close()
 })
 
+test('a bind that finishes after its forwarder closed cannot claim the session', async () => {
+  const dir = tempDir()
+  let claimedResolve: () => void = () => {}
+  let release: () => void = () => {}
+  let droppedResolve: () => void = () => {}
+  let lateDone: () => void = () => {}
+  const claimed = new Promise<void>(resolve => { claimedResolve = resolve })
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const dropped = new Promise<void>(resolve => { droppedResolve = resolve })
+  const lateAttempt = new Promise<void>(resolve => { lateDone = resolve })
+  let claims = 0
+  let lateClaim: boolean | undefined
+  const { transport } = await serve(dir, {
+    // The F-001 window: `bind`/`create` resolves after the peer is already gone.
+    async hello(_frame, bridge): Promise<void> {
+      claims += 1
+      if (claims > 1) {
+        if (!bridge.claim('session-1')) return
+        bridge.send({ t: 'welcome', proto: PROTO, session: 'session-1', title: 'repo', state: 'idle', turn: 0 })
+        return
+      }
+      // Bind a session first so the transport's own drop is observable.
+      assert.equal(bridge.claim('session-keep'), true)
+      claimedResolve()
+      await dropped
+      await gate
+      lateClaim = bridge.claim('session-1')
+      lateDone()
+    },
+    bye(session): void {
+      if (session === 'session-keep') droppedResolve()
+    },
+  })
+
+  const forwarder = new Client(transport.socketPath)
+  await forwarder.ready()
+  forwarder.write({ t: 'hello', proto: 1, pid: process.pid, attach: 'session-keep' })
+  // Destroy only once the server holds the binding, so `bye` below is certain.
+  await claimed
+  forwarder.socket.destroy()
+  await dropped
+
+  try {
+    release()
+    await lateAttempt
+    assert.equal(lateClaim, false)
+    // Not `bridged`: the dead forwarder owns nothing, so there is nothing to reclaim.
+    assert.equal(transport.reclaim('session-1'), false)
+
+    const next = new Client(transport.socketPath)
+    await next.ready()
+    next.write({ t: 'hello', proto: 1, pid: process.pid, attach: 'session-1' })
+    const [frame] = await next.take(1)
+    assert.deepEqual(frame, {
+      t: 'welcome',
+      proto: PROTO,
+      session: 'session-1',
+      title: 'repo',
+      state: 'idle',
+      turn: 0,
+    })
+    assert.equal(transport.reclaim('session-1'), true)
+  } finally {
+    // A failed assertion must not leave the listener open and stall the runner.
+    await transport.close()
+  }
+})
+
 test('list is answered without binding a bridge', async () => {
   const dir = tempDir()
   const { transport } = await serve(dir)

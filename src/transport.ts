@@ -226,6 +226,11 @@ export class SocketTransport implements Transport {
   }
 
   #claim(connection: Connection, session: string): boolean {
+    // A `hello`, `/new` or `/attach` can finish binding after the forwarder died.
+    // Binding it then would report the session `bridged` with no owner and
+    // refuse every later attach, so a connection the transport no longer owns
+    // (or whose socket is already gone) never claims.
+    if (!this.#connections.has(connection) || connection.socket.destroyed) return false
     const held = this.#bridged.get(session)
     if (held !== undefined && held !== connection) return false
     // A connection that switches sessions releases the old one: leaving it
