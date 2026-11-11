@@ -1,0 +1,317 @@
+/**
+ * TtyTransport behaviour over a fake terminal: the synthesized first session,
+ * the refusal that keeps the transport mounted, unbridged re-entry, line
+ * serialization behind an in-flight hello, reclaim and close. No real tty, so
+ * the suite runs anywhere.
+ */
+
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { PROTO } from 'dsh-supervision-protocol'
+import type { HelloFrame } from 'dsh-supervision-protocol'
+import { TtyTransport } from './tty-transport.js'
+import type { TtyIO } from './tty-transport.js'
+import type { Bridge, TransportHandlers } from './transport.js'
+
+/** One macrotask turn: long enough for the transport's line loop to run. */
+function settle(): Promise<void> {
+  return new Promise<void>(resolve => { setImmediate(resolve) })
+}
+
+/** Waits until `predicate` holds; the transport settles at its own pace. */
+async function until(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    if (predicate()) return
+    await settle()
+  }
+  throw new Error('condition never held')
+}
+
+/** A latch the test opens by hand; ES2022 has no `Promise.withResolvers`. */
+class Latch {
+  #open = false
+  readonly #waiters: (() => void)[] = []
+
+  open(): void {
+    this.#open = true
+    for (const wake of this.#waiters.splice(0)) wake()
+  }
+
+  wait(): Promise<void> {
+    if (this.#open) return Promise.resolve()
+    return new Promise<void>(resolve => { this.#waiters.push(resolve) })
+  }
+}
+
+/** A terminal that records what it received and replays lines a test pushes. */
+class FakeTty implements TtyIO {
+  readonly out: string[] = []
+  readonly raw: boolean[] = []
+  closes = 0
+  #queue: string[] = []
+  #wake: (() => void) | undefined
+  #ended = false
+
+  write(text: string): void {
+    this.out.push(text)
+  }
+
+  setRaw(raw: boolean): void {
+    this.raw.push(raw)
+  }
+
+  close(): void {
+    this.closes += 1
+    this.#ended = true
+    this.#wake?.()
+  }
+
+  /** Types one complete line, as the owning keyboard would. */
+  type(line: string): void {
+    this.#queue.push(line)
+    this.#wake?.()
+  }
+
+  get rawNow(): boolean {
+    return this.raw.at(-1) ?? false
+  }
+
+  async *lines(): AsyncGenerator<string> {
+    for (;;) {
+      const line = this.#queue.shift()
+      if (line !== undefined) {
+        yield line
+        continue
+      }
+      if (this.#ended) return
+      await new Promise<void>(resolve => { this.#wake = resolve })
+      this.#wake = undefined
+    }
+  }
+}
+
+/** A host that creates one session per hello, like `handlersFor` does. */
+class Host {
+  readonly hellos: HelloFrame[] = []
+  readonly lines: { readonly text: string; readonly session: string | undefined }[] = []
+  readonly byes: string[] = []
+  /** The bridge the transport handed to the last hello. */
+  bridge: Bridge | undefined
+  /** Why the next hello answers an error and calls `bridge.close()`. */
+  refuse: string | undefined
+  /** A hello waits on this latch before binding, to prove line serialization. */
+  hold: Latch | undefined
+
+  readonly handlers: TransportHandlers = {
+    hello: async (frame: HelloFrame, bridge: Bridge): Promise<void> => {
+      this.hellos.push(frame)
+      this.bridge = bridge
+      await this.hold?.wait()
+      if (this.refuse !== undefined) {
+        bridge.send({ t: 'error', code: 'create-failed', message: this.refuse })
+        // The seam's contract: a refused hello finishes its own bridge.
+        bridge.close()
+        return
+      }
+      const session = `session-${String(this.hellos.length)}`
+      if (!bridge.claim(session)) return
+      bridge.send({ t: 'welcome', proto: PROTO, session, title: 'repo', state: 'idle', turn: 0 })
+    },
+    line: (text: string, bridge: Bridge): void => {
+      this.lines.push({ text, session: bridge.session })
+    },
+    list: () => [],
+    bye: (session: string): void => {
+      this.byes.push(session)
+    },
+  }
+}
+
+/** A mounted transport over a fake terminal and a fake host. */
+async function mounted(): Promise<{ io: FakeTty; host: Host; transport: TtyTransport }> {
+  const io = new FakeTty()
+  const host = new Host()
+  const transport = new TtyTransport(io)
+  await transport.start(host.handlers)
+  return { io, host, transport }
+}
+
+test('start creates the first session from the bare default hello', async () => {
+  const { io, host } = await mounted()
+  assert.deepEqual(host.hellos, [{ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: process.cwd() } }])
+  // `welcome` reaches the terminal as the root idle record, raw mode is on.
+  assert.equal(io.out.length, 1)
+  assert.match(io.out[0] ?? '', /state=idle/)
+  assert.deepEqual(io.raw, [true])
+})
+
+test('send renders through renderFrame and drops frames the tty cannot show', async () => {
+  const { io, transport } = await mounted()
+  io.out.length = 0
+  transport.send({ t: 'echo', text: 'hello' })
+  transport.send({ t: 'osc', data: '\u001b]7501;state=working\u001b\\' })
+  transport.send({ t: 'sessions', items: [] })
+  assert.deepEqual(io.out, ['hello\n', '\u001b]7501;state=working\u001b\\'])
+})
+
+test('a frame addressed to another session is not written', async () => {
+  const { io, transport } = await mounted()
+  io.out.length = 0
+  transport.send({ t: 'echo', text: 'elsewhere' }, 'session-other')
+  assert.deepEqual(io.out, [])
+  transport.send({ t: 'echo', text: 'here' }, 'session-1')
+  assert.deepEqual(io.out, ['here\n'])
+})
+
+test('a refused create renders the error record and stays mounted', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  host.refuse = 'no model'
+  const transport = new TtyTransport(io)
+  await transport.start(host.handlers)
+
+  assert.match(io.out.at(-1) ?? '', /state=error/)
+  // `msg` rides base64 inside the OSC record, exactly as the forwarder writes it.
+  const msg = /:msg=([^:\u001b]+)/.exec(io.out.at(-1) ?? '')?.[1] ?? ''
+  assert.equal(Buffer.from(msg, 'base64').toString('utf8'), 'create-failed: no model')
+  // The bridge is finished, so the terminal is back in cooked mode.
+  assert.equal(io.rawNow, false)
+  assert.deepEqual(host.byes, [])
+
+  // The operator retries on the same keyboard: the transport never unmounted.
+  host.refuse = undefined
+  io.type('/new /tmp')
+  await until(() => host.hellos.length === 2)
+  await until(() => io.rawNow)
+  assert.deepEqual(host.hellos[1], { t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/tmp' } })
+})
+
+test('an unbridged /new without a cwd sends the bare hello arm', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  host.refuse = 'no model'
+  const transport = new TtyTransport(io)
+  await transport.start(host.handlers)
+
+  host.refuse = undefined
+  io.type('/new')
+  await until(() => host.hellos.length === 2)
+  assert.deepEqual(host.hellos[1], { t: 'hello', proto: PROTO, pid: process.pid })
+})
+
+test('an unbridged /new with a relative path is refused without a hello', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  host.refuse = 'no model'
+  const transport = new TtyTransport(io)
+  await transport.start(host.handlers)
+  io.out.length = 0
+
+  io.type('/new relative/dir')
+  await until(() => io.out.length === 1)
+  assert.equal(host.hellos.length, 1)
+  assert.deepEqual(io.out, ['new failed: relative/dir is not an absolute path\n'])
+})
+
+test('an unbridged /attach re-enters hello with the attach arm', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  host.refuse = 'no model'
+  const transport = new TtyTransport(io)
+  await transport.start(host.handlers)
+
+  host.refuse = undefined
+  io.type('/attach session-abc')
+  await until(() => host.hellos.length === 2)
+  assert.deepEqual(host.hellos[1], { t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-abc' })
+})
+
+test('an unbridged stray line gets one guidance echo; a blank line gets none', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  host.refuse = 'no model'
+  const transport = new TtyTransport(io)
+  await transport.start(host.handlers)
+  io.out.length = 0
+
+  io.type('run the tests')
+  await until(() => io.out.length === 1)
+  io.type('   ')
+  // A blank line is framing: one turn proves nothing follows it.
+  await settle()
+  assert.deepEqual(io.out, ['no session bridged; /new or /attach\n'])
+  assert.deepEqual(host.lines, [])
+})
+
+test('a line typed during an in-flight hello waits for the binding', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  const hold = new Latch()
+  host.hold = hold
+  const transport = new TtyTransport(io)
+  const started = transport.start(host.handlers)
+
+  // Queued before the first hello settles: it must not be handled unbridged.
+  io.type('steer after hello')
+  await until(() => host.hellos.length === 1)
+  assert.deepEqual(host.lines, [])
+  hold.open()
+  await started
+  await until(() => host.lines.length === 1)
+  assert.deepEqual(host.lines, [{ text: 'steer after hello', session: 'session-1' }])
+})
+
+test('reclaim returns false when the session is not bound', async () => {
+  const { io, host, transport } = await mounted()
+  assert.equal(transport.reclaim('session-other'), false)
+  assert.deepEqual(host.byes, [])
+  assert.equal(io.rawNow, true)
+})
+
+test('reclaim drops the binding, says bye, clears the record and stays mounted', async () => {
+  const { io, host, transport } = await mounted()
+  io.out.length = 0
+  assert.equal(transport.reclaim('session-1'), true)
+  assert.deepEqual(host.byes, ['session-1'])
+  assert.match(io.out.at(-1) ?? '', /state=clear/)
+  assert.equal(io.rawNow, false)
+
+  // Mounted: a re-entry line binds again.
+  io.type('/attach session-2')
+  await until(() => host.hellos.length === 2)
+  await until(() => io.rawNow)
+  assert.deepEqual(host.hellos[1], { t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-2' })
+})
+
+test('a claim that settles after close binds nothing', async () => {
+  const io = new FakeTty()
+  const host = new Host()
+  const hold = new Latch()
+  host.hold = hold
+  const transport = new TtyTransport(io)
+  const started = transport.start(host.handlers)
+  await until(() => host.hellos.length === 1)
+
+  // The first hello is still in flight, so disposal must win over it.
+  await transport.close()
+  hold.open()
+  await started
+  assert.equal(host.bridge?.session, undefined)
+  assert.equal(io.rawNow, false)
+  assert.deepEqual(host.byes, [])
+})
+
+test('close says bye for the bound session, clears, and releases the terminal', async () => {
+  const { io, host, transport } = await mounted()
+  io.out.length = 0
+  await transport.close()
+  assert.deepEqual(host.byes, ['session-1'])
+  assert.match(io.out.at(-1) ?? '', /state=clear/)
+  assert.equal(io.rawNow, false)
+  assert.equal(io.closes, 1)
+
+  // Nothing is read once closed, even if the terminal still delivers a line.
+  io.type('after close')
+  await settle()
+  assert.deepEqual(host.lines, [])
+})
