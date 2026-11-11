@@ -2,7 +2,13 @@
   "name": "dsh-supervision",
   "version": "0.1.0-alpha.1",
   "description": "Cordis plugin: bridge a running DeepSeek Harness web session to any terminal supervisor that reads OSC 7501",
+  "keywords": [
+    "dsh",
+    "dsh-plugin"
+  ],
   "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,12 +20,14 @@
   },
   "packageManager": "pnpm@12.16.1",
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "dsh": "^0.2.2-rc.1"
   },
   "files": [
     "lib/index.js",
     "lib/index.d.ts",
     "lib/client/**",
+    "cordis.patch.yml",
     "icon.svg",
     "locale",
     "docs",
@@ -37,9 +45,14 @@
       "types": "./lib/client/index.d.ts",
       "default": "./lib/client/index.js"
     },
-    "./locale/*.json": "./locale/*.json"
+    "./locale/*.json": "./locale/*.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-api-remotes",
