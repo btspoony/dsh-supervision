@@ -4,6 +4,14 @@
   "description": "Cordis plugin: expose a running DeepSeek Harness web session to herdr-core through the dsh-sup forwarder",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/btspoony/dsh-supervision.git"
+  },
+  "homepage": "https://github.com/btspoony/dsh-supervision#readme",
+  "bugs": {
+    "url": "https://github.com/btspoony/dsh-supervision/issues"
+  },
   "packageManager": "pnpm@12.16.1",
   "engines": {
     "node": ">=22"

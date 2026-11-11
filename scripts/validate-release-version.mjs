@@ -9,7 +9,10 @@
  *   1. Tag format: `v` prefix + VERSION_RE.
  *   2. `package.json` and `packages/cli/package.json` both equal the tag
  *      version (v prefix stripped); every surface is reported.
- *   3. Git tag `v<version>` does not exist yet (`git rev-parse` probe; exit 1
+ *   3. The version yields a legal npm dist-tag (`distTagFor`): an empty,
+ *      digit-only or `latest` prerelease channel would pass prep and then fail
+ *      the publish job, so it is refused here instead.
+ *   4. Git tag `v<version>` does not exist yet (`git rev-parse` probe; exit 1
  *      with "already released" when it does). Outside a git repository the tag
  *      check is skipped with a note (fixture verification scenario, and the
  *      Release prep job runs it against a fresh tag).
@@ -22,7 +25,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { VERSION_RE, readVersions } from './release-version.mjs'
+import { VERSION_RE, distTagFor, readVersions } from './release-version.mjs'
 
 /**
  * @returns true when the tag exists, false when it does not, null when the
@@ -65,6 +68,14 @@ export function validateReleaseVersion(version, versions, tagState) {
     } else {
       notes.push(`OK ${surface.path}: ${surface.version}`)
     }
+  }
+
+  // The dist-tag is checked whatever the tag state: the Release job's resume
+  // path passes `tagState = null` and still has to publish on a legal channel.
+  try {
+    notes.push(`OK npm dist-tag: ${distTagFor(version)}`)
+  } catch (err) {
+    errors.push(`FAIL npm dist-tag: ${err instanceof Error ? err.message : err}`)
   }
 
   if (tagState === null) {

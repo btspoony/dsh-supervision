@@ -4,6 +4,14 @@
   "description": "Forwarder: reports a supervised DSH web session to herdr-core and relays stdin",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/btspoony/dsh-supervision.git"
+  },
+  "homepage": "https://github.com/btspoony/dsh-supervision#readme",
+  "bugs": {
+    "url": "https://github.com/btspoony/dsh-supervision/issues"
+  },
   "engines": {
     "node": ">=22"
   },

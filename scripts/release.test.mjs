@@ -106,6 +106,7 @@ test('validateReleaseVersion reports every surface that matches the tag', () => 
   assert.deepEqual(result.notes, [
     'OK package.json: 0.1.0-alpha.1',
     'OK packages/cli/package.json: 0.1.0-alpha.1',
+    'OK npm dist-tag: alpha',
     'OK git tag v0.1.0-alpha.1 does not exist',
   ])
 })
@@ -125,7 +126,34 @@ test('validateReleaseVersion refuses an existing tag and skips the check outside
   const versions = [{ path: 'package.json', version: '1.0.0' }]
   assert.equal(validateReleaseVersion('1.0.0', versions, true).ok, false)
   assert.match(validateReleaseVersion('1.0.0', versions, true).errors[0], /already released/)
-  assert.match(validateReleaseVersion('1.0.0', versions, null).notes[1], /not a git repository/)
+  assert.ok(
+    validateReleaseVersion('1.0.0', versions, null).notes.some((note) => /not a git repository/.test(note)),
+    'tag check must be skipped with a note outside a repo',
+  )
+})
+
+test('validateReleaseVersion refuses a version whose dist-tag would fail publication', () => {
+  for (const version of ['1.0.0-1', '1.0.0-.1', '1.0.0-latest.1']) {
+    const versions = [
+      { path: 'package.json', version },
+      { path: 'packages/cli/package.json', version },
+    ]
+    for (const tagState of [false, null]) {
+      const result = validateReleaseVersion(version, versions, tagState)
+      assert.equal(result.ok, false, `${version} must be refused (tagState=${tagState})`)
+      assert.ok(
+        result.errors.some((error) => /npm dist-tag/.test(error)),
+        `${version}: ${result.errors.join('; ')}`,
+      )
+    }
+  }
+  for (const version of ['0.1.0-alpha.1', '1.0.0']) {
+    const versions = [
+      { path: 'package.json', version },
+      { path: 'packages/cli/package.json', version },
+    ]
+    assert.equal(validateReleaseVersion(version, versions, false).ok, true, version)
+  }
 })
 
 test('tagExists is null outside a repository and distinguishes created tags', (t) => {
@@ -147,9 +175,9 @@ test('tagExists is null outside a repository and distinguishes created tags', (t
   git('init', '-q')
   writeFileSync(join(dir, 'README.md'), '# fixture\n')
   git('add', '.')
-  git('commit', '-q', '-m', 'fixture')
-  // -c tag.gpgSign=false: a developer's global config must not sign (and thus
-  // fail) the fixture tag.
+  // -c *.gpgSign=false: a developer's global config must not sign (and thus
+  // fail) the fixture commit or tag.
+  git('-c', 'commit.gpgSign=false', 'commit', '-q', '-m', 'fixture')
   git('-c', 'tag.gpgSign=false', 'tag', 'v1.0.0')
 
   assert.equal(tagExists('1.0.0', dir), true)
@@ -172,6 +200,13 @@ test('distTagFor refuses a latest, digit-only or empty prerelease channel', () =
   assert.throws(() => distTagFor('1.0.0-1'), /SemVer range, not a dist-tag/)
   assert.throws(() => distTagFor('1.0.0-.1'), /empty prerelease channel/)
   assert.throws(() => distTagFor('not-a-version'), /not a release version/)
+})
+
+test('parseFragment refuses a frontmatter block that is never closed', () => {
+  assert.throws(
+    () => parseFragment('broken.md', '---\ncategory: Added\n- A bullet with no closing fence.\n'),
+    /fragment broken\.md: frontmatter opened with "---" but never closed/,
+  )
 })
 
 test('prepare refuses drifted manifests before writing anything', (t) => {

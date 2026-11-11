@@ -2,7 +2,7 @@ name: Release
 
 # PR-driven publish. Merging a `release vX.Y.Z` PR (opened by the Release prep
 # workflow) runs the whole release inline on the pull_request_target event:
-# guard -> validate -> changelog gate -> build -> npm publish both packages
+# guard -> validate -> changelog gate -> build -> publish both packages
 # (provenance) -> tag -> GitHub Release. There is deliberately NO push:tags
 # auto-publish path: a manual `git tag && git push --tags` does not publish.
 #
@@ -180,9 +180,16 @@ jobs:
       # failed on the second package can be re-run after the first one landed
       # instead of dying on an immutable version.
       #
+      # `pnpm publish`, not `npm publish`: both manifests carry a
+      # `workspace:*` devDependency that npm would copy into the tarball
+      # verbatim; pnpm rewrites it to the real version at pack time.
+      #
       # `--tag "$TAG"`: npm >= 11 hard-throws when publishing a prerelease
-      # without an explicit --tag. Pure OIDC (Trusted Publishing): no
-      # NODE_AUTH_TOKEN / NPM_TOKEN anywhere.
+      # without an explicit --tag. `--no-git-checks`: the job checks out the
+      # detached merge commit, so pnpm's "branch is in sync" check does not
+      # apply (the tree is clean by construction).
+      #
+      # Pure OIDC (Trusted Publishing): no NODE_AUTH_TOKEN / NPM_TOKEN anywhere.
       - name: Publish dsh-supervision to npm
         env:
           TAG: ${{ steps.disttag.outputs.tag }}
@@ -193,7 +200,7 @@ jobs:
             echo "dsh-supervision@${VERSION} is already published; skipping."
             exit 0
           fi
-          npm publish --provenance --access public --tag "$TAG"
+          pnpm publish --provenance --access public --tag "$TAG" --no-git-checks
 
       - name: Publish dsh-sup to npm
         env:
@@ -206,7 +213,7 @@ jobs:
             echo "dsh-sup@${VERSION} is already published; skipping."
             exit 0
           fi
-          npm publish --provenance --access public --tag "$TAG"
+          pnpm publish --provenance --access public --tag "$TAG" --no-git-checks
 
       - name: Configure git identity
         run: |

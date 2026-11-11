@@ -86,11 +86,14 @@ export function autoBumpPatch(current) {
 }
 
 /** @returns {{ fm: Record<string, string>, body: string }} */
-export function parseFrontmatter(text) {
+export function parseFrontmatter(text, file = '<fragment>') {
   const fm = {}
   if (!text.startsWith('---')) return { fm, body: text }
   const end = text.indexOf('\n---', 3)
-  if (end === -1) return { fm, body: text }
+  if (end === -1) {
+    // An unclosed block would otherwise be written into the changelog verbatim.
+    throw new Error(`fragment ${file}: frontmatter opened with "---" but never closed`)
+  }
   const fmText = text.slice(3, end)
   const body = text.slice(end + 4).replace(/^\n/, '')
   for (const line of fmText.split('\n')) {
@@ -102,7 +105,7 @@ export function parseFrontmatter(text) {
 
 /** @returns {Fragment} */
 export function parseFragment(file, text) {
-  const { fm, body } = parseFrontmatter(text)
+  const { fm, body } = parseFrontmatter(text, file)
   const bullets = body
     .split('\n')
     .map((line) => line.trimEnd())
