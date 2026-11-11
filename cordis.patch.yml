@@ -1,0 +1,7 @@
+# The dsh-supervision profile-bundle patch: insert the plugin row over the
+# profile root. A GUI-only `dsh web` then exposes the control socket and the
+# /dsh-supervision routes; the effect layer opens per bridge when a `dsh-sup`
+# forwarder in the supervisor's PTY connects.
+- insert:
+    - id: dsh-supervision
+      name: 'dsh-supervision'
