@@ -13,7 +13,12 @@ export const EXIT = {
   protocol: 6,
 } as const;
 
-/** Maps a plugin `error.code` onto its exit code (ADR); anything else is a lost backend. */
+/**
+ * Maps an `error.code` onto its exit code (ADR): the plugin's refusals and the
+ * forwarder's own `protocol` refusal both keep their ADR code, so the exit
+ * never claims a lost backend for a local refusal. Genuinely unknown codes
+ * still mean a lost backend.
+ */
 export function exitCodeFor(code: string): number {
   switch (code) {
     case 'busy':
@@ -22,6 +27,8 @@ export function exitCodeFor(code: string): number {
       return EXIT.locked;
     case 'create-failed':
       return EXIT.createFailed;
+    case 'protocol':
+      return EXIT.protocol;
     default:
       return EXIT.backendLost;
   }

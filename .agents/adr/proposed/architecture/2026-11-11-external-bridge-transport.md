@@ -275,7 +275,7 @@ never change `turn` and are invisible to `hc wait`.
 | `/reject <ask-id>` | settle it `rejected` |
 | `/cancel` | `agent.cancel({ kind: 'user' })` |
 | `/status` | echo one line: session, state, turn, pending ask ids |
-| `/new [cwd]` | create a fresh session through `ctx.agents.create()` and attach the bridge to it; `cwd` defaults to the current session's |
+| `/new [cwd]` | create a fresh session through `ctx.agents.create()` and attach the bridge to it; `cwd` defaults to the current session's and must be absolute — a relative argument is refused with `new failed: <cwd> is not an absolute path` and nothing is created |
 | `/attach <session-id>` | switch the bridge to another live session (refused while an ask is parked) |
 
 Bare `/y` / `/n` settle the single parked ask and are refused when more than one
@@ -363,6 +363,7 @@ behaviour; a process inside an hc terminal exposes no such surface at all.
 | unknown/resumable session | resume; if the writer lock is held elsewhere, `error:code=locked`, exit 4 |
 | create fails (no factory, no default model, bad cwd) | `error:code=create-failed` with the reason, exit 5 |
 | stdin line over `MAX_FRAME` | `encodeFrame` refuses it locally: nothing is written, `error:msg` names the oversized line, exit 6. The backend is alive, so this is never `backend offline` |
+| plugin refuses a client frame: `proto` not 1, malformed or oversized frame, `line` before `hello` | `error:code=protocol` carrying the reason, exit 6. The frame bound no bridge and the backend is alive, so this is never `backend offline` either |
 | usage/no candidate/multiple `dsh web` processes | print candidates, exit 2 |
 | `hc kill w1` | kills the forwarder only. The agent, session and browser GUI keep running; approvals return to the GUI answerer |
 | browser `reclaim` | host sends `bye/reclaimed` and drops that bridge only. Forwarder path: the socket closes, the forwarder writes `clear` and exits 0. tty path: the process writes `clear`, restores cooked mode and stays mounted for `/new` or `/attach` — it must not exit, because exiting would drop every session the host is running. Approvals return to the GUI immediately in both cases; the UI banner disappears on the next poll |
