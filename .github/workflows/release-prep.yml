@@ -1,0 +1,179 @@
+name: Release prep
+
+# Manual entry point: assemble changelog fragments, bump the version of both
+# published packages, build, and open a `release vX.Y.Z` PR. Merging that PR
+# runs the Release workflow (publish + tag + GitHub Release). No
+# NPM_TOKEN / NODE_AUTH_TOKEN: npm auth in the Release workflow is Trusted
+# Publishing (OIDC) only.
+#
+# Trigger: Actions -> "Release prep" -> Run workflow. Pass an explicit target
+# version (e.g. 0.1.0-alpha.1) or leave the input empty for an auto bump
+# (`--patch`: X.Y.Z-pre.N -> N+1, stays in the prerelease line).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Target version (e.g. 0.1.0-alpha.1). Leave empty for auto pre-release bump."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  # gh label create requires issues:write (labels API) — without it the
+  # ensure-label step silently fails and `gh pr create --label release`
+  # errors with "label 'release' not found".
+  issues: write
+
+concurrency:
+  group: release-prep
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Validate the input format BEFORE writing it to GITHUB_OUTPUT: a
+      # malformed (e.g. multiline) value must fail here instead of injecting
+      # extra output lines that downstream steps would read as the version.
+      - name: Reject already-released version
+        id: want
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          V="$INPUT_VERSION"
+          if [ -z "$V" ]; then V="auto"; fi
+          if [ "$V" != "auto" ]; then
+            case "$V" in
+              *$'\n'*|*$'\r'*)
+                echo "::error::Invalid version \"$V\" (must be a single line)."
+                exit 1
+                ;;
+            esac
+            if ! printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::Invalid version \"$V\". Expected X.Y.Z or X.Y.Z-pre.N (e.g. 0.1.0-alpha.1)."
+              exit 1
+            fi
+            if git rev-parse "v$V" >/dev/null 2>&1; then
+              echo "::error::Tag v$V already exists."
+              exit 1
+            fi
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble fragments + bump version
+        run: |
+          V="${{ steps.want.outputs.version }}"
+          if [ "$V" = "auto" ]; then
+            pnpm release:prepare -- --patch
+          else
+            pnpm release:prepare -- "$V"
+          fi
+
+      - name: Resolve resulting version
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release version
+        run: pnpm release:validate -- "v${{ steps.ver.outputs.version }}"
+
+      # Workspace-wide: the release publishes both the plugin and the CLI, so
+      # both must build before the version is committed.
+      - name: Build (release smoke)
+        run: pnpm -r build
+
+      # The awk output always starts with the matched heading, so a non-empty
+      # file is not enough: require one non-heading line (a bullet) or the
+      # release would carry content-empty notes into the PR body and the
+      # GitHub Release.
+      - name: Extract changelog notes
+        run: |
+          set -euo pipefail
+          awk -v v="${{ steps.ver.outputs.version }}" '
+            /^## \[/ { if (found) exit }
+            index($0, "## [" v "]") == 1 { found = 1 }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if [ ! -s "$RUNNER_TEMP/notes.md" ] || ! grep -Eq '^[^#[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::No changelog content found for v${{ steps.ver.outputs.version }}; refusing to open a release PR without release notes."
+            exit 1
+          fi
+
+      - name: Commit prepared release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BRANCH="release/v${{ steps.ver.outputs.version }}"
+          git checkout -B "$BRANCH"
+          # Explicit paths only: the release PR must contain exactly the
+          # version/changelog/fragment changes, never stray files.
+          git add package.json packages/cli/package.json CHANGELOG.md .changes/
+          git commit -m "chore(release): prepare v${{ steps.ver.outputs.version }}"
+          # `--force-with-lease` needs the remote ref fetched first (checkout
+          # only fetched the triggering ref, so an existing release branch would
+          # be rejected with "stale info"). Lease against the fetched SHA; a
+          # brand-new branch has nothing to lease against and pushes normally.
+          if git fetch --no-tags origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"; then
+            LEASE="$(git rev-parse "refs/remotes/origin/$BRANCH")"
+            git push --force-with-lease="$BRANCH:$LEASE" origin "$BRANCH"
+          else
+            git push origin "$BRANCH"
+          fi
+
+      - name: Ensure release label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh label create release --color 0E8A16 --force
+
+      # State-aware PR handling. Query open PRs explicitly:
+      #   open PR -> update title/body;
+      #   none    -> create a new PR (even when a closed PR exists for the
+      #              same head branch — never reopen a closed release PR).
+      - name: Open or update release PR
+        env:
+          # The built-in token is enough when the repository allows Actions to
+          # create pull requests. An org that disables that capability must set
+          # a `RELEASE_PAT` secret and use `secrets.RELEASE_PAT` here instead.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          BRANCH="release/v${VERSION}"
+          TITLE="release v${VERSION}"
+          {
+            echo "Generated by the **Release prep** workflow."
+            echo
+            echo "Merging this PR publishes dsh-supervision@v${VERSION} and dsh-sup@v${VERSION} to npm (--provenance; Trusted Publishing OIDC), tags v${VERSION}, and creates the GitHub Release."
+            echo
+            echo "## Changelog"
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+          } > "$RUNNER_TEMP/pr-body.md"
+
+          OPEN_NUM="$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number' 2>/dev/null || true)"
+          if [ -n "$OPEN_NUM" ]; then
+            gh pr edit "$OPEN_NUM" --title "$TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
+            echo "Updated existing open release PR #${OPEN_NUM} for $BRANCH"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" \
+              --body-file "$RUNNER_TEMP/pr-body.md" --label release
+            echo "Created release PR for $BRANCH"
+          fi

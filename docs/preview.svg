@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="dsh-supervision topology: a dsh web session, the plugin with a control socket and an in-process tty transport, the dsh-sup forwarder, herdr-core, and the approval parking and stdin relay lanes" font-family="-apple-system, &quot;SF Pro Text&quot;, &quot;Segoe UI&quot;, system-ui, sans-serif">
+  <title>dsh-supervision topology</title>
+  <desc>One running dsh web process hosts the dsh-supervision plugin. Two transports carry the same protocol: a 0600 control socket driven by the dsh-sup forwarder in the herdr-core terminal (solid), and the process's own terminal when HC_TERMINAL_ID is set (dashed). The lower lanes show tool approvals parked as a blocked root record, and stdin lines relayed into the agent.</desc>
+
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2F6FEB"/>
+    </marker>
+    <marker id="arrow-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#40506A"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2F9E6D"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#7B3FE4"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="540" fill="#FFFFFF"/>
+
+  <text x="40" y="44" fill="#141821" font-size="22" font-weight="700">dsh-supervision — two transports, one protocol</text>
+  <text x="40" y="68" fill="#5B6673" font-size="13">A running dsh web session reports to herdr-core and takes operator input back; DSH and herdr-core are unchanged.</text>
+
+  <!-- dsh web session -->
+  <rect x="40" y="104" width="164" height="104" rx="10" fill="#F7F9FC" stroke="#D9E0EA"/>
+  <text x="58" y="132" fill="#141821" font-size="15" font-weight="700">dsh web</text>
+  <text x="58" y="154" fill="#5B6673" font-size="12">session process</text>
+  <text x="58" y="174" fill="#7A8794" font-size="11.5">browser + host</text>
+
+  <!-- session -> plugin -->
+  <line x1="204" y1="156" x2="262" y2="156" stroke="#2F6FEB" stroke-width="1.4" marker-end="url(#arrow-blue)"/>
+  <text x="233" y="148" fill="#2F6FEB" font-size="10.5" text-anchor="middle">events</text>
+
+  <!-- plugin -->
+  <rect x="264" y="88" width="264" height="200" rx="12" fill="#F4F7FF" stroke="#C9D6EE"/>
+  <text x="280" y="116" fill="#141821" font-size="15" font-weight="700">dsh-supervision plugin</text>
+
+  <rect x="280" y="130" width="232" height="62" rx="8" fill="#E8EFFF" stroke="#2F6FEB" stroke-width="1.2"/>
+  <text x="294" y="154" fill="#141821" font-size="13.5" font-weight="700">control socket</text>
+  <text x="294" y="174" fill="#40506A" font-size="11">0600 unix socket + registry</text>
+
+  <rect x="280" y="204" width="232" height="62" rx="8" fill="#F3ECFF" stroke="#7B3FE4" stroke-width="1.2" stroke-dasharray="6 4"/>
+  <text x="294" y="228" fill="#141821" font-size="13.5" font-weight="700">in-process tty</text>
+  <text x="294" y="248" fill="#40506A" font-size="11">HC_TERMINAL_ID set</text>
+
+  <!-- plugin <-> forwarder -->
+  <line x1="528" y1="156" x2="566" y2="156" stroke="#40506A" stroke-width="1.4" marker-start="url(#arrow-ink)" marker-end="url(#arrow-ink)"/>
+  <text x="547" y="148" fill="#40506A" font-size="10.5" text-anchor="middle">frames</text>
+
+  <!-- forwarder -->
+  <rect x="568" y="104" width="148" height="104" rx="10" fill="#FFF8EC" stroke="#E0B072"/>
+  <text x="586" y="132" fill="#141821" font-size="15" font-weight="700">dsh-sup</text>
+  <text x="586" y="154" fill="#5B6673" font-size="12">forwarder</text>
+  <text x="586" y="174" fill="#7A8794" font-size="11.5">stdin ⇄ OSC</text>
+
+  <!-- forwarder -> herdr-core -->
+  <line x1="716" y1="156" x2="758" y2="156" stroke="#2F9E6D" stroke-width="1.4" marker-end="url(#arrow-green)"/>
+  <text x="737" y="148" fill="#2F9E6D" font-size="10" text-anchor="middle">/dev/tty</text>
+
+  <!-- herdr-core -->
+  <rect x="760" y="104" width="160" height="104" rx="10" fill="#EEFAF3" stroke="#7FCFA6"/>
+  <text x="778" y="132" fill="#141821" font-size="15" font-weight="700">herdr-core</text>
+  <text x="778" y="154" fill="#5B6673" font-size="12">hc supervisor</text>
+  <text x="778" y="174" fill="#7A8794" font-size="11.5">status · input</text>
+
+  <!-- in-process tty path -->
+  <path d="M 512 235 H 840 V 210" fill="none" stroke="#7B3FE4" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arrow-purple)"/>
+  <text x="676" y="228" fill="#7B3FE4" font-size="10.5" text-anchor="middle">no forwarder · no socket</text>
+
+  <!-- approval parking lane -->
+  <rect x="40" y="300" width="880" height="96" rx="10" fill="#FBFCFE" stroke="#E4E9F2"/>
+  <text x="56" y="324" fill="#141821" font-size="12.5" font-weight="700">approval parking — a settled ask is echoed as [ask &lt;id&gt;] &lt;tool&gt; → &lt;outcome&gt; (source=supervisor|attached)</text>
+
+  <rect x="56" y="334" width="248" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
+  <text x="68" y="353" fill="#141821" font-size="12" font-weight="700">approval/request</text>
+  <text x="68" y="369" fill="#5B6673" font-size="11">park ask &lt;6hex&gt;</text>
+
+  <rect x="336" y="334" width="240" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
+  <text x="348" y="353" fill="#141821" font-size="12" font-weight="700">root report</text>
+  <text x="348" y="369" fill="#5B6673" font-size="11">blocked · kind=permission</text>
+
+  <rect x="616" y="334" width="288" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
+  <text x="628" y="353" fill="#141821" font-size="12" font-weight="700">/approve · /reject</text>
+  <text x="628" y="369" fill="#5B6673" font-size="11">allowed-once · rejected</text>
+
+  <line x1="304" y1="355" x2="334" y2="355" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
+  <line x1="576" y1="355" x2="614" y2="355" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
+
+  <!-- stdin relay lane -->
+  <rect x="40" y="408" width="880" height="88" rx="10" fill="#FBFCFE" stroke="#E4E9F2"/>
+  <text x="56" y="432" fill="#141821" font-size="12.5" font-weight="700">stdin relay — one input line is one line frame: bare text steers, the rest are commands</text>
+
+  <rect x="56" y="442" width="248" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
+  <text x="68" y="461" fill="#141821" font-size="12" font-weight="700">hc paste + submit</text>
+  <text x="68" y="477" fill="#5B6673" font-size="11">→ line frame</text>
+
+  <rect x="336" y="442" width="240" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
+  <text x="348" y="461" fill="#141821" font-size="12" font-weight="700">parseLine</text>
+  <text x="348" y="477" fill="#5B6673" font-size="11">steer · cancel · new · attach</text>
+
+  <rect x="616" y="442" width="288" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
+  <text x="628" y="461" fill="#141821" font-size="12" font-weight="700">echo line</text>
+  <text x="628" y="477" fill="#5B6673" font-size="11">→ what the supervisor reads</text>
+
+  <line x1="304" y1="463" x2="334" y2="463" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
+  <line x1="576" y1="463" x2="614" y2="463" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
+
+  <!-- legend -->
+  <line x1="40" y1="516" x2="80" y2="516" stroke="#2F6FEB" stroke-width="2"/>
+  <text x="88" y="520" fill="#40506A" font-size="11.5">control socket: dsh web + dsh-sup in the hc PTY</text>
+  <line x1="430" y1="516" x2="470" y2="516" stroke="#7B3FE4" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="478" y="520" fill="#40506A" font-size="11.5">in-process tty: dsh web started inside the hc terminal</text>
+</svg>

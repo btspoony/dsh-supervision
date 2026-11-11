@@ -1,0 +1,257 @@
+name: Release
+
+# PR-driven publish. Merging a `release vX.Y.Z` PR (opened by the Release prep
+# workflow) runs the whole release inline on the pull_request_target event:
+# guard -> validate -> changelog gate -> build -> publish both packages
+# (provenance) -> tag -> GitHub Release. There is deliberately NO push:tags
+# auto-publish path: a manual `git tag && git push --tags` does not publish.
+#
+# `pull_request_target`, NOT `pull_request`: for this event GitHub runs the
+# workflow file from the base branch, so a same-repo PR cannot delete the job
+# guard below and still mint `contents: write` + `id-token: write` from its own
+# copy of this file. The guard is evaluated before the checkout, which is what
+# makes the merge commit safe to check out afterwards.
+#
+# No NPM_TOKEN / NODE_AUTH_TOKEN: npm auth is Trusted Publishing (OIDC
+# id-token + registry-url; the npm-side Trusted Publisher entry must exist for
+# BOTH `dsh-supervision` and `dsh-sup`). The tag push and GitHub Release use
+# the built-in GITHUB_TOKEN.
+#
+# NOTE: Node 24 ships npm with working Trusted Publishing / provenance
+# (sigstore). Do not use Node 22 or `npm install -g npm@latest` on Node 22 —
+# that breaks provenance with MODULE_NOT_FOUND: sigstore.
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Trigger only on PRs opened by the Release prep workflow: merged, from
+    # this repository's own `release/v*` branch, authored by the prep actor
+    # (`github-actions[bot]` when prep pushes with GITHUB_TOKEN, or the
+    # repository owner when a PAT opened it), and titled `release v<version>`.
+    # The title/version cross-check below is a drift check only: it cannot bind
+    # a PR to prep on its own.
+    if: >
+      github.event.pull_request.merged == true
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && (github.event.pull_request.user.login == 'github-actions[bot]'
+        || github.event.pull_request.user.login == github.repository_owner)
+      && startsWith(github.event.pull_request.title, 'release v')
+      && startsWith(github.event.pull_request.head.ref, 'release/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Release prep derives the version from the PR title ("release
+      # v<version>") and bumps both manifests to match. If the merged PR
+      # drifted from that contract (e.g. the version was edited inside the PR
+      # without re-running prep), publishing the drifted version would
+      # silently produce a mismatched tag and an empty GitHub Release — fail
+      # loudly instead.
+      - name: Cross-check version vs PR title
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          TITLE_VER="${TITLE#release v}"
+          if [ "$TITLE_VER" != "$VERSION" ]; then
+            echo "::error::PR title version \"${TITLE_VER}\" does not match package.json version \"${VERSION}\". Re-run Release prep for v${VERSION} instead of hand-editing the PR."
+            exit 1
+          fi
+          echo "PR title and package.json agree on ${VERSION}"
+
+      # A resumed release must be able to finish: the tag is created before the
+      # GitHub Release, so a failure after the tag push leaves a tag that points
+      # at this very merge commit. That is a legitimate resume, not a duplicate
+      # release. The waiver is made here, only for a tag that peels to this
+      # commit: `release:validate` keeps refusing any existing tag, and Release
+      # prep still refuses the tag before it prepares anything.
+      - name: Validate release version
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if TAG_SHA="$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}")"; then
+            if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+              echo "::error::Tag $TAG already exists at $TAG_SHA, not at this merge commit ($HEAD_SHA); refusing to publish a different commit under the same version."
+              exit 1
+            fi
+            echo "Tag $TAG already points at this merge commit: resuming an interrupted release; waiving the tag-exists check."
+            # Only the tag check is waived; the version surfaces still have to
+            # agree, so run the same validator with the tag state neutralised
+            # and ignore its tag note.
+            node --input-type=module -e "
+              import { readVersions } from './scripts/release-version.mjs'
+              import { validateReleaseVersion } from './scripts/validate-release-version.mjs'
+              const result = validateReleaseVersion(process.env.VERSION, readVersions(), null)
+              for (const error of result.errors) console.error(error)
+              if (!result.ok) process.exit(1)
+              console.log('OK manifests agree on ' + process.env.VERSION)
+            "
+          else
+            pnpm release:validate -- "$TAG"
+          fi
+
+      # Extract and REQUIRE the changelog section before anything irreversible:
+      # publishing first would leave the registry ahead of the release record,
+      # and the later refusal could not roll either back.
+      - name: Extract changelog notes
+        id: changelog
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="${RUNNER_TEMP}/release-notes-${VERSION}.md"
+          awk -v v="$VERSION" '
+            /^## \[/ { if (found) exit }
+            index($0, "## [" v "]") == 1 { found = 1 }
+            found { print }
+          ' CHANGELOG.md > "$NOTES_FILE"
+          # The awk output always starts with the matched heading, so a
+          # non-empty file is not enough: require one non-heading line (a
+          # bullet) or the GitHub Release would be content-empty.
+          if [ ! -s "$NOTES_FILE" ] || ! grep -Eq '^[^#[:space:]]' "$NOTES_FILE"; then
+            echo "::error::No changelog content found for v${VERSION} in CHANGELOG.md; refusing to publish or tag without release notes."
+            exit 1
+          fi
+          echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+
+      # Both published packages are built here: the root `build` script only
+      # builds the plugin, while `dsh-sup` ships its own `lib/`.
+      - name: Build
+        run: pnpm -r build
+
+      # The npm dist-tag is the channel signal and is derived from the version
+      # by scripts/release-version.mjs: stable `X.Y.Z` publishes under
+      # `latest`; prerelease `X.Y.Z-<channel>.N` publishes under `<channel>`
+      # (the identifier before the first dot, e.g. `0.1.0-alpha.1` -> `alpha`,
+      # `1.0.0-rc.1` -> `rc`). The derivation rejects an empty channel, a
+      # digit-only channel and `latest` for a prerelease, so a prerelease never
+      # steals the stable channel.
+      - name: Resolve npm dist-tag
+        id: disttag
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="$(node scripts/dist-tag.mjs "$VERSION")"
+          echo "Resolved npm dist-tag: ${TAG} (version ${VERSION})"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # Two packages publish from one release and npm has no multi-package
+      # transaction: these publishes are NOT atomic. Each step therefore skips
+      # a package whose exact version is already on the registry, so a wave that
+      # failed on the second package can be re-run after the first one landed
+      # instead of dying on an immutable version.
+      #
+      # `pnpm publish`, not `npm publish`: both manifests carry a
+      # `workspace:*` devDependency that npm would copy into the tarball
+      # verbatim; pnpm rewrites it to the real version at pack time.
+      #
+      # `--tag "$TAG"`: npm >= 11 hard-throws when publishing a prerelease
+      # without an explicit --tag. `--no-git-checks`: the job checks out the
+      # detached merge commit, so pnpm's "branch is in sync" check does not
+      # apply (the tree is clean by construction).
+      #
+      # Pure OIDC (Trusted Publishing): no NODE_AUTH_TOKEN / NPM_TOKEN anywhere.
+      - name: Publish dsh-supervision to npm
+        env:
+          TAG: ${{ steps.disttag.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$(npm view "dsh-supervision@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "dsh-supervision@${VERSION} is already published; skipping."
+            exit 0
+          fi
+          pnpm publish --provenance --access public --tag "$TAG" --no-git-checks
+
+      - name: Publish dsh-sup to npm
+        env:
+          TAG: ${{ steps.disttag.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        working-directory: packages/cli
+        run: |
+          set -euo pipefail
+          if [ "$(npm view "dsh-sup@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "dsh-sup@${VERSION} is already published; skipping."
+            exit 0
+          fi
+          pnpm publish --provenance --access public --tag "$TAG" --no-git-checks
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Probe the tag ref only (any other ref named `v<version>` must not skip
+      # the tag) and skip only when it already points at this merge commit: a
+      # tag at another commit is a release collision, not a retry. `^{commit}`
+      # peels the annotated tag object to the commit it tags — without it the
+      # object SHA never equals HEAD and every resume would fail.
+      - name: Create + push tag
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if TAG_SHA="$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}")"; then
+            if [ "$TAG_SHA" = "$HEAD_SHA" ]; then
+              echo "Tag $TAG already points at this merge commit; skipping tag creation."
+              exit 0
+            fi
+            echo "::error::Tag $TAG already exists at $TAG_SHA, not at this merge commit ($HEAD_SHA); refusing to move it."
+            exit 1
+          fi
+          # git >= 2.55 requires a message for -a tags.
+          git tag -a -m "release v${VERSION}" "$TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          body_path: ${{ steps.changelog.outputs.notes_file }}
+          draft: false
+          # The channel signal is the version-derived npm dist-tag (`latest`
+          # for stable, the prerelease channel such as `alpha`); the GitHub
+          # Release is the visible record and is always a regular release.
+          prerelease: false

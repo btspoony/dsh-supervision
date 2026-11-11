@@ -4,6 +4,14 @@
   "description": "Forwarder: reports a supervised DSH web session to herdr-core and relays stdin",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/btspoony/dsh-supervision.git"
+  },
+  "homepage": "https://github.com/btspoony/dsh-supervision#readme",
+  "bugs": {
+    "url": "https://github.com/btspoony/dsh-supervision/issues"
+  },
   "engines": {
     "node": ">=22"
   },
@@ -16,7 +24,8 @@
   ],
   "scripts": {
     "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown",
-    "test": "pnpm build && node --test 'lib/*.test.js'"
+    "test": "pnpm build && node --test 'lib/*.test.js'",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
