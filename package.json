@@ -4,13 +4,19 @@
   "description": "Cordis plugin: expose a running DeepSeek Harness web session to herdr-core through the dsh-sup forwarder",
   "type": "module",
   "license": "MIT",
+  "packageManager": "pnpm@12.16.1",
   "engines": {
     "node": ">=22"
   },
   "files": [
     "lib/index.js",
     "lib/index.d.ts",
-    "lib/client/**"
+    "lib/client/**",
+    "locale",
+    "docs",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md"
   ],
   "exports": {
     ".": {
@@ -20,7 +26,8 @@
     "./client": {
       "types": "./lib/client/index.d.ts",
       "default": "./lib/client/index.js"
-    }
+    },
+    "./locale/*.json": "./locale/*.json"
   },
   "dsh": {
     "client": {
@@ -36,7 +43,11 @@
   },
   "scripts": {
     "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown && node scripts/build-client.mjs && tsc -p tsconfig.client.json",
-    "test": "pnpm build && node --test 'lib/*.test.js' 'lib/client/*.test.js'"
+    "test": "pnpm build && node --test 'lib/*.test.js' 'lib/client/*.test.js'",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "release:prepare": "node scripts/prepare-release.mjs",
+    "release:validate": "node scripts/validate-release-version.mjs",
+    "test:release": "node --test scripts/release.test.mjs"
   },
   "peerDependencies": {
     "react": "^18.2.0"
