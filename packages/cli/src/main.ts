@@ -1,13 +1,12 @@
 import { parseArgs, usageText } from './args.js';
 import { connect, type Connection } from './connection.js';
 import { EXIT, exitCodeFor } from './exit.js';
+import { runList } from './list.js';
 import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { openTty } from './tty.js';
-import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
-import type { HelloFrame, OutFrame, RegistryEntry, SessionItem } from 'dsh-supervision-protocol';
-
-const HEADER = ['SESSION', 'CWD', 'LIVE', 'BRIDGED'].join('\t');
+import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, renderFrame, supervisionDir } from 'dsh-supervision-protocol';
+import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
 
 /** A root record restates `app`, because hc replaces the record whole. */
 function rootReport(state: string, extra: { readonly title?: string; readonly msg?: string } = {}): string {
@@ -65,49 +64,6 @@ async function main(argv: readonly string[]): Promise<number> {
   return runBridge(selection.entry.socket, hello);
 }
 
-/** Asks one backend for its sessions; a dead backend contributes nothing. */
-function listFrom(socket: string, cwd: string): Promise<readonly SessionItem[]> {
-  return new Promise((resolve) => {
-    let connection: Connection | undefined;
-    const settle = (items: readonly SessionItem[]): void => {
-      connection?.close();
-      resolve(items);
-    };
-    connection = connect(socket, undefined, {
-      onFrame: (frame: OutFrame) => {
-        if (frame.t === 'sessions') settle(frame.items);
-        if (frame.t === 'bye') settle([]);
-        if (frame.t === 'error') {
-          process.stderr.write(`${frame.code}: ${frame.message}\n`);
-          settle([]);
-        }
-      },
-      onLost: (_msg, detail) => {
-        process.stderr.write(`${detail}\n`);
-        settle([]);
-      },
-      onRefused: (detail) => {
-        process.stderr.write(`${detail}\n`);
-        settle([]);
-      },
-    });
-    connection.send({ t: 'list', cwd });
-  });
-}
-
-/**
- * Prints the union of every live backend's sessions and exits 0 without binding
- * a bridge, which is why a listing needs no welcome and takes no session.
- */
-async function runList(entries: readonly RegistryEntry[], cwd: string): Promise<number> {
-  const items = await Promise.all(entries.map((entry) => listFrom(entry.socket, cwd)));
-  const rows = items.flat().map(
-    (item) => `${item.id}\t${item.cwd}\t${item.live ? 'yes' : 'no'}\t${item.bridged ? 'yes' : '-'}`,
-  );
-  process.stdout.write(`${[HEADER, ...rows].join('\n')}\n`);
-  return EXIT.ok;
-}
-
 /**
  * Binds one session: the root `idle` goes out the moment `welcome` lands, before
  * any stdin is read, which is what makes hc's readiness gate and `started: true`
@@ -148,23 +104,23 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
 
     const connection: Connection = connect(socket, hello, {
       onFrame: (frame: OutFrame) => {
-        if (frame.t === 'welcome') {
-          title = frame.title;
-          tty.write(rootReport('idle', { title }));
-          pump(sendLine);
-          return;
-        }
-        // `osc.data` is opaque: written verbatim, never inspected or re-encoded.
-        if (frame.t === 'osc') tty.write(frame.data);
-        if (frame.t === 'echo') tty.write(`${frame.text}\n`);
+        // The `error` arm is tty-only: its cause belongs on stderr and its code
+        // decides the exit, so it never goes through the shared renderer.
         if (frame.t === 'error') {
           process.stderr.write(`${frame.code}: ${frame.message}\n`);
           settle(exitCodeFor(frame.code));
+          return;
         }
-        if (frame.t === 'bye') {
-          tty.write(rootReport('clear'));
-          settle(EXIT.ok);
+        const bytes = renderFrame(frame);
+        if (bytes !== undefined) tty.write(bytes);
+        // The root `idle` must precede any stdin read, which is what makes hc's
+        // readiness gate and `started: true` work.
+        if (frame.t === 'welcome') {
+          title = frame.title;
+          pump(sendLine);
+          return;
         }
+        if (frame.t === 'bye') settle(EXIT.ok);
       },
       // The error record must precede the exit so hc never reports a stale
       // `working` after the backend is gone; the cause goes to stderr.
