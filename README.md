@@ -9,7 +9,7 @@
 ![node](https://img.shields.io/badge/node-%3E%3D22-339933.svg)
 ![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-4B32C3.svg)
 
-**Bridge a running DSH session into any terminal supervisor — it sees the state, and it can steer.** The plugin mounts inside the `dsh web` process you already run: **OSC 7501** records go out on the terminal, and operator input comes back into that same session. herdr-core is one supported supervisor — it named the `HC_*` variables — but any supervisor that reads OSC 7501 and can write lines back works just as well, with no changes to DSH or the supervisor.
+**Bridge a running DSH session into any terminal supervisor — it sees the state, and it can steer.** The plugin mounts inside the `dsh web` process you already run: [**OSC 7501**](https://www.superlogical.com/rex/docs/build/program-status) records go out on the terminal, and operator input comes back into that same session. herdr-core is one supported supervisor; any supervisor that reads OSC 7501 and can write lines back can drive a bridged session, with no changes to DSH or the supervisor.
 
 ## What you get
 
@@ -23,10 +23,8 @@
 |---|---|---|
 | herdr-core (`hc`) | in-process tty via `HC_TERMINAL_ID`, or the control socket with `dsh-sup` in its PTY | a `dsh web` started inside the supervised terminal, or any PTY for the forwarder |
 | Any supervisor that reads OSC 7501 | control socket + `dsh-sup` in its own PTY | it must read the PTY's OSC output and be able to write lines to that PTY's stdin |
-| Another supervisor wanting in-process mode | set `HC_TERMINAL_ID` | the variable is read, never written, by this package; the name comes from herdr-core, and any supervisor can set it |
+| Another supervisor wanting in-process mode | set `HC_TERMINAL_ID` | the variable is read, never written, by this package; any supervisor can set it |
 | GUI-only `dsh web` | nothing | the plugin exposes an inert socket and nothing else |
-
-OSC 7501 is a standard terminal channel, not a product API, and `dsh-sup` depends on nothing herdr-core-specific.
 
 ## Quick start
 
