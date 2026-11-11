@@ -9,7 +9,7 @@
 ![node](https://img.shields.io/badge/node-%3E%3D22-339933.svg)
 ![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-4B32C3.svg)
 
-**把运行中的 DSH 会话桥接到任意终端 supervisor 上——状态可见，指令可发。** 插件就装在你已经在运行的那个 `dsh web` 进程里：**OSC 7501** 记录写到终端上，操作者输入回到同一个会话。herdr-core（`hc`）是受支持的一种 supervisor，也是参考实现；只要能从 PTY 读到 OSC 7501、又能往那个 PTY 的 stdin 写行，任何 supervisor 都可以。
+**把运行中的 DSH 会话桥接到任意终端 supervisor 上——状态可见，指令可发。** 插件就装在你已经在运行的那个 `dsh web` 进程里：[**OSC 7501**](https://www.superlogical.com/rex/docs/build/program-status) 记录写到终端上，操作者输入回到同一个会话。herdr-core（`hc`）是受支持的一种 supervisor，也是参考实现；只要能从 PTY 读到 OSC 7501、又能往那个 PTY 的 stdin 写行，任何 supervisor 都可以。
 
 ## 你能得到什么
 
@@ -23,10 +23,8 @@
 |---|---|---|
 | herdr-core（`hc`） | 进程内 tty，走 `HC_TERMINAL_ID`；或走控制套接口，让 `dsh-sup` 跑在它的 PTY 里 | 被监督的终端里有一个 `dsh web`，或任意 PTY |
 | 任何读 OSC 7501 的 supervisor | 控制套接口 + 把它自己的 PTY 交给 `dsh-sup` | 能读到该 PTY 的 OSC 输出，并能往该 PTY 的 stdin 写行 |
-| 另一种想用进程内模式的 supervisor | 设置 `HC_TERMINAL_ID` | 这个变量只被本包读取、从不写入（名字来自 herdr-core，其他 supervisor 也可以设置它） |
+| 另一种想用进程内模式的 supervisor | 设置 `HC_TERMINAL_ID` | 这个变量只被本包读取、从不写入；任何 supervisor 都可以设置它 |
 | 只开 GUI 的 `dsh web` | 不需要任何东西 | 插件只暴露一个不干活的套接口，别的什么都没有 |
-
-OSC 7501 是标准终端通道，不是某个产品的 API；`dsh-sup` 也不依赖任何 herdr-core 专有的东西。
 
 ## 快速开始
 
