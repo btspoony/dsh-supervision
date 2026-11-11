@@ -82,7 +82,7 @@ export class TtyTransport implements Transport {
     this.#release()
     // Cleanup runs before the clear record, so the child-record frames it writes
     // still leave; the record then tells hc the supervisor is gone.
-    this.#handlers?.bye(session)
+    this.#teardown(session)
     this.#write({ t: 'bye', reason: 'reclaimed' })
     return true
   }
@@ -93,7 +93,7 @@ export class TtyTransport implements Transport {
       const session = this.#session
       if (session === undefined) return
       this.#release()
-      this.#handlers?.bye(session)
+      this.#teardown(session)
       this.#write({ t: 'bye', reason: 'plugin-disposed' })
     } catch {
       // Disposal has no recovery path: the terminal is released below whatever
@@ -115,8 +115,21 @@ export class TtyTransport implements Transport {
     this.#session = session
     this.#io.setRaw(true)
     // A switch releases the old session, exactly as the socket transport does.
-    if (previous !== undefined && previous !== session) this.#handlers?.bye(previous)
+    if (previous !== undefined && previous !== session) this.#teardown(previous)
     return true
+  }
+
+  /**
+   * Runs the host's teardown for `session`, contained: a throwing `bye` must
+   * never reach the host emitter that called `send`/`reclaim`/the claim, and
+   * the caller's remaining steps (the clear record) still run.
+   */
+  #teardown(session: string): void {
+    try {
+      this.#handlers?.bye(session)
+    } catch {
+      // Disposal has no recovery path; the binding is already dropped.
+    }
   }
 
   /** Holds no session from now on: the terminal goes back to cooked mode. */
@@ -154,14 +167,18 @@ export class TtyTransport implements Transport {
     } catch {
       // Nothing left to release.
     }
-    this.#handlers?.bye(session)
+    this.#teardown(session)
   }
 
   /** Reads lines one at a time, so an in-flight hello holds the lines behind it. */
   async #consume(): Promise<void> {
     try {
       for await (const line of this.#io.lines()) {
-        if (this.#closed) break
+        // Death is terminal for the loop, exactly as disposal is: a failed write
+        // has already finished this bridge, so lines buffered behind an in-flight
+        // hello must not be replayed as unbridged input — `hello` would create a
+        // session this permanently dead transport can never bind.
+        if (this.#closed || this.#dead) break
         try {
           await this.#handle(line)
         } catch (error) {
@@ -174,7 +191,7 @@ export class TtyTransport implements Transport {
           // A failed write above has already finished the bridge.
           if (session !== undefined && this.#session === session) {
             this.#release()
-            this.#handlers?.bye(session)
+            this.#teardown(session)
           }
         }
       }
