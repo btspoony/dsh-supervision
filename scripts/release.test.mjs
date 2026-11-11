@@ -6,12 +6,12 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { autoBumpPatch, buildSectionBody, insertSection, parseFragment } from './prepare-release.mjs'
+import { autoBumpPatch, buildSectionBody, insertSection, parseArgs, parseFragment } from './prepare-release.mjs'
 import { distTagFor } from './release-version.mjs'
 import { tagExists, validateReleaseVersion } from './validate-release-version.mjs'
 
@@ -243,6 +243,29 @@ test('prepare bumps both manifests, inserts the section and archives the fragmen
   )
   assert.match(readFileSync(join(dir, '.changes/archive/0.1.0-alpha.1/ci.md'), 'utf8'), /CI workflow/)
   assert.equal(runPrepare(dir, '0.1.0-alpha.1').status, 1)
+})
+
+test('prepare refuses an illegal dist-tag before writing anything', (t) => {
+  // `0.1.0-1` matches VERSION_RE, so parseArgs accepts it; only the dist-tag
+  // gate makes it a usage error — and that gate must run before prepare
+  // archives fragments or dirties the changelog and manifests.
+  const dir = fixture(t)
+  const changelogBefore = readFileSync(join(dir, 'CHANGELOG.md'), 'utf8')
+  const pkgBefore = readFileSync(join(dir, 'package.json'), 'utf8')
+
+  assert.deepEqual(parseArgs(['node', 'prepare', '--', '0.1.0-1']), { version: '0.1.0-1', autoBump: false })
+
+  for (const version of ['0.1.0-1', '0.1.0-.1', '0.1.0-latest.1']) {
+    const run = runPrepare(dir, version)
+    assert.equal(run.status, 1, version)
+    assert.match(run.stderr, new RegExp(`Cannot prepare release ${version.replace(/\\|\./g, (m) => (m === '\\' ? '\\\\' : '\\.'))}`))
+    assert.match(run.stderr, /npm dist-tag/)
+  }
+
+  // Refusal happened before any write: nothing archived, nothing dirtied.
+  assert.equal(existsSync(join(dir, '.changes/archive')), false)
+  assert.equal(readFileSync(join(dir, 'CHANGELOG.md'), 'utf8'), changelogBefore)
+  assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), pkgBefore)
 })
 
 test('prepare refuses a version that already has a changelog section', (t) => {

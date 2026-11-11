@@ -12,7 +12,11 @@
  *
  * Version resolution:
  *   - Explicit version must match VERSION_RE and is used as-is (prerelease
- *     suffixes allowed, e.g. 0.1.0-alpha.1).
+ *     suffixes allowed, e.g. 0.1.0-alpha.1). The version must also yield a
+ *     legal npm dist-tag (`distTagFor`): an empty, digit-only or `latest`
+ *     prerelease channel is refused BEFORE any file is written — it would
+ *     otherwise pass prepare and only fail later at release:validate, leaving
+ *     a half-prepared tree (archived fragments, dirty changelog and manifests).
  *   - `--patch` auto bump:
  *       * current has a numeric prerelease tail (`X.Y.Z-pre.N`) -> bump only N
  *         (0.1.0-alpha.1 -> 0.1.0-alpha.2; never jumps to a stable release);
@@ -36,7 +40,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { VERSION_RE, bumpBothManifests, readVersions } from './release-version.mjs'
+import { VERSION_RE, bumpBothManifests, distTagFor, readVersions } from './release-version.mjs'
 
 const CHANGES_DIR = '.changes'
 const UNRELEASED_DIR = join(CHANGES_DIR, 'unreleased')
@@ -199,6 +203,15 @@ export function main() {
   const version = explicit ?? autoBumpPatch(current)
   if (!VERSION_RE.test(version)) {
     throw new Error(`Invalid version "${version}". Expected X.Y.Z or X.Y.Z-pre.N (e.g. 0.1.0-alpha.1)`)
+  }
+  // Refuse a version the publish step could never tag BEFORE the destructive
+  // writes: prepare would otherwise archive the fragments and dirty the
+  // changelog and both manifests, and release:validate would only reject it
+  // afterwards, leaving a tree the next run cannot finish.
+  try {
+    distTagFor(version)
+  } catch (err) {
+    throw new Error(`Cannot prepare release ${version}: ${err instanceof Error ? err.message : err}`)
   }
   const date = new Date().toISOString().slice(0, 10)
 
