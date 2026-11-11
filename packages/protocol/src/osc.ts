@@ -9,7 +9,8 @@ const ST = '\x1b\\'
 
 /** herdr-core caps one sequence below its 4 KiB frame limit. */
 const MAX_SEQUENCE = 4096
-const MAX_APP = 32
+/** The `state` and `app` words share one cap: neither is free text. */
+const MAX_WORD = 32
 const MAX_TITLE = 192
 const MAX_TITLE_B64 = 256
 const MAX_MSG = 2048
@@ -62,6 +63,19 @@ export function clean(text: string): string {
   return text.replace(CONTROLS, ' ').replace(/\s+/g, ' ').trim()
 }
 
+/**
+ * One `:`-delimited word field, flattened like the free-text fields: anything
+ * outside {@link WORD} (control bytes, the `:`/`=` separators, the sequence's
+ * own ESC) is removed, then the value is capped.
+ * @param text - the caller's value.
+ * @param fallback - the word to report when nothing survives.
+ * @returns a single control-free, delimiter-free word, or `fallback`.
+ */
+function fieldWord(text: string, fallback: string): string {
+  const word = clean(text.replace(/[^A-Za-z0-9_.+-]+/g, ' ')).slice(0, MAX_WORD).trim()
+  return word === '' ? fallback : word
+}
+
 function base64(text: string): string {
   return Buffer.from(text, 'utf8').toString('base64')
 }
@@ -102,7 +116,7 @@ export function programStatus(record: ProgramStatus): string {
   }
 
   if (record.app !== undefined && record.app !== '') {
-    if (!WORD.test(record.app) || Buffer.byteLength(record.app, 'utf8') > MAX_APP) return ''
+    if (!WORD.test(record.app) || Buffer.byteLength(record.app, 'utf8') > MAX_WORD) return ''
     fields.push(`app=${record.app}`)
   }
 
@@ -143,12 +157,21 @@ export function clearProgramStatus(id?: string): string {
  * Encode one unconditional root report. Unlike {@link programStatus} this never
  * returns `''`: an unrepresentable field is flattened and truncated, because a
  * forwarder that goes silent leaves herdr-core showing a stale record.
+ *
+ * Every field is flattened the same way, so no value can open, split or
+ * terminate the record: control bytes and the `:`/`=` separators are removed,
+ * then each field is capped.
  * @param fields - the record; `state` is not restricted to {@link ProgramState}.
  * @returns the complete `ESC ] 7501 ; … ST` sequence.
  */
 export function encodeReport(fields: ReportFields): string {
-  const parts = [`state=${fields.state}`]
-  if (fields.app !== undefined) parts.push(`app=${fields.app}`)
+  // An unencodable state must not read as success; `error` is the one word that
+  // says the report itself is the problem.
+  const parts = [`state=${fieldWord(fields.state, 'error')}`]
+  if (fields.app !== undefined) {
+    const app = fieldWord(fields.app, '')
+    if (app !== '') parts.push(`app=${app}`)
+  }
   if (fields.title !== undefined) parts.push(`title=${base64(clean(fields.title).slice(0, MAX_TITLE))}`)
   if (fields.msg !== undefined) parts.push(`msg=${base64(clean(fields.msg).slice(0, MAX_MSG))}`)
   return `${ESC}]7501;${parts.join(':')}${ST}`

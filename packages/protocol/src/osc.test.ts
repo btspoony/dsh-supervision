@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clean, clearProgramStatus, programStatus } from './osc.js'
+import { clean, clearProgramStatus, encodeReport, programStatus } from './osc.js'
 
 const ESC = '\x1b'
 const ST = `${ESC}\\`
@@ -106,6 +106,29 @@ test('the whole sequence stays below 4096 bytes', () => {
 
 test('an unknown state is refused', () => {
   assert.equal(programStatus({ state: 'busy' as never }), '')
+})
+
+test('encodeReport flattens state and app, not just title and msg', () => {
+  // A separator or terminator in either field would split the one record.
+  const hostile = encodeReport({
+    state: `error:app=fake${ST}`,
+    app: `dsh:state=done${ST}`,
+    title: 'repo',
+  })
+  assert.equal(hostile.split(ST).length, 2, 'exactly one terminator')
+  assert.equal(hostile.split(PREFIX).length, 2, 'exactly one report start')
+  assert.deepEqual(fields(hostile), ['state=error app fake', 'app=dsh state done', 'title=cmVwbw=='])
+})
+
+test('encodeReport caps state and app like a word field', () => {
+  const sequence = encodeReport({ state: 'working', app: 'a'.repeat(64) })
+  assert.equal(value(sequence, 'app'), 'a'.repeat(32))
+})
+
+test('encodeReport never returns an empty field', () => {
+  // The contract is a report every time; an empty value must still be a word.
+  assert.equal(encodeReport({ state: '', app: ':::' }), `${ESC}]7501;state=error${ST}`)
+  assert.equal(encodeReport({ state: 'idle', app: '' }), `${ESC}]7501;state=idle${ST}`)
 })
 
 test('clear addresses the root and, given an id, one child subtree', () => {
