@@ -1,12 +1,13 @@
 /**
  * The supervision registry: `$DSH_HOME/supervision/<pid>-<8hex>.json`, one per
  * `dsh web` process, each naming the socket that process serves. Reading is
- * split by trust: a malformed entry is skipped for selection, and removed only
- * by {@link reclaimStale}, which the plugin runs before it writes its own.
+ * split by trust: a malformed entry is skipped for selection and also left in
+ * place by {@link reclaimStale}, which the plugin runs before it writes its own
+ * and which removes only entries it can prove dead.
  */
 
 import { randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { PROTO, isRecord } from './frames.js'
@@ -121,8 +122,8 @@ export function readRegistry(dir: string): readonly RegistryEntry[] {
       const parsed: unknown = JSON.parse(readFileSync(join(dir, name), 'utf8'))
       if (isRegistryEntry(parsed)) entries.push(parsed)
     } catch {
-      // A concurrent writer is mid-rename or the file is corrupt. Skipping it
-      // keeps the healthy entries visible; the next scan reclaims the bad one.
+      // The entry is unreadable or corrupt. Skipping it keeps the healthy
+      // entries visible; reclaimStale leaves it alone until its owner rewrites.
       continue
     }
   }
@@ -132,6 +133,11 @@ export function readRegistry(dir: string): readonly RegistryEntry[] {
 /**
  * Remove entries whose process is gone or whose socket is missing, together
  * with their files. An entry is only worth keeping when both halves are live.
+ *
+ * A file this function cannot read as an entry proves nothing, so it is left
+ * alone: the owner's write is atomic, which means such a file belongs to some
+ * process that failed to write or was interrupted, and unlinking it could take
+ * a live instance's only record with it.
  * @param dir - the supervision directory.
  * @returns the pids whose entries were removed.
  */
@@ -150,14 +156,12 @@ export function reclaimStale(dir: string): readonly number[] {
     try {
       parsed = JSON.parse(readFileSync(path, 'utf8'))
     } catch {
-      // Unparseable: nothing can prove it alive, so it is stale by definition.
-      unlinkEntry(path, dir, name)
       continue
     }
-    if (isRegistryEntry(parsed)) {
-      if (isEntryLive(parsed)) continue
-      removed.push(parsed.pid)
-    }
+    // An entry of the wrong shape carries no pid worth trusting either.
+    if (!isRegistryEntry(parsed)) continue
+    if (isEntryLive(parsed)) continue
+    removed.push(parsed.pid)
     unlinkEntry(path, dir, name)
   }
   return removed
@@ -170,11 +174,22 @@ function unlinkEntry(path: string, dir: string, name: string): void {
 
 /**
  * Write one registry entry with `0600`.
+ *
+ * The write is a same-directory temp file renamed over the target, so a reader
+ * (or a concurrent {@link reclaimStale}) never sees a truncated entry: rename
+ * within one directory is atomic, and the temp file never carries `.json`.
  * @param paths - the entry's two paths.
  * @param entry - the entry to write.
  */
 export function writeRegistry(paths: RegistryPaths, entry: RegistryEntry): void {
-  writeFileSync(paths.json, `${JSON.stringify(entry)}\n`, { mode: 0o600 })
-  // writeFileSync's mode is masked by the umask; the socket is the trust boundary.
-  chmodSync(paths.json, 0o600)
+  const temp = `${paths.json}.tmp-${String(process.pid)}`
+  try {
+    writeFileSync(temp, `${JSON.stringify(entry)}\n`, { mode: 0o600 })
+    // writeFileSync's mode is masked by the umask; the socket is the trust boundary.
+    chmodSync(temp, 0o600)
+    renameSync(temp, paths.json)
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
 }
