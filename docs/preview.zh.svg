@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="dsh-supervision 监督拓扑：dsh web 会话、带控制套接口与进程内 tty 两条通路的插件、dsh-sup 转发器、读 OSC 7501 的终端 supervisor，以及审批挂起与 stdin 转发两条路径" font-family="-apple-system, &quot;SF Pro Text&quot;, &quot;Segoe UI&quot;, system-ui, &quot;PingFang SC&quot;, &quot;Microsoft YaHei&quot;, sans-serif">
   <title>dsh-supervision 监督拓扑</title>
-  <desc>一个运行中的 dsh web 进程挂着 dsh-supervision 插件。同一套协议由两条通路承载：由 supervisor PTY 里的 dsh-sup 转发器驱动的 0600 控制套接口（实线），以及设置 HC_TERMINAL_ID 时进程自己的终端（虚线）。下面两条泳道分别表示工具审批挂起为 blocked 根记录，以及 stdin 行转发给 agent。</desc>
+  <desc>一个运行中的 dsh web 进程挂着 dsh-supervision 插件。同一套协议由两条通路承载：由 supervisor PTY 里的 dsh-sup 转发器驱动的 0600 控制套接口（实线），以及设置 DSH_SUP_TERMINAL_ID（或 herdr-core 的 HC_TERMINAL_ID）时进程自己的终端（虚线）。下面两条泳道分别表示工具审批挂起为 blocked 根记录，以及 stdin 行转发给 agent。</desc>
 
   <defs>
     <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
@@ -42,7 +42,7 @@
 
   <rect x="280" y="204" width="232" height="62" rx="8" fill="#F3ECFF" stroke="#7B3FE4" stroke-width="1.2" stroke-dasharray="6 4"/>
   <text x="294" y="228" fill="#141821" font-size="13.5" font-weight="700">进程内 tty</text>
-  <text x="294" y="248" fill="#40506A" font-size="11">已设置 HC_TERMINAL_ID</text>
+  <text x="294" y="248" fill="#40506A" font-size="11">已设置 DSH_SUP_TERMINAL_ID</text>
 
   <!-- 插件 <-> 转发器 -->
   <line x1="528" y1="156" x2="566" y2="156" stroke="#40506A" stroke-width="1.4" marker-start="url(#arrow-ink)" marker-end="url(#arrow-ink)"/>
