@@ -6,4 +6,5 @@
 
 export * from './osc.js'
 export * from './frames.js'
+export * from './render.js'
 export * from './registry.js'

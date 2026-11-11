@@ -20,7 +20,10 @@ import { parseLine } from './stdin.js'
 import { registerSupervisionRoutes, supervisionState } from './routes.js'
 import type { RouteRegistrar, SupervisionFacts, SupervisionState } from './routes.js'
 import { SocketTransport } from './transport.js'
-import type { Bridge, TransportHandlers } from './transport.js'
+import type { Bridge, Transport, TransportHandlers } from './transport.js'
+import { TtyTransport } from './tty-transport.js'
+import { openTtyIO } from './tty.js'
+import type { TtyOpen } from './tty.js'
 
 /** The parts of a DSH Session this plugin reads. */
 interface SessionLike {
@@ -304,24 +307,39 @@ function askMsg(ask: ParkedAsk): string {
 /**
  * Mount the plugin in two layers.
  *
- * Discovery always opens the socket and writes the registry entry: a forwarder
- * can only exist by connecting to it, so this layer cannot wait on one, and it
- * touches nothing on the agent. The effect layer — session listeners, OSC,
- * echo, stdin — opens per bridge, which is exactly "a forwarder is connected";
- * transport A (`HC_TERMINAL_ID`, the process itself inside an hc terminal)
- * reaches the same per-session layer without a socket, in §5.1. A GUI-only
- * `dsh web` therefore exposes an inert socket and nothing else.
+ * The discovery layer always opens a reporting surface: the control socket plus
+ * its registry entry for a forwarder to connect to, or — when this process is
+ * itself inside an hc terminal (`HC_TERMINAL_ID`) — the terminal it reports on.
+ * A forwarder can only exist by connecting, so the socket layer cannot wait on
+ * one, and it touches nothing on the agent. The effect layer — session
+ * listeners, OSC, echo, stdin — opens per bridge, which is exactly "a forwarder
+ * is connected", and a tty bridge is this process. A GUI-only `dsh web`
+ * therefore exposes an inert socket and nothing else.
  * @param ctx - the host context.
  * @param config - the validated plugin row.
+ * @param openTty - the terminal opener; a fake stands in for this process's own.
  */
-export function apply(ctx: PluginContext, config: Config): void {
+export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen = openTtyIO): void {
   // `=== false`, not falsiness: a row that skipped validation must not silently
   // disable the plugin, because a disabled plugin is an unreachable socket.
   if (config.enabled === false) return
 
-  const transport = new SocketTransport({
-    ...(config.socketDir === undefined ? {} : { dir: config.socketDir }),
-  })
+  // `HC_TERMINAL_ID` is this process being the terminal's own supervisor: no
+  // forwarder can connect to something that is not a socket, so the tty is the
+  // whole discovery surface and no registry entry is written.
+  const open = process.env['HC_TERMINAL_ID'] ? openTty() : undefined
+  // No terminal to report on: nothing mounts and nothing may throw, so the host
+  // keeps its sessions and the operator reads the reason on stderr.
+  if (open !== undefined && !open.ok) {
+    process.stderr.write(`dsh-supervision: no tty transport: ${open.reason}\n`)
+    return
+  }
+  const transport: Transport = open === undefined
+    ? new SocketTransport({
+      ...(config.socketDir === undefined ? {} : { dir: config.socketDir }),
+    })
+    : new TtyTransport(open.io)
+
   const { handlers, dispose, snapshot } = handlersFor(ctx, config)
   // A start failure (a full socket path, a hostile umask on the directory) must
   // not take the host process down: an unhandled rejection kills `dsh web`, and
