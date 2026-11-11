@@ -88,6 +88,39 @@ hc core
 Nothing in DSH or herdr-core changes. The forwarder is an ordinary program; the
 plugin is an ordinary Cordis plugin with a host half and a browser half.
 
+A `dsh web` started inside an hc terminal replaces the forwarder and its socket
+with the process's own tty; § In-process transport covers that path.
+
+### In-process transport
+
+`apply()` chooses the transport from the environment, not from configuration:
+
+| `HC_TERMINAL_ID` | Transport | Surface opened at startup |
+|---|---|---|
+| set and non-empty | `TtyTransport` over this process's terminal | the terminal |
+| unset or empty | `SocketTransport` | `0600` socket + registry entry |
+
+The tty path needs no forwarder: the process renders its `OutFrame`s through
+`renderFrame` and reads the same `parseLine` grammar the forwarder feeds, so no
+protocol rule exists twice. It claims its first session through the bare `hello`
+a plain `dsh-sup` sends (create in `process.cwd()`), and a refusal or a
+`reclaim` ends the bridge, not the transport: the owner re-enters with `/new` or
+`/attach` from the same keyboard, and raw mode holds only while a session is
+bound. A terminal that cannot be opened writes the reason to stderr and mounts
+nothing, so the host keeps its sessions.
+
+Limits, each deliberate:
+
+- **One bridge per process.** The owner's keyboard is the single input, so
+  `/attach` switches the bound session rather than adding a second; the
+  seam's single-owner rule holds unchanged.
+- **No socket and no registry entry.** `dsh-sup list` cannot see a process
+  started this way, and neither can a forwarder: the terminal is the only
+  surface.
+- **No automatic reconnect.** A `reclaim` or a refused `hello` leaves the
+  transport mounted and idle; rebinding is an explicit `/new` or `/attach`, never
+  a silent take-back of a session the supervisor no longer holds.
+
 ### Why the forwarder owns no logic
 
 OSC encoding, state derivation, command grammar and the approval queue stay in
@@ -103,7 +136,8 @@ small enough to review in one sitting.
 
 ### Discovery and registry
 
-The plugin owns one control socket per `dsh web` process:
+On the forwarder path — a `dsh web` process without `HC_TERMINAL_ID` — the
+plugin owns one control socket per process:
 
 ```
 $DSH_HOME/supervision/                 0700
@@ -278,16 +312,22 @@ Fail closed: asker `req.signal` abort, bridge disconnect, plugin dispose, or
 ### Activation
 
 Two layers, because a forwarder can only announce itself through a socket that
-must already exist:
+must already exist, while a process inside an hc terminal is handed its surface
+by the environment:
 
 ```
-discovery = config.enabled !== false           // create socket + registry entry
-effect    = discovery && (HC_TERMINAL_ID is set || a bridge is connected)
+discovery = config.enabled !== false && HC_TERMINAL_ID is empty   // create socket + registry entry
+effect    = config.enabled !== false && (HC_TERMINAL_ID is set || a bridge is connected)
 ```
 
-- The **discovery layer** always runs unless the plugin is disabled. It creates
-  the `0600` socket and the registry entry, and nothing else: no OSC, no event
-  subscription, no stdin read, no approval listener.
+- **With `HC_TERMINAL_ID` set, nothing is created.** The tty itself is the
+  discovery surface: the process reports on the terminal it was started in,
+  writes no socket and no registry entry, and leaves no file a forwarder could
+  connect to.
+- Emptied of that case, the **discovery layer** runs for a process without
+  `HC_TERMINAL_ID`. It creates the `0600` socket and the registry entry, and
+  nothing else: no OSC, no event subscription, no stdin read, no approval
+  listener.
 - The **effect layer** mounts only with `HC_TERMINAL_ID` or a bridge that has
   completed `welcome`. It is what scopes the emitter, the line reader and the
   prepended approval answerer to the bridged session tree.
@@ -295,9 +335,9 @@ effect    = discovery && (HC_TERMINAL_ID is set || a bridge is connected)
 A GUI-only `dsh web` has neither effect signal, so the plugin registers no
 listener, reads no stdin, writes no OSC, and cannot answer approvals. This is
 the single most important safety property: a prepended answerer must never
-silently steal approvals from the person using the browser. The socket remains
+silently steal approvals from the person using the browser. Its socket remains
 as a local, permission-restricted discovery surface with no agent-facing
-behaviour.
+behaviour; a process inside an hc terminal exposes no such surface at all.
 
 ### Lifecycle and failure
 
@@ -411,10 +451,11 @@ Node built-ins only: `node:net`, `node:fs`, `node:path`, `node:os`,
 | **P0** | plugin: `osc.ts`, `state.ts`, `transport.ts` (socket + registry); forwarder: socket client, tty writer, stdin reader | Encoder tests pass; hc shows `reported:true`, `turn:1`, echo lines through the forwarder |
 | **P1** | command grammar, `steer`/`cancel`, session selection, `list`, busy/locked refusals, child records; browser banner + `reclaim` route | Same-turn steering proven on the session log; `dsh-sup list` accurate; dual-bridge refusal; banner appears and reclaim returns approvals to the GUI |
 | **P2** | approval bridge, subagent tree claim, audit echo | Blocked root + exit 9 + `--force /approve`; subagent ask reaches root; GUI untouched when no bridge |
-| **P3** (optional) | in-process transport (direct tty, no forwarder) | Same acceptance as P0 with `dsh web` started inside hc |
+| **P3** (delivered) | in-process transport: `TtyTransport` renders `OutFrame`s through `renderFrame` and reads the same `parseLine` grammar inside the web process; `apply()` selects it when `HC_TERMINAL_ID` is set, so no forwarder and no socket exist on that path | `src/tty-transport.test.ts` covers the first-session claim, re-entry, reclaim and close; the two `HC_TERMINAL_ID` cases in `src/index.test.ts` assert the tty transport mounts and nothing is opened on the socket path |
 
-The in-process transport (`dsh web` inside hc) is not dropped: it shares every
-module above and is the fallback when the owner wants a dedicated worker.
+Both transports share the protocol, grammar and approval modules; the
+`HC_TERMINAL_ID` selection rule in § In-process transport is the only difference,
+so a dedicated worker and the owner's existing web process run one code path.
 
 ## Alternatives considered
 
