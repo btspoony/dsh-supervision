@@ -39,6 +39,56 @@ interface FakeAgent {
   cancel(cause: { readonly kind: 'user' }): void
 }
 
+/** One fake response: status, headers and body the handler wrote. */
+class FakeResponse {
+  statusCode = 0
+  readonly headers = new Map<string, string>()
+  body = ''
+
+  setHeader(name: string, value: string): void {
+    this.headers.set(name.toLowerCase(), value)
+  }
+
+  end(body?: string): void {
+    this.body = body ?? ''
+  }
+
+  /** @returns the parsed JSON body. */
+  get json(): unknown {
+    return JSON.parse(this.body) as unknown
+  }
+}
+
+/** A fake `ctx.webServer` that answers a request through its registered route. */
+class FakeServer {
+  readonly #handlers = new Map<string, (req: unknown, res: FakeResponse) => void | Promise<void>>()
+
+  /** The paths currently registered. */
+  get paths(): readonly string[] {
+    return [...this.#handlers.keys()]
+  }
+
+  register(route: {
+    readonly kind: 'exact'
+    readonly path: string
+    readonly handler: (req: never, res: never) => void | Promise<void>
+  }): () => void {
+    this.#handlers.set(route.path, route.handler as (req: unknown, res: FakeResponse) => void | Promise<void>)
+    return () => { this.#handlers.delete(route.path) }
+  }
+
+  /** Call the route at `path` with a request of `method`, `headers` and `body`. */
+  async call(path: string, method: string, headers: Record<string, string>, body = ''): Promise<FakeResponse> {
+    const handler = this.#handlers.get(path)
+    assert.ok(handler !== undefined, `no route at ${path}`)
+    const chunks = [Buffer.from(body, 'utf8')]
+    const req = { method, headers, async *[Symbol.asyncIterator]() { yield* chunks } }
+    const res = new FakeResponse()
+    await handler(req, res)
+    return res
+  }
+}
+
 /** A host context whose agents are in-memory and whose events the test emits. */
 class FakeHost {
   readonly agents: FakeAgent[] = []
@@ -52,38 +102,46 @@ class FakeHost {
   subagentRoots: Map<string, string> | undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
+  /** The fake webserver; `attachServer: false` mimics a CLI-only host. */
+  readonly server = new FakeServer()
+  attachServer = true
   readonly #sessionListeners = new Set<(session: { id: string }, event: SessionEvent) => void>()
   readonly #statusListeners = new Set<(payload: { agent: FakeAgent; status: 'idle' | 'running' }) => void>()
   #disposer: (() => void) | undefined
 
-  readonly ctx: PluginContext = {
-    agents: {
-      get: (id: string) => this.agents.find(agent => agent.id === id),
-      list: () => this.agents,
-      create: async ({ sessionId, meta }) => {
-        this.created.push(sessionId)
-        return { agent: this.add(sessionId, meta.cwd) }
-      },
-      resume: async ({ resumeSessionId }) => {
-        if (this.failResume.has(resumeSessionId)) throw new Error('no such session')
-        this.resumed.push(resumeSessionId)
-        return { agent: this.add(resumeSessionId, '/repo/resumed') }
-      },
-    },
-    get: (name: string) => name !== 'subagents' || this.subagentRoots === undefined
-      ? undefined
-      : {
-        rootOf: (agent: FakeAgent) => {
-          const root = this.subagentRoots?.get(agent.id)
-          return root === undefined ? agent : this.agents.find(candidate => candidate.id === root) ?? agent
+  /** The context `apply` receives; a CLI-only host mounts no webserver. */
+  get ctx(): PluginContext {
+    return {
+      agents: {
+        get: (id: string) => this.agents.find(agent => agent.id === id),
+        list: () => this.agents,
+        create: async ({ sessionId, meta }) => {
+          this.created.push(sessionId)
+          return { agent: this.add(sessionId, meta.cwd) }
+        },
+        resume: async ({ resumeSessionId }) => {
+          if (this.failResume.has(resumeSessionId)) throw new Error('no such session')
+          this.resumed.push(resumeSessionId)
+          return { agent: this.add(resumeSessionId, '/repo/resumed') }
         },
       },
-    on: ((name: string, listener: never) => {
-      const set = name === 'session/event' ? this.#sessionListeners : this.#statusListeners
-      set.add(listener)
-      return () => { set.delete(listener) }
-    }) as PluginContext['on'],
-    effect: setup => { this.#disposer = setup() },
+      get: (name: string) => {
+        if (name === 'webServer') return this.attachServer ? this.server : undefined
+        if (name !== 'subagents' || this.subagentRoots === undefined) return undefined
+        return {
+          rootOf: (agent: FakeAgent) => {
+            const root = this.subagentRoots?.get(agent.id)
+            return root === undefined ? agent : this.agents.find(candidate => candidate.id === root) ?? agent
+          },
+        }
+      },
+      on: ((name: string, listener: never) => {
+        const set = name === 'session/event' ? this.#sessionListeners : this.#statusListeners
+        set.add(listener)
+        return () => { set.delete(listener) }
+      }) as PluginContext['on'],
+      effect: setup => { this.#disposer = setup() },
+    }
   }
 
   /** Register an agent without going through `apply`. */
@@ -150,6 +208,14 @@ class Client {
   async take(count: number): Promise<readonly OutFrame[]> {
     while (this.#frames.length < count) await new Promise<void>(resolve => { this.#wake = resolve })
     return this.#frames.slice(0, count)
+  }
+
+  /** Resolve once the peer closed the connection. */
+  async closed(): Promise<void> {
+    await new Promise<void>(resolve => {
+      if (this.socket.destroyed) { resolve(); return }
+      this.socket.once('close', () => { resolve() })
+    })
   }
 
   /** Frames received so far, for assertions that expect no more. */
@@ -369,6 +435,14 @@ test('programStatus off sends no OSC at all', async () => {
   host.dispose()
 })
 
+/** The session map of a state payload, for assertions on one entry. */
+function sessionsOf(payload: unknown): Record<string, { bridged: true; terminal: string; pid: number; since: number; asks: readonly string[] }> {
+  assert.ok(payload !== null && typeof payload === 'object')
+  const sessions = Reflect.get(payload, 'sessions') as unknown
+  assert.ok(sessions !== null && typeof sessions === 'object' && !Array.isArray(sessions))
+  return sessions as Record<string, { bridged: true; terminal: string; pid: number; since: number; asks: readonly string[] }>
+}
+
 /** Poll without timers: the runner only moves forward on `setImmediate`. */
 async function until(predicate: () => boolean, what: string): Promise<void> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
@@ -560,5 +634,96 @@ test('an in-process subagent reports sub/<session> and a switch clears every chi
   assert.deepEqual(client.frames[4], { t: 'osc', data: '\u001b]7501;state=clear:id=sub/session-child\u001b\\' })
   assert.deepEqual(client.frames[5], { t: 'osc', data: '\u001b]7501;state=clear:id=session-3\u001b\\' })
   assert.deepEqual(client.frames[6], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=Yg==\u001b\\' })
+  host.dispose()
+})
+
+test('the state route reports one entry per live bridge and no entry without one', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir, programStatus: false }))
+  assert.deepEqual(host.server.paths, ['/dsh-supervision/state', '/dsh-supervision/reclaim'])
+
+  const empty = await host.server.call('/dsh-supervision/state', 'GET', {})
+  assert.deepEqual(empty.json, { proto: 1, sessions: {} })
+
+  const client = await attached(host, dir, 'session-1')
+  const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
+  assert.deepEqual(Object.keys(sessions), ['session-1'])
+  const entry = sessions['session-1']
+  assert.ok(entry !== undefined)
+  assert.equal(entry.bridged, true)
+  assert.equal(entry.terminal, process.env['HC_TERMINAL_NAME'] ?? 'dsh-sup')
+  assert.equal(entry.pid, process.pid)
+  assert.equal(typeof entry.since, 'number')
+  assert.deepEqual(entry.asks, [])
+
+  client.socket.end()
+  await until(() => host.listenerCount === 0, 'the bridge to drop')
+  const after = await host.server.call('/dsh-supervision/state', 'GET', {})
+  assert.deepEqual(after.json, { proto: 1, sessions: {} })
+  host.dispose()
+})
+
+test('reclaim hands the session back, tells the forwarder why, and is idempotent', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  assert.equal(host.listenerCount, 2)
+
+  const body = JSON.stringify({ session: 'session-1' })
+  const first = await host.server.call('/dsh-supervision/reclaim', 'POST', { 'content-type': 'application/json' }, body)
+  assert.equal(first.statusCode, 200)
+  assert.deepEqual(first.json, { reclaimed: true })
+
+  // The forwarder reads the goodbye and its socket is closed behind it.
+  await until(() => client.frames.some(frame => frame.t === 'bye'), 'the goodbye frame')
+  assert.deepEqual(client.frames.at(-1), { t: 'bye', reason: 'reclaimed' })
+  await client.closed()
+
+  // Cleanup ran with the hand-back: listeners are gone and the state is empty.
+  assert.equal(host.listenerCount, 0)
+  assert.deepEqual((await host.server.call('/dsh-supervision/state', 'GET', {})).json, { proto: 1, sessions: {} })
+
+  const second = await host.server.call('/dsh-supervision/reclaim', 'POST', { 'content-type': 'application/json' }, body)
+  assert.equal(second.statusCode, 409)
+  assert.deepEqual(second.json, { reclaimed: false })
+  host.dispose()
+})
+
+test('reclaim answers 415 without a JSON content type and 400 for a bad body', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir, programStatus: false }))
+  const client = await attached(host, dir, 'session-1')
+  const state = await host.server.call('/dsh-supervision/state', 'GET', {})
+
+  const wrongType = await host.server.call(
+    '/dsh-supervision/reclaim',
+    'POST',
+    { 'content-type': 'text/plain' },
+    '{"session":"session-1"}',
+  )
+  assert.equal(wrongType.statusCode, 415)
+  const badBody = await host.server.call('/dsh-supervision/reclaim', 'POST', { 'content-type': 'application/json' }, '{}')
+  assert.equal(badBody.statusCode, 400)
+
+  // Neither attempt touched the bridge.
+  assert.equal(host.listenerCount, 2)
+  assert.deepEqual((await host.server.call('/dsh-supervision/state', 'GET', {})).json, state.json)
+  client.socket.end()
+  host.dispose()
+})
+
+test('a host without a webserver mounts no routes and keeps its socket', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.attachServer = false
+  apply(host.ctx, config({ socketDir: dir }))
+  assert.deepEqual(host.server.paths, [])
+  assert.ok(existsSync(await listening(dir)))
   host.dispose()
 })
