@@ -234,56 +234,16 @@ jobs:
       # before trying". `NODE_AUTH_TOKEN: ""` keeps the
       # `//registry.npmjs.org/:_authToken` key that setup-node's `registry-url`
       # wrote while emptying its value: a placeholder value would be used as the
-      # publish token instead of the exchanged one. `NPM_CONFIG_LOGLEVEL=verbose`
-      # is what surfaces the exchange failure next time.
+      # publish token instead of the exchanged one. When a publish is refused,
+      # add `NPM_CONFIG_LOGLEVEL: verbose` to the step to see the real OIDC
+      # exchange error; it stays off by default.
       - name: Publish dsh-supervision to npm
         env:
           TAG: ${{ steps.disttag.outputs.tag }}
           VERSION: ${{ steps.ver.outputs.version }}
           NODE_AUTH_TOKEN: ""
-          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
-          echo "node=$(node --version) npm=$(npm --version)"
-          echo "id-token-url-set=${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
-          NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
-          if [ -f "$NPMRC" ]; then
-            echo "npmrc=$NPMRC lines=$(wc -l < "$NPMRC") authToken-key=$(grep -c '_authToken' "$NPMRC" || true)"
-          else
-            echo "npmrc=$NPMRC missing"
-          fi
-          echo "registry=$(npm config get registry)"
-          # npm refuses a mismatched exchange with a blanket "package not found",
-          # so the only way to tell "wrong event", "wrong workflow file", "wrong
-          # repository" and "publisher config not effective" apart is to print the
-          # identity the registry actually saw. Only the decoded payload is
-          # printed — never the token itself.
-          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-            OIDC_JSON="$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" || true)"
-            printf '%s' "$OIDC_JSON" | node -e '
-              let s = ""
-              process.stdin.on("data", d => { s += d }).on("end", () => {
-                try {
-                  const payload = JSON.parse(s).value.split(".")[1]
-                  const c = JSON.parse(Buffer.from(payload, "base64url").toString())
-                  console.log("oidc-claims=" + JSON.stringify({
-                    repository: c.repository,
-                    job_workflow_ref: c.job_workflow_ref,
-                    workflow_ref: c.workflow_ref,
-                    ref: c.ref,
-                    event_name: c.event_name,
-                    sub: c.sub,
-                    aud: c.aud,
-                  }))
-                } catch (err) {
-                  console.log("oidc-claims=<decode failed: " + (err instanceof Error ? err.message : err) + ">")
-                }
-              })
-            '
-          else
-            echo "oidc-claims=<no id-token request url>"
-          fi
           LOOKUP_ERR="$(mktemp)"
           trap 'rm -f "$LOOKUP_ERR"' EXIT
           if LOOKUP="$(npm view "dsh-supervision@${VERSION}" version 2>"$LOOKUP_ERR")"; then
@@ -304,7 +264,6 @@ jobs:
           TAG: ${{ steps.disttag.outputs.tag }}
           VERSION: ${{ steps.ver.outputs.version }}
           NODE_AUTH_TOKEN: ""
-          NPM_CONFIG_LOGLEVEL: verbose
         working-directory: packages/cli
         run: |
           set -euo pipefail
