@@ -58,6 +58,12 @@ export interface TransportHandlers {
 export interface Transport {
   start(handlers: TransportHandlers): Promise<void>
   send(frame: OutFrame, session?: string): void
+  /**
+   * Hand one session back to its GUI owner: tell the forwarder why, end its
+   * socket, and drop the binding.
+   * @returns whether a live bridge held the session.
+   */
+  reclaim(session: string): boolean
   close(): Promise<void>
 }
 
@@ -171,6 +177,21 @@ export class SocketTransport implements Transport {
       return
     }
     this.#bridged.get(session)?.send(frame)
+  }
+
+  reclaim(session: string): boolean {
+    const connection = this.#bridged.get(session)
+    if (connection === undefined) return false
+    // Detach first: the answer the browser polls must agree with the answer this
+    // call returns, whether or not the peer has read its goodbye yet.
+    this.#bridged.delete(session)
+    connection.session = undefined
+    // Cleanup runs before the socket ends, so the child-record frames it writes
+    // still leave; the forwarder then reads the goodbye and reports `clear`.
+    this.#handlers?.bye(session)
+    connection.send({ t: 'bye', reason: 'reclaimed' })
+    connection.close()
+    return true
   }
 
   async close(): Promise<void> {

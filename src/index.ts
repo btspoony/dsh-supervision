@@ -17,6 +17,8 @@ import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
 import { parseLine } from './stdin.js'
+import { registerSupervisionRoutes, supervisionState } from './routes.js'
+import type { RouteRegistrar, SupervisionFacts, SupervisionState } from './routes.js'
 import { SocketTransport } from './transport.js'
 import type { Bridge, TransportHandlers } from './transport.js'
 
@@ -191,6 +193,10 @@ interface Shown {
 interface BridgeState {
   readonly bridge: Bridge
   readonly agent: AgentLike
+  /** The forwarder process that took this session, as its `hello` reported it. */
+  readonly pid: number
+  /** When this bridge took the session, in epoch milliseconds. */
+  readonly since: number
   root: RootState
   /** The record herdr-core holds for this root, so a repeat is not a second report. */
   shown: Shown
@@ -263,6 +269,13 @@ function factOf(event: SessionEvent, config: Config): StateEvent | undefined {
   }
 }
 
+/** @returns the host's route registrar, when the host serves a browser. */
+function registrarOf(value: unknown): RouteRegistrar | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  if (!('register' in value) || typeof value.register !== 'function') return undefined
+  return value as RouteRegistrar
+}
+
 /** @returns the host's subagent service, when one is mounted. */
 function subagentsOf(value: unknown): SubagentsLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -305,16 +318,28 @@ export function apply(ctx: PluginContext, config: Config): void {
   const transport = new SocketTransport({
     ...(config.socketDir === undefined ? {} : { dir: config.socketDir }),
   })
-  const handlers = handlersFor(ctx, config)
+  const { handlers, dispose, snapshot } = handlersFor(ctx, config)
   // A start failure (a full socket path, a hostile umask on the directory) must
   // not take the host process down: an unhandled rejection kills `dsh web`, and
   // the supervised session then loses its whole GUI, not just its supervisor.
-  void transport.start(handlers.handlers).catch(() => transport.close())
+  void transport.start(handlers).catch(() => transport.close())
+
+  // Read reflectively, not through `inject`: a CLI-only host mounts no webserver,
+  // and a declared dependency would keep the plugin from loading there at all.
+  const server = registrarOf(ctx.get?.('webServer'))
+  if (server !== undefined) {
+    ctx.effect(() => registerSupervisionRoutes(server, {
+      snapshot,
+      // The transport's own bye callback is the cleanup: it drops the bridge's
+      // listeners and child records exactly as a forwarder disconnect does.
+      reclaim: session => transport.reclaim(session),
+    }))
+  }
 
   ctx.effect(() => () => {
     // A disposed plugin cannot answer anything: the parked asks fail closed
     // before the sockets go, so no asker waits on a supervisor that is gone.
-    handlers.dispose()
+    dispose()
     void transport.close()
   })
 }
@@ -324,16 +349,31 @@ export function apply(ctx: PluginContext, config: Config): void {
  * never leak into another bridge's report.
  * @param ctx - the host context.
  * @param config - the validated plugin row.
- * @returns the handlers `SocketTransport.start` expects, and the dispose that
- *   fails every parked ask closed.
+ * @returns the handlers `SocketTransport.start` expects, the dispose that
+ *   fails every parked ask closed, and the browser snapshot.
  */
 function handlersFor(
   ctx: PluginContext,
   config: Config,
-): { readonly handlers: TransportHandlers; readonly dispose: () => void } {
+): {
+  readonly handlers: TransportHandlers
+  readonly dispose: () => void
+  readonly snapshot: () => SupervisionState
+} {
   const bridged = new Map<string, BridgeState>()
   /** The effect layer's listeners, open while at least one bridge is live. */
   let subscriptions: readonly (() => void)[] | undefined
+  /**
+   * The label the browser sees for the supervisor. herdr-core's terminal name is
+   * not readable from the supervised process, so this is the forwarder's own
+   * fallback unless the host exports the name.
+   */
+  const terminal = process.env['HC_TERMINAL_NAME'] ?? 'dsh-sup'
+  /**
+   * The forwarder process behind each connection. `hello` is the only frame
+   * that carries it, and a `/attach` or `/new` switch keeps the same process.
+   */
+  const pids = new WeakMap<Bridge, number>()
 
   /** Attach to a live agent, or resume one from persistence. */
   const bind = async (session: string): Promise<AgentLike> => {
@@ -617,6 +657,8 @@ function handlersFor(
     const state: BridgeState = {
       bridge,
       agent,
+      pid: pids.get(bridge) ?? 0,
+      since: Date.now(),
       root,
       shown: { state: root.current.state, msg: '', turn: root.turn },
       children: new Map(),
@@ -658,6 +700,7 @@ function handlersFor(
   const handlers: TransportHandlers = {
     async hello(frame: HelloFrame, bridge: Bridge): Promise<void> {
       let agent: AgentLike
+      pids.set(bridge, frame.pid)
       try {
         agent = 'attach' in frame
           ? await bind(frame.attach)
@@ -763,11 +806,26 @@ function handlersFor(
     },
   }
 
+  const snapshot = (): SupervisionState => {
+    const facts = new Map<string, SupervisionFacts>()
+    for (const [session, state] of bridged) {
+      // The approval queue owns the parked ids; deriving them here keeps the
+      // browser's asks column and `/status` from ever disagreeing.
+      facts.set(session, {
+        pid: state.pid,
+        since: state.since,
+        asks: pendingFor(state.agent.session.id).map(ask => ask.id),
+      })
+    }
+    return supervisionState(facts, terminal)
+  }
+
   return {
     handlers,
     /** Fail every parked ask closed and drop what is left, for plugin disposal. */
     dispose: (): void => {
       for (const session of [...bridged.keys()]) release(session)
     },
+    snapshot,
   }
 }

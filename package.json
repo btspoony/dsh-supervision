@@ -9,20 +9,41 @@
   },
   "files": [
     "lib/index.js",
-    "lib/index.d.ts"
+    "lib/index.d.ts",
+    "lib/client/**"
   ],
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/client/index.d.ts",
+      "default": "./lib/client/index.js"
+    }
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {
-    "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown",
-    "test": "pnpm build && node --test 'lib/*.test.js'"
+    "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown && node scripts/build-client.mjs && tsc -p tsconfig.client.json",
+    "test": "pnpm build && node --test 'lib/*.test.js' 'lib/client/*.test.js'"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/react": "^18.3.31",
     "dsh-supervision-protocol": "workspace:*",
     "tsdown": "^0.23.7",
     "typescript": "^5.9.2"
