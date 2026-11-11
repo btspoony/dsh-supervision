@@ -12,11 +12,12 @@ name: Release
 # copy of this file. The guard is evaluated before the checkout, which is what
 # makes the merge commit safe to check out afterwards.
 #
-# No NPM_TOKEN / NODE_AUTH_TOKEN: npm auth is Trusted Publishing, which needs
-# the OIDC `id-token` scope plus a registry line and NO auth token (the
-# `Configure npm for Trusted Publishing` step writes exactly that; the npm-side
-# Trusted Publisher entry must exist for BOTH `dsh-supervision` and `dsh-sup`).
-# The tag push and GitHub Release use the built-in GITHUB_TOKEN.
+# No NPM_TOKEN / NODE_AUTH_TOKEN secret: npm auth is Trusted Publishing over
+# OIDC, which needs the `id-token: write` scope and setup-node's `registry-url`
+# so the registry scope key exists, with `NODE_AUTH_TOKEN: ""` on the publish
+# steps so that key holds an empty value instead of a placeholder token (the
+# npm-side Trusted Publisher entry must exist for BOTH `dsh-supervision` and
+# `dsh-sup`). The tag push and GitHub Release use the built-in GITHUB_TOKEN.
 #
 # NOTE: Node 24 ships npm with working Trusted Publishing / provenance
 # (sigstore). Do not use Node 22 or `npm install -g npm@latest` on Node 22 —
@@ -62,27 +63,28 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
-      # No `registry-url` here: it writes `_authToken=${NODE_AUTH_TOKEN}` (a
-      # placeholder) into `.npmrc`, and npm then publishes with whatever token
-      # it finds instead of asking GitHub for an OIDC token. The step below
-      # writes the registry line without one.
+      # `registry-url` is what makes npm recognise `registry.npmjs.org` as a
+      # credentialed registry: it writes the scope key
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`. The key must exist
+      # and its value must be EMPTY (the publish steps set `NODE_AUTH_TOKEN: ""`):
+      # a placeholder value is used as the publish token instead of the token
+      # npm gets back from the OIDC exchange, while dropping `registry-url`
+      # removes the key altogether and ends in `ENEEDAUTH`.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
+          registry-url: https://registry.npmjs.org
           cache: pnpm
 
-      # npm reaches the registry without an auth token: an `_authToken` line
-      # (setup-node's `registry-url` writes a placeholder one) makes npm publish
-      # with that placeholder instead of asking GitHub for the OIDC token, while
-      # no registry line at all makes it refuse with ENEEDAUTH before it tries.
-      # `registry=` alone is the state npm treats as "authenticate via OIDC".
-      - name: Configure npm for Trusted Publishing
-        run: |
-          set -euo pipefail
-          printf 'registry=https://registry.npmjs.org/\n' > "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
-
+      # setup-node's `registry-url` writes `${NODE_AUTH_TOKEN}` into the user
+      # npmrc, so every step that runs pnpm pins the variable instead of leaving
+      # it to the runner's environment: an empty value expands without a
+      # credential, keeps install/build on the public registry anonymously, and
+      # is the same empty value the publish steps rely on for the OIDC exchange.
       - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ""
         run: pnpm install --frozen-lockfile
 
       - name: Resolve version
@@ -117,6 +119,7 @@ jobs:
       - name: Validate release version
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          NODE_AUTH_TOKEN: ""
         run: |
           set -euo pipefail
           TAG="v${VERSION}"
@@ -169,6 +172,8 @@ jobs:
       # Both published packages are built here: the root `build` script only
       # builds the plugin, while `dsh-sup` ships its own `lib/`.
       - name: Build
+        env:
+          NODE_AUTH_TOKEN: ""
         run: pnpm -r build
 
       # The npm dist-tag is the channel signal and is derived from the version
@@ -206,13 +211,32 @@ jobs:
       # `--tag "$TAG"`: npm >= 11 hard-throws when publishing a prerelease
       # without an explicit --tag.
       #
-      # Pure OIDC (Trusted Publishing): no NODE_AUTH_TOKEN / NPM_TOKEN anywhere.
+      # Auth is Trusted Publishing over OIDC. npm exchanges the GitHub id-token
+      # for a registry token BEFORE it looks at configured credentials, and a
+      # failed exchange is logged only at verbose level — the run then dies with
+      # `ENEEDAUTH`, which is why a bare registry line reads as "npm refuses
+      # before trying". `NODE_AUTH_TOKEN: ""` keeps the
+      # `//registry.npmjs.org/:_authToken` key that setup-node's `registry-url`
+      # wrote while emptying its value: a placeholder value would be used as the
+      # publish token instead of the exchanged one. `NPM_CONFIG_LOGLEVEL=verbose`
+      # is what surfaces the exchange failure next time.
       - name: Publish dsh-supervision to npm
         env:
           TAG: ${{ steps.disttag.outputs.tag }}
           VERSION: ${{ steps.ver.outputs.version }}
+          NODE_AUTH_TOKEN: ""
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
+          echo "node=$(node --version) npm=$(npm --version)"
+          echo "id-token-url-set=${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+          NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$NPMRC" ]; then
+            echo "npmrc=$NPMRC lines=$(wc -l < "$NPMRC") authToken-key=$(grep -c '_authToken' "$NPMRC" || true)"
+          else
+            echo "npmrc=$NPMRC missing"
+          fi
+          echo "registry=$(npm config get registry)"
           if [ "$(npm view "dsh-supervision@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
             echo "dsh-supervision@${VERSION} is already published; skipping."
             exit 0
@@ -224,6 +248,8 @@ jobs:
         env:
           TAG: ${{ steps.disttag.outputs.tag }}
           VERSION: ${{ steps.ver.outputs.version }}
+          NODE_AUTH_TOKEN: ""
+          NPM_CONFIG_LOGLEVEL: verbose
         working-directory: packages/cli
         run: |
           set -euo pipefail
