@@ -240,6 +240,14 @@ is parked. `steer()` starts a turn on an idle agent
 (`packages/core/agent/src/runtime-types.ts:254`), so there is no separate
 follow-up branch.
 
+The ask id is assigned by the plugin, not read from DSH: `ApprovalRequestEvent`
+carries no id (`packages/interaction/user-approval/src/types.ts:80`), and the
+internal `ApprovalRequestId` exists only in the `approval/asked` session event.
+Pairing by `toolName`/`callId` is rejected as racy for concurrent asks. The
+plugin mints a 6-hex id per parked ask, unique among live asks, and reports it in
+the root `msg`, `/status` and the audit echo, so one supervisor command settles
+any ask in the bridged tree without routing.
+
 While the root is `blocked`, hc refuses `send` without `--force`. That is the
 human gate by design: a supervisor escalates deliberately with
 `hc send --force w1 "/approve <id>"`, and the plugin echoes one audit line per
@@ -322,6 +330,10 @@ any plugin — `packages/host/webserver/src/index.ts:445`):
 |---|---|---|
 | `/dsh-supervision/state` | GET | `{"sessions":{"<id>":{"bridged":true,"terminal":"w1","pid":51234,"since":1762…,"asks":["3f9a"]}}}` |
 | `/dsh-supervision/reclaim` | POST | `{"session":"<id>"}` → 200 `{"reclaimed":true}`; 409 when no bridge |
+
+`terminal` is `HC_TERMINAL_NAME` when the host exports it, else `dsh-sup`:
+herdr-core's chosen terminal name is not readable from the supervised process, so
+the `w1` in the examples is illustrative input, not a receivable field.
 
 `reclaim` requires `Content-Type: application/json` so a cross-origin simple
 form post cannot reach it; the only consequence it can cause is handing control
