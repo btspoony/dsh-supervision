@@ -373,6 +373,40 @@ test('a live turn reports working and its end reports done, with echo lines', as
   host.dispose()
 })
 
+test('a title change alone reaches the wire, so session-title is observable', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir, titleFrom: 'session-title' }))
+  const client = await attached(host, dir, 'session-1')
+
+  // The mode derives no title from the cwd, so the session's own title is the
+  // only source and nothing but this event can change the record.
+  host.emit('session-1', { type: 'session/title', data: { title: 'renamed' } })
+  await until(() => client.frames.length === 2, 'the title report')
+  assert.deepEqual(client.frames[1], {
+    t: 'osc',
+    data: '\u001b]7501;state=idle:app=dsh:title=cmVuYW1lZA==\u001b\\',
+  })
+  assert.deepEqual(client.frames.map(frame => frame.t), ['welcome', 'osc'], 'a title is not an echo line')
+  host.dispose()
+})
+
+test('a title change is not re-sent when nothing else changed', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir, titleFrom: 'session-title' }))
+  const client = await attached(host, dir, 'session-1')
+
+  host.emit('session-1', { type: 'session/title', data: { title: 'renamed' } })
+  await until(() => client.frames.length === 2, 'the title report')
+  host.emit('session-1', { type: 'session/title', data: { title: 'renamed' } })
+  await new Promise<void>(resolve => { setImmediate(resolve) })
+  assert.equal(client.frames.length, 2, 'the same record is not a second report')
+  host.dispose()
+})
+
 test('a resumed session reports idle until its own live turn starts', async () => {
   const dir = tempDir()
   const host = new FakeHost()
@@ -625,6 +659,36 @@ test('/new creates a session in the current cwd, attaches it, and does not re-we
     t: 'echo',
     text: `session=${created ?? ''} state=idle turn=0 asks=-`,
   })
+  host.dispose()
+})
+
+test('/new refuses a relative argument instead of creating elsewhere', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '/new sub/dir' })
+  await until(() => client.frames.length === 2, 'the refusal')
+  assert.deepEqual(client.frames[1], { t: 'echo', text: 'new failed: sub/dir is not an absolute path' })
+  assert.deepEqual(host.created, [], 'nothing is created in a directory nobody named')
+  assert.equal(host.agents.length, 1)
+  host.dispose()
+})
+
+test('/new creates a session in an absolute cwd', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  client.write({ t: 'line', text: '/new /repo/api' })
+  await until(() => client.frames.length === 4, 'the switch')
+  const created = host.created[0]
+  assert.ok(created !== undefined)
+  assert.equal(host.agents.find(agent => agent.id === created)?.session.header.cwd, '/repo/api')
   host.dispose()
 })
 
@@ -894,28 +958,36 @@ test('the state route reports one entry per live bridge and no entry without one
   const dir = tempDir()
   const host = new FakeHost()
   host.add('session-1', '/repo')
-  apply(host.ctx, config({ socketDir: dir, programStatus: false }))
-  assert.deepEqual(host.server.paths, ['/dsh-supervision/state', '/dsh-supervision/reclaim'])
+  // The label reaches the browser from this env var; a literal pins that path.
+  const previous = process.env['HC_TERMINAL_NAME']
+  process.env['HC_TERMINAL_NAME'] = 'hc-literal'
+  try {
+    apply(host.ctx, config({ socketDir: dir, programStatus: false }))
+    assert.deepEqual(host.server.paths, ['/dsh-supervision/state', '/dsh-supervision/reclaim'])
 
-  const empty = await host.server.call('/dsh-supervision/state', 'GET', {})
-  assert.deepEqual(empty.json, { proto: 1, sessions: {} })
+    const empty = await host.server.call('/dsh-supervision/state', 'GET', {})
+    assert.deepEqual(empty.json, { proto: 1, sessions: {} })
 
-  const client = await attached(host, dir, 'session-1')
-  const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
-  assert.deepEqual(Object.keys(sessions), ['session-1'])
-  const entry = sessions['session-1']
-  assert.ok(entry !== undefined)
-  assert.equal(entry.bridged, true)
-  assert.equal(entry.terminal, process.env['HC_TERMINAL_NAME'] ?? 'dsh-sup')
-  assert.equal(entry.pid, process.pid)
-  assert.equal(typeof entry.since, 'number')
-  assert.deepEqual(entry.asks, [])
+    const client = await attached(host, dir, 'session-1')
+    const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
+    assert.deepEqual(Object.keys(sessions), ['session-1'])
+    const entry = sessions['session-1']
+    assert.ok(entry !== undefined)
+    assert.equal(entry.bridged, true)
+    assert.equal(entry.terminal, 'hc-literal')
+    assert.equal(entry.pid, process.pid)
+    assert.equal(typeof entry.since, 'number')
+    assert.deepEqual(entry.asks, [])
 
-  client.socket.end()
-  await until(() => host.listenerCount === 0, 'the bridge to drop')
-  const after = await host.server.call('/dsh-supervision/state', 'GET', {})
-  assert.deepEqual(after.json, { proto: 1, sessions: {} })
-  host.dispose()
+    client.socket.end()
+    await until(() => host.listenerCount === 0, 'the bridge to drop')
+    const after = await host.server.call('/dsh-supervision/state', 'GET', {})
+    assert.deepEqual(after.json, { proto: 1, sessions: {} })
+  } finally {
+    if (previous === undefined) delete process.env['HC_TERMINAL_NAME']
+    else process.env['HC_TERMINAL_NAME'] = previous
+    host.dispose()
+  }
 })
 
 test('reclaim hands the session back, tells the forwarder why, and is idempotent', async () => {

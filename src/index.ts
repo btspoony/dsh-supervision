@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
 import { PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
-import type { ErrorCode, HelloFrame, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
+import type { ErrorCode, HelloFrame, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
@@ -186,6 +186,10 @@ export const inject = ['agents']
 interface Shown {
   readonly state: ProgramState
   readonly msg: string
+  /** herdr-core holds the title in the same record, so a title change is a new record. */
+  readonly title: string
+  readonly kind: ProgramKind | undefined
+  /** Not compared: an echo line's own trigger, unchanged by a title-only change. */
   readonly turn: number
 }
 
@@ -433,8 +437,13 @@ function handlersFor(
   const publish = (state: BridgeState): void => {
     const record = reportOf(state)
     const msg = record.msg ?? ''
+    const title = record.title ?? ''
     const { shown } = state
-    if (config.programStatus && (record.state !== shown.state || msg !== shown.msg)) {
+    // A record is replaced whole, so any field it carries is part of its
+    // identity: a title-only change must reach the wire.
+    const changed = record.state !== shown.state || msg !== shown.msg
+      || title !== shown.title || record.kind !== shown.kind
+    if (config.programStatus && changed) {
       const data = programStatus(record)
       if (data !== '') state.bridge.send({ t: 'osc', data })
     }
@@ -442,7 +451,7 @@ function handlersFor(
     if (config.echo && (state.root.turn !== shown.turn || record.state !== shown.state)) {
       state.bridge.send({ t: 'echo', text: `[turn ${String(state.root.turn)}] ${record.state}` })
     }
-    state.shown = { state: record.state, msg, turn: state.root.turn }
+    state.shown = { state: record.state, msg, title, kind: record.kind, turn: state.root.turn }
   }
 
   /** Send one root report immediately, for a bridge that just switched session. */
@@ -455,7 +464,13 @@ function handlersFor(
     if (config.echo) {
       state.bridge.send({ t: 'echo', text: `[turn ${String(state.root.turn)}] ${record.state}` })
     }
-    state.shown = { state: record.state, msg: record.msg ?? '', turn: state.root.turn }
+    state.shown = {
+      state: record.state,
+      msg: record.msg ?? '',
+      title: record.title ?? '',
+      kind: record.kind,
+      turn: state.root.turn,
+    }
   }
 
   /** Fold one fact from the attached session into its root record. */
@@ -660,7 +675,7 @@ function handlersFor(
       pid: pids.get(bridge) ?? 0,
       since: Date.now(),
       root,
-      shown: { state: root.current.state, msg: '', turn: root.turn },
+      shown: { state: root.current.state, msg: '', title: root.current.title, kind: undefined, turn: root.turn },
       children: new Map(),
     }
     bridged.set(session, state)
@@ -742,10 +757,14 @@ function handlersFor(
         }
         case 'new': {
           if (refuseWhileParked(state)) return
-          // A relative argument resolves in the forwarder, never in the web process.
-          const cwd = command.cwd !== undefined && isAbsolute(command.cwd)
-            ? command.cwd
-            : state.agent.session.header?.cwd ?? process.cwd()
+          // Nothing resolves a relative path: the forwarder pumps the line
+          // verbatim, so accepting one would silently create the session
+          // somewhere else entirely.
+          const cwd = command.cwd ?? state.agent.session.header?.cwd ?? process.cwd()
+          if (!isAbsolute(cwd)) {
+            bridge.send({ t: 'echo', text: `new failed: ${cwd} is not an absolute path` })
+            return
+          }
           void create(cwd).then(
             agent => { establish(agent, bridge, 'root') },
             (error: unknown) => { bridge.send({ t: 'echo', text: `new failed: ${reasonOf(error)}` }) },
