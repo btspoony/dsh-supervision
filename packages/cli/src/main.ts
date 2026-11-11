@@ -1,13 +1,12 @@
 import { parseArgs, usageText } from './args.js';
 import { connect, type Connection } from './connection.js';
 import { EXIT, exitCodeFor } from './exit.js';
+import { runList } from './list.js';
 import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, renderFrame, supervisionDir } from 'dsh-supervision-protocol';
-import type { HelloFrame, OutFrame, RegistryEntry, SessionItem } from 'dsh-supervision-protocol';
-
-const HEADER = ['SESSION', 'CWD', 'LIVE', 'BRIDGED'].join('\t');
+import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
 
 /** A root record restates `app`, because hc replaces the record whole. */
 function rootReport(state: string, extra: { readonly title?: string; readonly msg?: string } = {}): string {
@@ -63,49 +62,6 @@ async function main(argv: readonly string[]): Promise<number> {
       ? { t: 'hello', proto: PROTO, pid: process.pid, attach: parsed.session }
       : { t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: parsed.cwd } };
   return runBridge(selection.entry.socket, hello);
-}
-
-/** Asks one backend for its sessions; a dead backend contributes nothing. */
-function listFrom(socket: string, cwd: string): Promise<readonly SessionItem[]> {
-  return new Promise((resolve) => {
-    let connection: Connection | undefined;
-    const settle = (items: readonly SessionItem[]): void => {
-      connection?.close();
-      resolve(items);
-    };
-    connection = connect(socket, undefined, {
-      onFrame: (frame: OutFrame) => {
-        if (frame.t === 'sessions') settle(frame.items);
-        if (frame.t === 'bye') settle([]);
-        if (frame.t === 'error') {
-          process.stderr.write(`${frame.code}: ${frame.message}\n`);
-          settle([]);
-        }
-      },
-      onLost: (_msg, detail) => {
-        process.stderr.write(`${detail}\n`);
-        settle([]);
-      },
-      onRefused: (detail) => {
-        process.stderr.write(`${detail}\n`);
-        settle([]);
-      },
-    });
-    connection.send({ t: 'list', cwd });
-  });
-}
-
-/**
- * Prints the union of every live backend's sessions and exits 0 without binding
- * a bridge, which is why a listing needs no welcome and takes no session.
- */
-async function runList(entries: readonly RegistryEntry[], cwd: string): Promise<number> {
-  const items = await Promise.all(entries.map((entry) => listFrom(entry.socket, cwd)));
-  const rows = items.flat().map(
-    (item) => `${item.id}\t${item.cwd}\t${item.live ? 'yes' : 'no'}\t${item.bridged ? 'yes' : '-'}`,
-  );
-  process.stdout.write(`${[HEADER, ...rows].join('\n')}\n`);
-  return EXIT.ok;
 }
 
 /**
