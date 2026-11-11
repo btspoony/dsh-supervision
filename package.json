@@ -12,12 +12,14 @@
     "lib/index.js",
     "lib/index.d.ts",
     "lib/client/**",
+    "icon.svg",
     "locale",
     "docs",
     "README.md",
     "README.zh-CN.md",
     "CHANGELOG.md"
   ],
+  "icon": "./icon.svg",
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
@@ -43,7 +45,7 @@
   },
   "scripts": {
     "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown && node scripts/build-client.mjs && tsc -p tsconfig.client.json",
-    "test": "pnpm build && node --test 'lib/*.test.js' 'lib/client/*.test.js'",
+    "test": "pnpm build && node --test 'lib/*.test.js' 'lib/client/*.test.js' && node --test scripts/release.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "release:prepare": "node scripts/prepare-release.mjs",
     "release:validate": "node scripts/validate-release-version.mjs",
