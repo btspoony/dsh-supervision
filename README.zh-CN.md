@@ -182,11 +182,6 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 
 | 文档 | 内容 |
 |---|---|
-| [docs/DETAIL.zh.md](docs/DETAIL.zh.md) | 完整尺寸的展示图 |
-| [docs/preview.zh.svg](docs/preview.zh.svg) | 本页顶部那张图 |
-| [docs/preview.svg](docs/preview.svg) | 英文版图，几何完全一致 |
-| [ADR：外部桥接](.agents/adr/proposed/architecture/2026-11-11-external-bridge-transport.md) | 为什么监督一个已在运行的 `dsh web` 要走外部桥接 |
-| [进程内 supervisor 通路](.agents/knowledge/architecture-patterns/in-process-supervisor-transport.md) | 同一套协议、两种承载方式的实现笔记 |
 | [CHANGELOG.md](CHANGELOG.md) | 已发布的变更 |
 
 ## 许可证

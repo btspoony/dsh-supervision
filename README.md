@@ -182,11 +182,6 @@ A change must not break these:
 
 | Doc | Content |
 |---|---|
-| [docs/DETAIL.md](docs/DETAIL.md) | the preview figure at full size |
-| [docs/preview.svg](docs/preview.svg) | the figure shown at the top of this page |
-| [docs/preview.zh.svg](docs/preview.zh.svg) | the Chinese figure, same geometry |
-| [.agents/adr/proposed/architecture/2026-11-11-external-bridge-transport.md](.agents/adr/proposed/architecture/2026-11-11-external-bridge-transport.md) | the ADR: why the bridge exists and how it is shaped |
-| [.agents/knowledge/architecture-patterns/in-process-supervisor-transport.md](.agents/knowledge/architecture-patterns/in-process-supervisor-transport.md) | the architecture note: one seam, two owners of the same protocol |
 | [CHANGELOG.md](CHANGELOG.md) | released changes |
 
 ## License
