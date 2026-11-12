@@ -242,3 +242,48 @@ test('a backend answering bye explains itself on stderr and exits 1', async (t) 
   assert.ok(result.stderr.includes(leaving.socket), 'the bye line names its backend');
   assert.deepEqual(rows(result.stdout), expected);
 });
+
+
+test('list without --cwd asks every backend for every session', async (t) => {
+  const dir = mkdtempSync('/tmp/dsh-list-');
+  let request: unknown;
+  const backend = listen(join(dir, 'a.sock'), (socket: Socket) => {
+    socket.setEncoding('utf8');
+    socket.once('data', (chunk: string) => {
+      request = JSON.parse(chunk.trim()) as unknown;
+      socket.write(`${JSON.stringify({ t: 'sessions', items })}\n`);
+    });
+  });
+  t.after(() => {
+    backend.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const result = await list([backend]);
+
+  assert.equal(result.code, EXIT.ok);
+  assert.deepEqual(request, { t: 'list' }, 'the request carries no directory filter');
+  assert.deepEqual(rows(result.stdout), expected);
+});
+
+test('--cwd asks the backend to filter by that directory', async (t) => {
+  const dir = mkdtempSync('/tmp/dsh-list-');
+  let request: unknown;
+  const backend = listen(join(dir, 'a.sock'), (socket: Socket) => {
+    socket.setEncoding('utf8');
+    socket.once('data', (chunk: string) => {
+      request = JSON.parse(chunk.trim()) as unknown;
+      socket.write(`${JSON.stringify({ t: 'sessions', items })}\n`);
+    });
+  });
+  t.after(() => {
+    backend.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const result = await list([backend], ['--cwd', '/repo']);
+
+  assert.equal(result.code, EXIT.ok);
+  assert.deepEqual(request, { t: 'list', cwd: '/repo' });
+});
+

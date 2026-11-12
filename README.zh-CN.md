@@ -48,7 +48,7 @@ dsh-sup                                  # create a session in the dsh web proce
 dsh-sup --cwd ~/work/project             # create it elsewhere (resolved here, then sent absolute)
 dsh-sup attach session-abc123            # attach an existing session (or: dsh-sup session-abc123)
 dsh-sup --pid 4711 new                   # pick the backend when several dsh web processes run
-dsh-sup list                             # list the sessions a forwarder may attach
+dsh-sup list                             # list every session on every live backend
 ```
 
 `list` 对每个存活后端打印一张表，不建立任何桥接：
@@ -58,7 +58,7 @@ SESSION            CWD                LIVE  BRIDGED
 session-4f2a…      /Users/me/work     yes   -
 ```
 
-后端通过 `$DSH_HOME/supervision` 发现（`DSH_HOME` 未设置时是 `~/.dsh/supervision`）。建立桥接恰好需要一个存活后端；有多个时拒绝信息会列出每个候选的 `pid` 与套接口，用 `--pid` 选定一个。`--cwd` 只对 `new` 和 `list` 生效。
+后端通过 `$DSH_HOME/supervision` 发现（`DSH_HOME` 未设置时是 `~/.dsh/supervision`）。建立桥接恰好需要一个存活后端；有多个时拒绝信息会列出每个候选的 `pid` 与套接口，用 `--pid` 选定一个。`--cwd` 只对 `new` 和 `list` 生效；`list` 不带它时列出全部会话，CWD 列说明每个会话在哪个目录。
 
 ### 应答审批
 

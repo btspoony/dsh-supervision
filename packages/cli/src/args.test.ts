@@ -27,8 +27,8 @@ test('a bare session id is the attach shorthand', () => {
   assert.equal(parseArgs(['session-'], base).kind, 'usage');
 });
 
-test('list carries the resolved cwd and never attaches', () => {
-  assert.deepEqual(parseArgs(['list'], base), { kind: 'list', cwd: base });
+test('list defaults to every session and --cwd filters it', () => {
+  assert.deepEqual(parseArgs(['list'], base), { kind: 'list' });
   assert.deepEqual(parseArgs(['list', '--cwd', '/elsewhere'], base), { kind: 'list', cwd: '/elsewhere' });
 });
 
@@ -40,7 +40,7 @@ test('--pid selects among several backends and is accepted by every command', ()
     session: 'session-x',
     pid: 7,
   });
-  assert.deepEqual(parseArgs(['list', '--pid', '7'], base), { kind: 'list', cwd: base, pid: 7 });
+  assert.deepEqual(parseArgs(['list', '--pid', '7'], base), { kind: 'list', pid: 7 });
 });
 
 test('unknown words, options and bad values are usage errors, never a guess', () => {

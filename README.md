@@ -48,7 +48,7 @@ dsh-sup                                  # create a session in the dsh web proce
 dsh-sup --cwd ~/work/project             # create it elsewhere (resolved here, then sent absolute)
 dsh-sup attach session-abc123            # attach an existing session (or: dsh-sup session-abc123)
 dsh-sup --pid 4711 new                   # pick the backend when several dsh web processes run
-dsh-sup list                             # list the sessions a forwarder may attach
+dsh-sup list                             # list every session on every live backend
 ```
 
 `list` prints one table for every live backend and binds nothing:
@@ -58,7 +58,7 @@ SESSION            CWD                LIVE  BRIDGED
 session-4f2a…      /Users/me/work     yes   -
 ```
 
-Backends are found through `$DSH_HOME/supervision` (`~/.dsh/supervision` when `DSH_HOME` is unset). A bridge needs exactly one live backend; with several, the refusal names each candidate's `pid` and socket, and `--pid` picks one. `--cwd` applies to `new` and `list` only.
+Backends are found through `$DSH_HOME/supervision` (`~/.dsh/supervision` when `DSH_HOME` is unset). A bridge needs exactly one live backend; with several, the refusal names each candidate's `pid` and socket, and `--pid` picks one. `--cwd` applies to `new` and `list` only; `list` without it shows every session, with the CWD column naming where each one lives.
 
 ### Answer an approval
 
