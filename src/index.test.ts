@@ -115,12 +115,20 @@ class FakeHost {
   readonly resumed: string[] = []
   /** Creates still to fail with DSH's no-factory refusal, for the boot race. */
   failCreate = 0
+  /** The model selection each create named, so a model-less turn is caught. */
+  readonly createdModels: ({ readonly provider: string; readonly model: string } | undefined)[] = []
+  /** The preset each create mounted, so a tool-less session is caught. */
+  readonly mountedPresets: string[] = []
   /** Every steer the plugin delivered, with the session it went to. */
   readonly steered: { readonly session: string; readonly message: UserMessage }[] = []
   /** Every cancel the plugin delivered, with the session it went to. */
   readonly cancelled: string[] = []
   /** Stands in for `ctx.get('subagents')`; undefined mimics a host without one. */
   subagentRoots: Map<string, string> | undefined
+  /** Stands in for `ctx.get('agentDefaultModel')`; undefined mimics a host without one. */
+  defaultModel: { readonly provider: string; readonly model: string } | undefined
+  /** Stands in for `ctx.get('agentPresets')`; undefined mimics a host without one. */
+  defaultPreset: string | undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -140,12 +148,14 @@ class FakeHost {
       agents: {
         get: (id: string) => this.agents.find(agent => agent.id === id),
         list: () => this.agents,
-        create: async ({ sessionId, meta }) => {
+        create: async ({ sessionId, meta, agentOptions, setup }) => {
           if (this.failCreate > 0) {
             this.failCreate -= 1
             throw new Error('no agent factory registered (load an agent-loop plugin)')
           }
           this.created.push(sessionId)
+          this.createdModels.push(agentOptions)
+          await setup?.({})
           return { agent: this.add(sessionId, meta.cwd) }
         },
         resume: async ({ resumeSessionId }) => {
@@ -156,6 +166,16 @@ class FakeHost {
       },
       get: (name: string) => {
         if (name === 'webServer') return this.attachServer ? this.server : undefined
+        if (name === 'agentDefaultModel') {
+          return this.defaultModel === undefined ? undefined : { currentSelection: () => this.defaultModel }
+        }
+        if (name === 'agentPresets') {
+          if (this.defaultPreset === undefined) return undefined
+          return {
+            resolve: async () => ({ id: this.defaultPreset ?? '' }),
+            mount: async () => { this.mountedPresets.push(this.defaultPreset ?? '') },
+          }
+        }
         if (name !== 'subagents' || this.subagentRoots === undefined) return undefined
         return {
           rootOf: (agent: FakeAgent) => {
@@ -513,6 +533,33 @@ test('the tty first session retries while the agent factory is still missing', a
     await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
     host.dispose()
   })
+})
+
+test('a created session carries the default model and mounts the default preset', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.defaultModel = { provider: 'FallbacksChain', model: 'Auto' }
+  host.defaultPreset = 'ptc'
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/repo' } })
+  await client.take(1)
+  assert.deepEqual(host.createdModels, [{ provider: 'FallbacksChain', model: 'Auto' }])
+  assert.deepEqual(host.mountedPresets, ['ptc'])
+  host.dispose()
+})
+
+test('a host without a default model service still creates a session', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/repo' } })
+  await client.take(1)
+  assert.deepEqual(host.createdModels, [undefined])
+  host.dispose()
 })
 
 test('a bare hello creates a session and answers welcome before anything else', async () => {

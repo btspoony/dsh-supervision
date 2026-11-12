@@ -53,6 +53,21 @@ interface SubagentsLike {
   rootOf(agent: AgentLike): AgentLike
 }
 
+/** The `ctx.agentDefaultModel` surface this plugin reads, when the host mounts it. */
+interface DefaultModelLike {
+  currentSelection(): { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+}
+
+/**
+ * The `ctx.agentPresets` surface this plugin reads, when the host mounts it.
+ * `mount` is what installs a session's tool set: a create without it yields an
+ * agent that can only use host-level tools, not bash or the file tools.
+ */
+interface AgentPresetsLike {
+  resolve(id?: string): Promise<{ readonly id: string }>
+  mount(agentCtx: unknown, id?: string): Promise<unknown>
+}
+
 /**
  * The slice of DSH's `ApprovalRequestEvent` this plugin reads
  * (`packages/interaction/user-approval/src/types.ts:80-100`). The event carries
@@ -78,7 +93,9 @@ export interface AgentsService {
   list(): readonly AgentLike[]
   create(options: {
     readonly sessionId: string
-    readonly meta: { readonly cwd: string }
+    readonly meta: { readonly cwd: string; readonly agentPreset?: string }
+    readonly agentOptions?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+    readonly setup?: (agentCtx: unknown) => Promise<void> | void
   }): Promise<{ readonly agent: AgentLike }>
   resume(options: { readonly resumeSessionId: string }): Promise<{ readonly agent: AgentLike }>
 }
@@ -290,6 +307,21 @@ function subagentsOf(value: unknown): SubagentsLike | undefined {
   return value as SubagentsLike
 }
 
+/** @returns the host's default model service, when one is mounted. */
+function defaultModelOf(value: unknown): DefaultModelLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  if (!('currentSelection' in value) || typeof value.currentSelection !== 'function') return undefined
+  return value as DefaultModelLike
+}
+
+/** @returns the host's preset registry, when a usable one is mounted. */
+function presetsOf(value: unknown): AgentPresetsLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { resolve, mount } = value as { resolve?: unknown; mount?: unknown }
+  if (typeof resolve !== 'function' || typeof mount !== 'function') return undefined
+  return value as AgentPresetsLike
+}
+
 /**
  * The root `msg` one parked ask forces: what stopped the tree, and which id
  * answers it.
@@ -432,11 +464,33 @@ function handlersFor(
    *   fails fast with `create-failed` instead.
    */
   const create = async (cwd: string, retryOnNoFactory = false): Promise<AgentLike> => {
+    // A session created outside the GUI records no model selection of its own,
+    // so its first turn fails with "no provider/model" until this carries the
+    // profile default. Read reflectively: a host without the service keeps the
+    // plain create.
+    const agentOptions = defaultModelOf(ctx.get?.('agentDefaultModel'))?.currentSelection()
+    // The preset's `mount` is what installs the session's tool set. A create
+    // without it yields an agent with host-level tools only — no bash, no file
+    // tools — which is not a session anyone can supervise.
+    const presets = presetsOf(ctx.get?.('agentPresets'))
+    let composition: { readonly id: string } | undefined
+    try {
+      composition = presets === undefined ? undefined : await presets.resolve(undefined)
+    } catch (error) {
+      throw new BindError(refusalCode(error, 'create-failed'), reasonOf(error))
+    }
     // shortcut: the wait keys off DSH's "no agent factory registered" message;
     // switch to an explicit readiness signal if dsh-agent exposes one.
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return (await ctx.agents.create({ sessionId: `session-${randomUUID()}`, meta: { cwd } })).agent
+        return (await ctx.agents.create({
+          sessionId: `session-${randomUUID()}`,
+          meta: { cwd, ...(composition === undefined ? {} : { agentPreset: composition.id }) },
+          ...(agentOptions === undefined ? {} : { agentOptions }),
+          ...(composition === undefined || presets === undefined
+            ? {}
+            : { setup: async (agentCtx: unknown) => { await presets.mount(agentCtx, composition.id) } }),
+        })).agent
       } catch (error) {
         const reason = reasonOf(error)
         if (retryOnNoFactory && attempt < NO_FACTORY_ATTEMPTS && reason.includes(NO_FACTORY)) {
