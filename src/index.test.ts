@@ -137,6 +137,8 @@ class FakeHost {
   presetReads = 0
   /** The directory whose workspace the fake registry resolves, if any. */
   workspacePath: string | undefined
+  /** Registry reads still to answer absent, for the boot race. */
+  workspaceDelay = 0
   /** Sessions attached to that workspace, for UI-visibility coverage. */
   readonly attachedSessions: string[] = []
   /** Sessions the fake registry unarchived. */
@@ -183,6 +185,10 @@ class FakeHost {
           return this.defaultModel === undefined ? undefined : { currentSelection: () => this.defaultModel }
         }
         if (name === 'workspaceRegistry') {
+          if (this.workspaceDelay > 0) {
+            this.workspaceDelay -= 1
+            return undefined
+          }
           return {
             resolveByPath: async (path: string) => this.workspacePath === undefined || path !== this.workspacePath
               ? undefined
@@ -667,6 +673,25 @@ test('a created session is attached to its workspace and unarchived', async () =
   assert.deepEqual(host.attachedSessions, host.created, 'the UI lists a session only through its workspace')
   assert.deepEqual(host.unarchivedSessions, host.created)
   host.dispose()
+})
+
+test('the tty boot session attaches once the workspace registry settles', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  // The tty's first session is created in the process directory.
+  host.workspacePath = process.cwd()
+  // The registry is registered after the boot create has already run.
+  host.workspaceDelay = 4
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 400 && host.attachedSessions.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.deepEqual(host.attachedSessions, host.created)
+    assert.deepEqual(host.unarchivedSessions, host.created)
+    host.dispose()
+  })
 })
 
 test('a session created outside any workspace still answers', async () => {

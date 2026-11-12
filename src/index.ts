@@ -341,15 +341,13 @@ function workspaceRegistryOf(value: unknown): WorkspaceRegistryLike | undefined 
  * what makes it appear under a project in the UI. A session created here must
  * do the same, and leave the archive set: an unattached, archived session still
  * answers `dsh-sup` but is invisible in the browser. Best-effort by design — a
- * host without the registry keeps the plain create, and a failed attach must
- * not discard a session that already exists.
- * @param value - the `ctx.get('workspaceRegistry')` lookup.
+ * directory without a workspace keeps the session wire-only, and a failed
+ * attach must not discard a session that already exists.
+ * @param registry - the host's workspace registry.
  * @param cwd - the directory the session was created in.
  * @param session - the created session id.
  */
-async function attachToWorkspace(value: unknown, cwd: string, session: string): Promise<void> {
-  const registry = workspaceRegistryOf(value)
-  if (registry === undefined) return
+async function attachToWorkspace(registry: WorkspaceRegistryLike, cwd: string, session: string): Promise<void> {
   try {
     const workspace = await registry.resolveByPath(cwd)
     if (workspace === undefined) return
@@ -358,6 +356,30 @@ async function attachToWorkspace(value: unknown, cwd: string, session: string): 
   } catch {
     // The session is live either way; only its UI attribution is missing.
   }
+}
+
+/**
+ * The tty's first session is created before the profile registers
+ * `workspaceRegistry`, so the attach has to wait for it. The timer is unref'd:
+ * a host that never mounts the registry must not keep a process alive for it,
+ * and the session stays usable without its UI attribution.
+ * @param ctx - the host context, read reflectively on every poll.
+ * @param cwd - the directory the session was created in.
+ * @param session - the created session id.
+ */
+function attachWhenRegistrySettles(ctx: PluginContext, cwd: string, session: string): void {
+  const deadline = Date.now() + BOOT_WINDOW_MS
+  const poll = (): void => {
+    const registry = workspaceRegistryOf(ctx.get?.('workspaceRegistry'))
+    if (registry !== undefined) {
+      void attachToWorkspace(registry, cwd, session)
+      return
+    }
+    if (Date.now() >= deadline) return
+    const timer = setTimeout(poll, BOOT_POLL_MS)
+    timer.unref?.()
+  }
+  poll()
 }
 
 /**
@@ -539,7 +561,9 @@ function handlersFor(
             ? {}
             : { setup: async (agentCtx: unknown) => { await presets.mount(agentCtx, composition.id) } }),
         })).agent
-        await attachToWorkspace(ctx.get?.('workspaceRegistry'), cwd, agent.session.id)
+        const registry = workspaceRegistryOf(ctx.get?.('workspaceRegistry'))
+        if (registry === undefined) attachWhenRegistrySettles(ctx, cwd, agent.session.id)
+        else await attachToWorkspace(registry, cwd, agent.session.id)
         return agent
       } catch (error) {
         const reason = reasonOf(error)

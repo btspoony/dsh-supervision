@@ -63,6 +63,9 @@ and no declared dependency keeps the plugin from loading there.
   named without `mount`, silently changes or empties the tool set.
 - **A session outside every workspace is invisible.** Attach it by its own cwd;
   a directory without a workspace keeps the session wire-only until one exists.
+- **The attach races the boot too.** The tty's first session is created before
+  `workspaceRegistry` is registered, so the attach must poll for that service
+  inside the same boot window instead of reading it once.
 - **The first session can race the boot.** A profile that boots an agent loop
   late answers `no agent factory registered`; retry that one create, and only
   the one the process makes for itself, so operator commands still fail fast.
