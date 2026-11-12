@@ -4,7 +4,17 @@ import { EXIT, exitCodeFor } from './exit.js';
 
 // PID identifies the backend when several `dsh web` processes are live; the
 // registry entry is the only place a listing knows it, so the row carries it.
-const HEADER = ['SESSION', 'PID', 'CWD', 'LIVE', 'BRIDGED'].join('\t');
+// Widths are computed, not tab-separated: a long cwd or session id must not
+// push the trailing columns out of alignment.
+const COLUMNS = ['SESSION', 'PID', 'CWD', 'LIVE', 'BRIDGED'];
+const GUTTER = '  ';
+
+/** Pad every cell to its column's width; the last column stays unpadded. */
+function tableLine(cells: readonly string[], widths: readonly number[]): string {
+  return cells
+    .map((cell, index) => (index === cells.length - 1 ? cell : cell.padEnd(widths[index] ?? 0)))
+    .join(GUTTER);
+}
 
 /**
  * One backend's answer to `list`: its rows, or the protocol code that decides
@@ -66,12 +76,17 @@ export async function runList(entries: readonly RegistryEntry[], cwd: string | u
     const result = results[index];
     // A failed backend contributed no rows; its reason is already on stderr.
     if (result === undefined || !result.ok) return [];
-    return result.items.map(
-      (item) =>
-        `${item.id}\t${String(entry.pid)}\t${item.cwd}\t${item.live ? 'yes' : 'no'}\t${item.bridged ? 'yes' : '-'}`,
-    );
+    return result.items.map((item) => [
+      item.id,
+      String(entry.pid),
+      item.cwd,
+      item.live ? 'yes' : 'no',
+      item.bridged ? 'yes' : '-',
+    ]);
   });
-  process.stdout.write(`${[HEADER, ...rows].join('\n')}\n`);
+  const widths = COLUMNS.map((name, index) =>
+    Math.max(name.length, ...rows.map((row) => row[index]?.length ?? 0)));
+  process.stdout.write(`${[COLUMNS, ...rows].map((cells) => tableLine(cells, widths)).join('\n')}\n`);
   // The registry order is unsorted `readdirSync`, so the exit must not depend on
   // which failure came first. A bare loss outranks every coded refusal: exit 6
   // means the backend is alive, so letting a local refusal win would erase a
