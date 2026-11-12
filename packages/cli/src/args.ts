@@ -3,14 +3,14 @@ import { resolve } from 'node:path';
 export type Parsed =
   | { readonly kind: 'new'; readonly cwd: string; readonly pid?: number }
   | { readonly kind: 'attach'; readonly session: string; readonly pid?: number }
-  | { readonly kind: 'list'; readonly cwd: string; readonly pid?: number }
+  | { readonly kind: 'list'; readonly cwd?: string; readonly pid?: number }
   | { readonly kind: 'usage'; readonly reason: string };
 
 export const usageText = [
   'usage: dsh-sup [new] [--cwd <path>] [--pid <n>]',
   '       dsh-sup attach <session-id> [--pid <n>]',
   '       dsh-sup <session-id> [--pid <n>]',
-  '       dsh-sup list [--cwd <path>] [--pid <n>]',
+  '       dsh-sup list [--pid <n>] [--cwd <path>]   (every session; --cwd filters)',
 ].join('\n');
 
 /**
@@ -52,7 +52,13 @@ export function parseArgs(argv: readonly string[], base: string): Parsed {
 
   if (command === 'list') {
     if (rest.length > 0) return { kind: 'usage', reason: `unexpected argument ${rest[0]}` };
-    return pid === undefined ? { kind: 'list', cwd: target } : { kind: 'list', cwd: target, pid };
+    // No `--cwd` lists every session: the table's own CWD column says where
+    // each one lives, and filtering by the caller's directory hides the rest.
+    return {
+      kind: 'list',
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(pid === undefined ? {} : { pid }),
+    };
   }
 
   if (command === 'attach' || command.startsWith('session-')) {

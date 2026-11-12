@@ -17,7 +17,7 @@ export type ListResult =
  * Asks one backend for its sessions. A backend that cannot answer has already
  * put its reason on stderr, so the failure carries no message of its own.
  */
-export function listFrom(socket: string, cwd: string): Promise<ListResult> {
+export function listFrom(socket: string, cwd: string | undefined): Promise<ListResult> {
   return new Promise((resolve) => {
     let connection: Connection | undefined;
     const settle = (result: ListResult): void => {
@@ -48,7 +48,7 @@ export function listFrom(socket: string, cwd: string): Promise<ListResult> {
         settle({ ok: false, code: 'protocol' });
       },
     });
-    connection.send({ t: 'list', cwd });
+    connection.send(cwd === undefined ? { t: 'list' } : { t: 'list', cwd });
   });
 }
 
@@ -58,7 +58,7 @@ export function listFrom(socket: string, cwd: string): Promise<ListResult> {
  * the registry called live could not answer. A genuinely lost backend outranks
  * a local refusal, so that refusal never erases the loss.
  */
-export async function runList(entries: readonly RegistryEntry[], cwd: string): Promise<number> {
+export async function runList(entries: readonly RegistryEntry[], cwd: string | undefined): Promise<number> {
   const results = await Promise.all(entries.map((entry) => listFrom(entry.socket, cwd)));
   const rows = results
     .flatMap((result) => (result.ok ? result.items : []))
