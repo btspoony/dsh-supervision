@@ -51,11 +51,11 @@ dsh-sup --pid 4711 new                   # pick the backend when several dsh web
 dsh-sup list                             # list every session on every live backend
 ```
 
-`list` prints one table for every live backend and binds nothing:
+`list` prints one table for every live backend and binds nothing. `PID` names the `dsh web` process a row came from, so a multi-backend listing stays attributable:
 
 ```text
-SESSION            CWD                LIVE  BRIDGED
-session-4f2a…      /Users/me/work     yes   -
+SESSION            PID    CWD                LIVE  BRIDGED
+session-4f2a…      4711   /Users/me/work     yes   -
 ```
 
 Backends are found through `$DSH_HOME/supervision` (`~/.dsh/supervision` when `DSH_HOME` is unset). A bridge needs exactly one live backend; with several, the refusal names each candidate's `pid` and socket, and `--pid` picks one. `--cwd` applies to `new` and `list` only; `list` without it shows every session, with the CWD column naming where each one lives.
