@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-label="dsh-supervision：浏览器里正在运行的 dsh web 会话桥接到读 OSC 7501 的终端 supervisor——状态出去，输入回来" font-family="-apple-system, &quot;SF Pro Text&quot;, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, &quot;Microsoft YaHei&quot;, system-ui, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="512" viewBox="0 0 1200 640" role="img" aria-label="dsh-supervision：浏览器里正在运行的 dsh web 会话桥接到读 OSC 7501 的终端 supervisor——状态出去，输入回来" font-family="-apple-system, &quot;SF Pro Text&quot;, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, &quot;Microsoft YaHei&quot;, system-ui, sans-serif">
   <title>dsh-supervision</title>
   <desc>一个正在运行的 DSH 会话，桥接进任何读 OSC 7501 的 supervisor——状态出去，输入回来，不用第二个会话。</desc>
   <defs>
