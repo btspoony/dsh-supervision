@@ -341,6 +341,9 @@ const NO_FACTORY = 'no agent factory registered'
 /** 30 s of 500 ms retries: the agent loop registers its factory while a heavy profile boots. */
 const NO_FACTORY_ATTEMPTS = 60
 const NO_FACTORY_DELAY_MS = 500
+/** 5 s of 500 ms waits: the preset registry settles while the profile boots. */
+const PRESET_ATTEMPTS = 10
+const PRESET_DELAY_MS = 500
 
 /**
  * Mount the plugin in two layers.
@@ -464,17 +467,23 @@ function handlersFor(
    *   fails fast with `create-failed` instead.
    */
   const create = async (cwd: string, retryOnNoFactory = false): Promise<AgentLike> => {
-    // shortcut: the wait keys off DSH's "no agent factory registered" message;
-    // switch to an explicit readiness signal if dsh-agent exposes one.
-    for (let attempt = 0; ; attempt += 1) {
+    // Two independent readiness signals, two budgets: a late preset registry
+    // must not spend the factory's window, and a profile without the registry
+    // must not stall the boot any longer than its own short wait.
+    let presetWait = 0
+    let factoryRetry = 0
+    // shortcut: the factory wait keys off DSH's "no agent factory registered"
+    // message; switch to an explicit readiness signal if dsh-agent exposes one.
+    for (;;) {
       // Re-read the host services every attempt: a booting profile registers the
       // preset registry asynchronously, and the tty's first session is created
       // before it settles. A session created without the preset mount has no
-      // tools, so the boot path waits for it exactly as it waits for the factory.
+      // tools.
       const agentOptions = defaultModelOf(ctx.get?.('agentDefaultModel'))?.currentSelection()
       const presets = presetsOf(ctx.get?.('agentPresets'))
-      if (retryOnNoFactory && presets === undefined && agentOptions !== undefined && attempt < NO_FACTORY_ATTEMPTS) {
-        await new Promise<void>(resolve => { setTimeout(resolve, NO_FACTORY_DELAY_MS) })
+      if (retryOnNoFactory && presets === undefined && presetWait < PRESET_ATTEMPTS) {
+        presetWait += 1
+        await new Promise<void>(resolve => { setTimeout(resolve, PRESET_DELAY_MS) })
         continue
       }
       let composition: { readonly id: string } | undefined
@@ -494,7 +503,8 @@ function handlersFor(
         })).agent
       } catch (error) {
         const reason = reasonOf(error)
-        if (retryOnNoFactory && attempt < NO_FACTORY_ATTEMPTS && reason.includes(NO_FACTORY)) {
+        if (retryOnNoFactory && factoryRetry < NO_FACTORY_ATTEMPTS && reason.includes(NO_FACTORY)) {
+          factoryRetry += 1
           await new Promise<void>(resolve => { setTimeout(resolve, NO_FACTORY_DELAY_MS) })
           continue
         }

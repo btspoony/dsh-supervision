@@ -63,7 +63,9 @@ and no declared dependency keeps the plugin from loading there.
   The same race hides the preset registry: a create that runs before it settles
   silently mounts no tools (52 host-level tools, no `run_code`), so the boot
   retry must re-resolve the model and preset services on every attempt instead
-  of reading them once.
+  of reading them once. Each readiness signal keeps its own budget: a late
+  registry must not spend the factory's 30 s window, and a host that never
+  mounts the registry must pay only a short bounded wait.
 
 ## Verified
 

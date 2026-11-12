@@ -115,6 +115,8 @@ class FakeHost {
   readonly resumed: string[] = []
   /** Creates still to fail with DSH's no-factory refusal, for the boot race. */
   failCreate = 0
+  /** All create calls, including refused ones, for budget assertions. */
+  createCalls = 0
   /** The model selection each create named, so a model-less turn is caught. */
   readonly createdModels: ({ readonly provider: string; readonly model: string } | undefined)[] = []
   /** The preset each create mounted, so a tool-less session is caught. */
@@ -128,7 +130,7 @@ class FakeHost {
   /** Stands in for `ctx.get('agentDefaultModel')`; undefined mimics a host without one. */
   defaultModel: { readonly provider: string; readonly model: string } | undefined
   /** Stands in for `ctx.get('agentPresets')`; undefined mimics a host without one. */
-  defaultPreset: string | undefined
+  defaultPreset: string | undefined = 'ptc'
   /** Registry reads still to answer absent, for the boot race. */
   presetsDelay = 0
   /** Sessions whose resume must fail, for the attach-failure branch. */
@@ -151,6 +153,7 @@ class FakeHost {
         get: (id: string) => this.agents.find(agent => agent.id === id),
         list: () => this.agents,
         create: async ({ sessionId, meta, agentOptions, setup }) => {
+          this.createCalls += 1
           if (this.failCreate > 0) {
             this.failCreate -= 1
             throw new Error('no agent factory registered (load an agent-loop plugin)')
@@ -571,6 +574,63 @@ test('the tty boot create waits for a late preset registry and mounts it', async
     }
     assert.deepEqual(host.mountedPresets, ['ptc'], 'the boot session mounts its tools')
     assert.equal(tty.raw.at(-1), true)
+    host.dispose()
+  })
+})
+
+test('a preset-less boot creates its first session after the short wait, not the factory window', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.defaultModel = { provider: 'FallbacksChain', model: 'Auto' }
+  // No preset registry ever mounts: a supported host shape.
+  host.defaultPreset = undefined
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    const started = Date.now()
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 800 && host.created.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    const elapsed = Date.now() - started
+    assert.equal(host.created.length, 1)
+    assert.ok(elapsed < 8000, `boot took ${String(elapsed)} ms`)
+    assert.deepEqual(host.mountedPresets, [])
+    host.dispose()
+  })
+})
+
+test('a late preset registry still mounts on a host without the model service', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.defaultPreset = 'ptc'
+  host.presetsDelay = 3
+  // No defaultModel: the preset wait must not depend on it.
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 400 && host.mountedPresets.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.deepEqual(host.mountedPresets, ['ptc'])
+    host.dispose()
+  })
+})
+
+test('a late preset registry leaves the factory its own retry window', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.defaultModel = { provider: 'FallbacksChain', model: 'Auto' }
+  host.defaultPreset = 'ptc'
+  host.presetsDelay = 2
+  host.failCreate = 3
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 600 && host.mountedPresets.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.deepEqual(host.mountedPresets, ['ptc'])
+    assert.ok(host.createCalls >= 4, 'the boot create kept retrying past the preset wait')
     host.dispose()
   })
 })
