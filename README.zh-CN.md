@@ -182,7 +182,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 
 | 文档 | 内容 |
 |---|---|
-| [docs/DETAIL.zh.md](docs/DETAIL.zh.md) | 一屏图注：拓扑、两条通路、审批挂起、stdin 转发 |
+| [docs/DETAIL.zh.md](docs/DETAIL.zh.md) | 完整尺寸的展示图 |
 | [docs/preview.zh.svg](docs/preview.zh.svg) | 本页顶部那张图 |
 | [docs/preview.svg](docs/preview.svg) | 英文版图，几何完全一致 |
 | [ADR：外部桥接](.agents/adr/proposed/architecture/2026-11-11-external-bridge-transport.md) | 为什么监督一个已在运行的 `dsh web` 要走外部桥接 |
