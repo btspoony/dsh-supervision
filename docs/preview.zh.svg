@@ -1,114 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="dsh-supervision 监督拓扑：dsh web 会话、带控制套接口与进程内 tty 两条通路的插件、dsh-sup 转发器、读 OSC 7501 的终端 supervisor，以及审批挂起与 stdin 转发两条路径" font-family="-apple-system, &quot;SF Pro Text&quot;, &quot;Segoe UI&quot;, system-ui, &quot;PingFang SC&quot;, &quot;Microsoft YaHei&quot;, sans-serif">
-  <title>dsh-supervision 监督拓扑</title>
-  <desc>一个运行中的 dsh web 进程挂着 dsh-supervision 插件。同一套协议由两条通路承载：由 supervisor PTY 里的 dsh-sup 转发器驱动的 0600 控制套接口（实线），以及设置 DSH_SUP_TERMINAL_ID（或 herdr-core 的 HC_TERMINAL_ID）时进程自己的终端（虚线）。下面两条泳道分别表示工具审批挂起为 blocked 根记录，以及 stdin 行转发给 agent。</desc>
-
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="512" viewBox="0 0 1200 640" role="img" aria-label="dsh-supervision：浏览器里正在运行的 dsh web 会话桥接到读 OSC 7501 的终端 supervisor——状态出去，输入回来" font-family="-apple-system, &quot;SF Pro Text&quot;, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, &quot;Microsoft YaHei&quot;, system-ui, sans-serif">
+  <title>dsh-supervision</title>
+  <desc>一个正在运行的 DSH 会话，桥接进任何读 OSC 7501 的 supervisor——状态出去，输入回来，不用第二个会话。</desc>
   <defs>
-    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#2F6FEB"/>
-    </marker>
-    <marker id="arrow-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#40506A"/>
-    </marker>
-    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#2F9E6D"/>
-    </marker>
-    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#7B3FE4"/>
-    </marker>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2F6FEB"/></marker>
+    <marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2F9E6D"/></marker>
   </defs>
-
-  <rect x="0" y="0" width="960" height="540" fill="#FFFFFF"/>
-
-  <text x="40" y="44" fill="#141821" font-size="22" font-weight="700">dsh-supervision：两条通路，一套协议</text>
-  <text x="40" y="68" fill="#5B6673" font-size="13">运行中的 dsh web 会话把状态报给任意读 OSC 7501 的终端 supervisor，并把操作者输入送回会话；DSH 与 supervisor 均无需改动。</text>
-
-  <!-- dsh web 会话 -->
-  <rect x="40" y="104" width="164" height="104" rx="10" fill="#F7F9FC" stroke="#D9E0EA"/>
-  <text x="58" y="132" fill="#141821" font-size="15" font-weight="700">dsh web</text>
-  <text x="58" y="154" fill="#5B6673" font-size="12">会话进程</text>
-  <text x="58" y="174" fill="#7A8794" font-size="11.5">浏览器 + 宿主</text>
-
-  <!-- 会话 -> 插件 -->
-  <line x1="204" y1="156" x2="262" y2="156" stroke="#2F6FEB" stroke-width="1.4" marker-end="url(#arrow-blue)"/>
-  <text x="233" y="148" fill="#2F6FEB" font-size="10.5" text-anchor="middle">事件</text>
-
-  <!-- 插件 -->
-  <rect x="264" y="88" width="264" height="200" rx="12" fill="#F4F7FF" stroke="#C9D6EE"/>
-  <text x="280" y="116" fill="#141821" font-size="15" font-weight="700">dsh-supervision 插件</text>
-
-  <rect x="280" y="130" width="232" height="62" rx="8" fill="#E8EFFF" stroke="#2F6FEB" stroke-width="1.2"/>
-  <text x="294" y="154" fill="#141821" font-size="13.5" font-weight="700">控制套接口</text>
-  <text x="294" y="174" fill="#40506A" font-size="11">0600 Unix socket + 注册表</text>
-
-  <rect x="280" y="204" width="232" height="62" rx="8" fill="#F3ECFF" stroke="#7B3FE4" stroke-width="1.2" stroke-dasharray="6 4"/>
-  <text x="294" y="228" fill="#141821" font-size="13.5" font-weight="700">进程内 tty</text>
-  <text x="294" y="248" fill="#40506A" font-size="11">已设置 DSH_SUP_TERMINAL_ID</text>
-
-  <!-- 插件 <-> 转发器 -->
-  <line x1="528" y1="156" x2="566" y2="156" stroke="#40506A" stroke-width="1.4" marker-start="url(#arrow-ink)" marker-end="url(#arrow-ink)"/>
-  <text x="547" y="148" fill="#40506A" font-size="10.5" text-anchor="middle">帧</text>
-
-  <!-- 转发器 -->
-  <rect x="568" y="104" width="148" height="104" rx="10" fill="#FFF8EC" stroke="#E0B072"/>
-  <text x="586" y="132" fill="#141821" font-size="15" font-weight="700">dsh-sup</text>
-  <text x="586" y="154" fill="#5B6673" font-size="12">转发器</text>
-  <text x="586" y="174" fill="#7A8794" font-size="11.5">stdin ⇄ OSC</text>
-
-  <!-- 转发器 -> supervisor -->
-  <line x1="716" y1="156" x2="758" y2="156" stroke="#2F9E6D" stroke-width="1.4" marker-end="url(#arrow-green)"/>
-  <text x="737" y="148" fill="#2F9E6D" font-size="10" text-anchor="middle">/dev/tty</text>
-
-  <!-- supervisor -->
-  <rect x="760" y="104" width="160" height="104" rx="10" fill="#EEFAF3" stroke="#7FCFA6"/>
-  <text x="778" y="132" fill="#141821" font-size="15" font-weight="700">终端 supervisor</text>
-  <text x="778" y="154" fill="#5B6673" font-size="12">读 OSC 7501</text>
-  <text x="778" y="174" fill="#7A8794" font-size="11.5">如 herdr-core</text>
-
-  <!-- 进程内 tty 通路 -->
-  <path d="M 512 235 H 840 V 210" fill="none" stroke="#7B3FE4" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arrow-purple)"/>
-  <text x="676" y="228" fill="#7B3FE4" font-size="10.5" text-anchor="middle">无转发器 · 无套接口</text>
-
-  <!-- 审批挂起泳道 -->
-  <rect x="40" y="300" width="880" height="96" rx="10" fill="#FBFCFE" stroke="#E4E9F2"/>
-  <text x="56" y="324" fill="#141821" font-size="12.5" font-weight="700">审批挂起 —— 结掉的提问回显为 [ask &lt;id&gt;] &lt;tool&gt; → &lt;outcome&gt; (source=supervisor|attached)</text>
-
-  <rect x="56" y="334" width="248" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="68" y="353" fill="#141821" font-size="12" font-weight="700">approval/request</text>
-  <text x="68" y="369" fill="#5B6673" font-size="11">挂起 ask &lt;6hex&gt;</text>
-
-  <rect x="336" y="334" width="240" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="348" y="353" fill="#141821" font-size="12" font-weight="700">根记录</text>
-  <text x="348" y="369" fill="#5B6673" font-size="11">blocked · kind=permission</text>
-
-  <rect x="616" y="334" width="288" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="628" y="353" fill="#141821" font-size="12" font-weight="700">/approve · /reject</text>
-  <text x="628" y="369" fill="#5B6673" font-size="11">allowed-once · rejected</text>
-
-  <line x1="304" y1="355" x2="334" y2="355" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
-  <line x1="576" y1="355" x2="614" y2="355" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
-
-  <!-- stdin 转发泳道 -->
-  <rect x="40" y="408" width="880" height="88" rx="10" fill="#FBFCFE" stroke="#E4E9F2"/>
-  <text x="56" y="432" fill="#141821" font-size="12.5" font-weight="700">stdin 转发 —— 每一行输入就是一个 line 帧：裸文本 steer，其余是命令</text>
-
-  <rect x="56" y="442" width="248" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="68" y="461" fill="#141821" font-size="12" font-weight="700">supervisor 粘贴 + 提交</text>
-  <text x="68" y="477" fill="#5B6673" font-size="11">→ line 帧</text>
-
-  <rect x="336" y="442" width="240" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="348" y="461" fill="#141821" font-size="12" font-weight="700">parseLine</text>
-  <text x="348" y="477" fill="#5B6673" font-size="11">steer · cancel · new · attach</text>
-
-  <rect x="616" y="442" width="288" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="628" y="461" fill="#141821" font-size="12" font-weight="700">echo 行</text>
-  <text x="628" y="477" fill="#5B6673" font-size="11">→ 监督方读到的内容</text>
-
-  <line x1="304" y1="463" x2="334" y2="463" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
-  <line x1="576" y1="463" x2="614" y2="463" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
-
-  <!-- 图例 -->
-  <line x1="40" y1="516" x2="80" y2="516" stroke="#2F6FEB" stroke-width="2"/>
-  <text x="88" y="520" fill="#40506A" font-size="11.5">控制套接口：dsh web + supervisor PTY 里的 dsh-sup</text>
-  <line x1="430" y1="516" x2="470" y2="516" stroke="#7B3FE4" stroke-width="2" stroke-dasharray="6 4"/>
-  <text x="478" y="520" fill="#40506A" font-size="11.5">进程内 tty：在受监督终端里启动的 dsh web</text>
+  <rect width="1200" height="640" fill="#FFFFFF"/>
+  <text x="64" y="54" fill="#2F6FEB" font-size="13" font-weight="600" letter-spacing="0.08em">dsh-supervision</text>
+  <text x="1136" y="54" fill="#7A8794" font-size="12" text-anchor="end">super agent 的基础设施</text>
+  <text x="64" y="112" fill="#141821" font-size="30" font-weight="700">Agent 在浏览器里干活，</text>
+  <text x="64" y="154" fill="#141821" font-size="30" font-weight="700">你在终端里指挥。</text>
+  <text x="64" y="194" fill="#5B6673" font-size="15">一个正在运行的 DSH 会话，桥接进任何读 OSC 7501 的 supervisor——状态出去，输入回来，不用第二个会话。</text>
+  <rect x="64" y="232" width="470" height="220" rx="14" fill="#F7F9FC" stroke="#D9E0EA"/>
+  <text x="88" y="272" fill="#141821" font-size="19" font-weight="700">dsh web</text>
+  <text x="88" y="296" fill="#7A8794" font-size="13">你已经在跑的那个会话</text>
+  <rect x="88" y="312" width="422" height="30" rx="8" fill="#FFFFFF" stroke="#E4E9F2"/>
+  <text x="102" y="332" fill="#5B6673" font-size="12">修一下那个不稳定的上传测试</text>
+  <rect x="88" y="348" width="422" height="30" rx="8" fill="#F2F4F8" stroke="#E4E9F2"/>
+  <text x="102" y="368" fill="#5B6673" font-size="12">› 正在跑 bash…</text>
+  <rect x="88" y="384" width="422" height="30" rx="8" fill="#FFF6E6" stroke="#E4E9F2"/>
+  <text x="102" y="404" fill="#5B6673" font-size="12">等待审批</text>
+  <rect x="88" y="424" width="422" height="24" rx="6" fill="#EEF3FF"/>
+  <text x="102" y="441" fill="#2F6FEB" font-size="11.5">来自终端的监督 · 收回控制权</text>
+  <line x1="540" y1="318" x2="700" y2="318" stroke="#2F6FEB" stroke-width="1.6" marker-end="url(#a-blue)"/>
+  <text x="620" y="310" fill="#2F6FEB" font-size="10.5" text-anchor="middle">状态</text>
+  <text x="620" y="344" fill="#7A8794" font-size="11" text-anchor="middle">桥接</text>
+  <line x1="700" y1="362" x2="540" y2="362" stroke="#2F9E6D" stroke-width="1.6" marker-end="url(#a-green)"/>
+  <text x="620" y="382" fill="#2F9E6D" font-size="10.5" text-anchor="middle">输入</text>
+  <rect x="706" y="232" width="430" height="220" rx="14" fill="#F7F9FC" stroke="#D9E0EA"/>
+  <text x="730" y="272" fill="#141821" font-size="19" font-weight="700">终端 supervisor</text>
+  <text x="730" y="296" fill="#7A8794" font-size="13">herdr-core，或任何读 OSC 7501 的程序</text>
+  <text x="730" y="324" fill="#2F9E6D" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">● 进行中      第 3 轮</text>
+  <text x="730" y="350" fill="#C77D00" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">● 待审批      bash</text>
+  <text x="730" y="376" fill="#7A8794" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">› 队列改用 postgres</text>
+  <rect x="730" y="396" width="150" height="24" rx="12" fill="#EEFAF3" stroke="#7FCFA6"/>
+  <text x="746" y="413" fill="#2F9E6D" font-size="11">✓ 已批准一次</text>
+  <circle cx="68" cy="500" r="5" fill="#2F6FEB"/>
+  <text x="84" y="505" fill="#141821" font-size="15" font-weight="700">一眼看见</text>
+  <text x="64" y="534" fill="#5B6673" font-size="12.5">每个会话一条状态记录，</text>
+  <text x="64" y="556" fill="#5B6673" font-size="12.5">始终是当前状态。</text>
+  <circle cx="452" cy="500" r="5" fill="#7B3FE4"/>
+  <text x="468" y="505" fill="#141821" font-size="15" font-weight="700">就地指挥</text>
+  <text x="448" y="534" fill="#5B6673" font-size="12.5">输入直接进这一轮——</text>
+  <text x="448" y="556" fill="#5B6673" font-size="12.5">取消、切换、接管。</text>
+  <circle cx="836" cy="500" r="5" fill="#2F9E6D"/>
+  <text x="852" y="505" fill="#141821" font-size="15" font-weight="700">顺手审批</text>
+  <text x="832" y="534" fill="#5B6673" font-size="12.5">挂起的工具审批，</text>
+  <text x="832" y="556" fill="#5B6673" font-size="12.5">在终端里直接结掉。</text>
+  <text x="64" y="612" fill="#7A8794" font-size="12">OSC 7501 · 任意 supervisor · 不重启、不复制会话</text>
 </svg>
