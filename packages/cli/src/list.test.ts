@@ -51,11 +51,21 @@ const items: readonly SessionItem[] = [
   { id: 'session-2', cwd: '/other', live: false, bridged: true },
 ];
 
-const HEADER = 'SESSION\tPID\tCWD\tLIVE\tBRIDGED';
+const COLUMNS = ['SESSION', 'PID', 'CWD', 'LIVE', 'BRIDGED'];
 const ROWS = [
-  `session-1\t${String(process.pid)}\t/repo\tyes\t-`,
-  `session-2\t${String(process.pid)}\t/other\tno\tyes`,
+  ['session-1', String(process.pid), '/repo', 'yes', '-'],
+  ['session-2', String(process.pid), '/other', 'no', 'yes'],
 ];
+// Mirror the CLI's computed-width layout: tabs cannot align a table whose
+// widest cell drifts past the next tab stop.
+const widths = COLUMNS.map((name, index) =>
+  Math.max(name.length, ...ROWS.map((row) => row[index]?.length ?? 0)));
+const line = (cells: readonly string[]): string =>
+  cells.map((cell, index) => (index === cells.length - 1 ? cell : cell.padEnd(widths[index] ?? 0))).join('  ');
+const HEADER = line(COLUMNS);
+const EXPECTED_ROWS = ROWS.map(line);
+// A table with no rows is sized from the column names alone.
+const HEADER_ALONE = COLUMNS.join('  ');
 
 /**
  * Runs `dsh-sup list` against a temporary supervision registry. The listing
@@ -90,7 +100,7 @@ function list(
 
 /** The table is order-independent: registry reading order does not matter. */
 const rows = (stdout: string): string[] => stdout.split('\n').filter((line) => line !== '').sort();
-const expected = [HEADER, ...ROWS].sort();
+const expected = [HEADER, ...EXPECTED_ROWS].sort();
 
 test('a live backend that cannot answer fails the listing but keeps the healthy rows', async (t) => {
   const dir = mkdtempSync('/tmp/dsh-list-');
@@ -179,7 +189,7 @@ test('a mixed loss and refusal exits 1 whichever backend the registry yields fir
 
   assert.equal(forward.code, EXIT.backendLost);
   assert.equal(reversed.code, EXIT.backendLost);
-  assert.deepEqual(rows(forward.stdout), [HEADER]);
+  assert.deepEqual(rows(forward.stdout), [HEADER_ALONE]);
   // Both causes reach stderr, each naming its own socket: the exit reports the
   // loss, not the refusal, so the operator must still see the refusal.
   assert.ok(forward.stderr.includes(lost.socket), 'the loss names its backend');
@@ -204,7 +214,7 @@ test('every failure coded: the ADR code decides, order-free', async (t) => {
 
   assert.equal(forward.code, EXIT.busy);
   assert.equal(reversed.code, EXIT.busy);
-  assert.deepEqual(rows(forward.stdout), [HEADER]);
+  assert.deepEqual(rows(forward.stdout), [HEADER_ALONE]);
 });
 
 test('every failure bare: the batch is one lost backend, not one per socket', async (t) => {
@@ -220,7 +230,7 @@ test('every failure bare: the batch is one lost backend, not one per socket', as
   const result = await list([first, second]);
 
   assert.equal(result.code, EXIT.backendLost);
-  assert.deepEqual(rows(result.stdout), [HEADER]);
+  assert.deepEqual(rows(result.stdout), [HEADER_ALONE]);
   assert.ok(result.stderr.includes(first.socket), 'each loss names its backend');
   assert.ok(result.stderr.includes(second.socket), 'each loss names its backend');
 });
