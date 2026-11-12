@@ -51,8 +51,11 @@ const items: readonly SessionItem[] = [
   { id: 'session-2', cwd: '/other', live: false, bridged: true },
 ];
 
-const HEADER = 'SESSION\tCWD\tLIVE\tBRIDGED';
-const ROWS = ['session-1\t/repo\tyes\t-', 'session-2\t/other\tno\tyes'];
+const HEADER = 'SESSION\tPID\tCWD\tLIVE\tBRIDGED';
+const ROWS = [
+  `session-1\t${String(process.pid)}\t/repo\tyes\t-`,
+  `session-2\t${String(process.pid)}\t/other\tno\tyes`,
+];
 
 /**
  * Runs `dsh-sup list` against a temporary supervision registry. The listing

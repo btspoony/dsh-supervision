@@ -2,7 +2,9 @@ import type { ErrorCode, RegistryEntry, SessionItem } from 'dsh-supervision-prot
 import { connect, type Connection } from './connection.js';
 import { EXIT, exitCodeFor } from './exit.js';
 
-const HEADER = ['SESSION', 'CWD', 'LIVE', 'BRIDGED'].join('\t');
+// PID identifies the backend when several `dsh web` processes are live; the
+// registry entry is the only place a listing knows it, so the row carries it.
+const HEADER = ['SESSION', 'PID', 'CWD', 'LIVE', 'BRIDGED'].join('\t');
 
 /**
  * One backend's answer to `list`: its rows, or the protocol code that decides
@@ -60,9 +62,15 @@ export function listFrom(socket: string, cwd: string | undefined): Promise<ListR
  */
 export async function runList(entries: readonly RegistryEntry[], cwd: string | undefined): Promise<number> {
   const results = await Promise.all(entries.map((entry) => listFrom(entry.socket, cwd)));
-  const rows = results
-    .flatMap((result) => (result.ok ? result.items : []))
-    .map((item) => `${item.id}\t${item.cwd}\t${item.live ? 'yes' : 'no'}\t${item.bridged ? 'yes' : '-'}`);
+  const rows = entries.flatMap((entry, index) => {
+    const result = results[index];
+    // A failed backend contributed no rows; its reason is already on stderr.
+    if (result === undefined || !result.ok) return [];
+    return result.items.map(
+      (item) =>
+        `${item.id}\t${String(entry.pid)}\t${item.cwd}\t${item.live ? 'yes' : 'no'}\t${item.bridged ? 'yes' : '-'}`,
+    );
+  });
   process.stdout.write(`${[HEADER, ...rows].join('\n')}\n`);
   // The registry order is unsorted `readdirSync`, so the exit must not depend on
   // which failure came first. A bare loss outranks every coded refusal: exit 6
