@@ -45,6 +45,10 @@ reproduce all three:
 - `setup(agentCtx)` calling `ctx.agentPresets.mount(agentCtx, id)` — the mount
   is what installs the preset's scoped tool rows. Without it the agent has no
   bash and no file tools.
+- `ctx.workspaceRegistry.resolveByPath(cwd)` → `workspace.attachSession(id)`
+  plus `registry.unarchiveSession(id)` — the workspace account is what makes the
+  GUI list a session under a project. An unattached (and archived) session still
+  answers `dsh-sup list` and can be bridged, but the browser never shows it.
 
 Read all three reflectively (`ctx.get('agentDefaultModel')`,
 `ctx.get('agentPresets')`): a host that omits them still creates a plain agent,
@@ -57,6 +61,8 @@ and no declared dependency keeps the plugin from loading there.
   and `setup` are both supplied.
 - **Do not name a preset you did not resolve.** A hardcoded id, or a preset
   named without `mount`, silently changes or empties the tool set.
+- **A session outside every workspace is invisible.** Attach it by its own cwd;
+  a directory without a workspace keeps the session wire-only until one exists.
 - **The first session can race the boot.** A profile that boots an agent loop
   late answers `no agent factory registered`; retry that one create, and only
   the one the process makes for itself, so operator commands still fail fast.
