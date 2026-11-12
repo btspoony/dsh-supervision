@@ -1,4 +1,4 @@
-![监督拓扑：dsh web 会话、插件的控制套接口与进程内 tty 两条通路、dsh-sup 转发器、读 OSC 7501 的终端 supervisor，以及审批挂起和 stdin 转发两条路径](preview.zh.svg)
+![浏览器里正在运行的 dsh web 会话，桥接到读 OSC 7501 的终端 supervisor：状态出去，操作者输入回到同一个会话](preview.zh.svg)
 
 插件运行在本身就持有该会话的 `dsh web` 进程里，因此不需要重启或复制任何东西。
 - **控制套接口（实线）：**插件在 `$DSH_HOME/supervision` 下提供一个 `0600` Unix 套接口；supervisor PTY 里的 `dsh-sup` 连上来，把 OSC 7501 与 echo 记录写到自己的 `/dev/tty`，并把所有者的 stdin 以 `line` 帧送回去。

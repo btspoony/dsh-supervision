@@ -1,4 +1,4 @@
-![The supervision topology: a dsh web session, the plugin's control socket and in-process tty transports, the dsh-sup forwarder, a terminal supervisor (herdr-core is one), and the approval parking and stdin relay paths](preview.svg)
+![A running dsh web session in the browser, bridged to a terminal supervisor that reads OSC 7501: state goes out, operator input comes back into the same session](preview.svg)
 
 The plugin runs inside the `dsh web` process that already owns the session, so nothing is restarted or duplicated.
 - **Control socket (solid):** the plugin serves a `0600` Unix socket in `$DSH_HOME/supervision`; `dsh-sup` in the supervisor's PTY connects, writes the OSC 7501 and echo records to its own `/dev/tty`, and relays the owner's stdin back as `line` frames.

@@ -1,114 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="dsh-supervision topology: a dsh web session, the plugin with a control socket and an in-process tty transport, the dsh-sup forwarder, a terminal supervisor reading OSC 7501, and the approval parking and stdin relay lanes" font-family="-apple-system, &quot;SF Pro Text&quot;, &quot;Segoe UI&quot;, system-ui, sans-serif">
-  <title>dsh-supervision topology</title>
-  <desc>One running dsh web process hosts the dsh-supervision plugin. Two transports carry the same protocol: a 0600 control socket driven by the dsh-sup forwarder in the supervisor's PTY (solid), and the process's own terminal when DSH_SUP_TERMINAL_ID is set, with herdr-core's HC_TERMINAL_ID still honored (dashed). The lower lanes show tool approvals parked as a blocked root record, and stdin lines relayed into the agent.</desc>
-
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-label="dsh-supervision: a running dsh web session in the browser, bridged to a terminal supervisor that reads OSC 7501 — state out, input back" font-family="-apple-system, &quot;SF Pro Text&quot;, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, &quot;Microsoft YaHei&quot;, system-ui, sans-serif">
+  <title>dsh-supervision</title>
+  <desc>A running DSH session bridges into any supervisor that reads OSC 7501 — state goes out, your input comes back, no second session.</desc>
   <defs>
-    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#2F6FEB"/>
-    </marker>
-    <marker id="arrow-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#40506A"/>
-    </marker>
-    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#2F9E6D"/>
-    </marker>
-    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#7B3FE4"/>
-    </marker>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2F6FEB"/></marker>
+    <marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2F9E6D"/></marker>
   </defs>
-
-  <rect x="0" y="0" width="960" height="540" fill="#FFFFFF"/>
-
-  <text x="40" y="44" fill="#141821" font-size="22" font-weight="700">dsh-supervision — two transports, one protocol</text>
-  <text x="40" y="68" fill="#5B6673" font-size="13">A running dsh web session reports to any OSC 7501 supervisor and takes operator input back; neither DSH nor the supervisor is modified.</text>
-
-  <!-- dsh web session -->
-  <rect x="40" y="104" width="164" height="104" rx="10" fill="#F7F9FC" stroke="#D9E0EA"/>
-  <text x="58" y="132" fill="#141821" font-size="15" font-weight="700">dsh web</text>
-  <text x="58" y="154" fill="#5B6673" font-size="12">session process</text>
-  <text x="58" y="174" fill="#7A8794" font-size="11.5">browser + host</text>
-
-  <!-- session -> plugin -->
-  <line x1="204" y1="156" x2="262" y2="156" stroke="#2F6FEB" stroke-width="1.4" marker-end="url(#arrow-blue)"/>
-  <text x="233" y="148" fill="#2F6FEB" font-size="10.5" text-anchor="middle">events</text>
-
-  <!-- plugin -->
-  <rect x="264" y="88" width="264" height="200" rx="12" fill="#F4F7FF" stroke="#C9D6EE"/>
-  <text x="280" y="116" fill="#141821" font-size="15" font-weight="700">dsh-supervision plugin</text>
-
-  <rect x="280" y="130" width="232" height="62" rx="8" fill="#E8EFFF" stroke="#2F6FEB" stroke-width="1.2"/>
-  <text x="294" y="154" fill="#141821" font-size="13.5" font-weight="700">control socket</text>
-  <text x="294" y="174" fill="#40506A" font-size="11">0600 unix socket + registry</text>
-
-  <rect x="280" y="204" width="232" height="62" rx="8" fill="#F3ECFF" stroke="#7B3FE4" stroke-width="1.2" stroke-dasharray="6 4"/>
-  <text x="294" y="228" fill="#141821" font-size="13.5" font-weight="700">in-process tty</text>
-  <text x="294" y="248" fill="#40506A" font-size="11">DSH_SUP_TERMINAL_ID set</text>
-
-  <!-- plugin <-> forwarder -->
-  <line x1="528" y1="156" x2="566" y2="156" stroke="#40506A" stroke-width="1.4" marker-start="url(#arrow-ink)" marker-end="url(#arrow-ink)"/>
-  <text x="547" y="148" fill="#40506A" font-size="10.5" text-anchor="middle">frames</text>
-
-  <!-- forwarder -->
-  <rect x="568" y="104" width="148" height="104" rx="10" fill="#FFF8EC" stroke="#E0B072"/>
-  <text x="586" y="132" fill="#141821" font-size="15" font-weight="700">dsh-sup</text>
-  <text x="586" y="154" fill="#5B6673" font-size="12">forwarder</text>
-  <text x="586" y="174" fill="#7A8794" font-size="11.5">stdin ⇄ OSC</text>
-
-  <!-- forwarder -> supervisor -->
-  <line x1="716" y1="156" x2="758" y2="156" stroke="#2F9E6D" stroke-width="1.4" marker-end="url(#arrow-green)"/>
-  <text x="737" y="148" fill="#2F9E6D" font-size="10" text-anchor="middle">/dev/tty</text>
-
-  <!-- terminal supervisor -->
-  <rect x="760" y="104" width="160" height="104" rx="10" fill="#EEFAF3" stroke="#7FCFA6"/>
-  <text x="778" y="132" fill="#141821" font-size="14" font-weight="700">terminal supervisor</text>
-  <text x="778" y="154" fill="#5B6673" font-size="12">reads OSC 7501</text>
-  <text x="778" y="174" fill="#7A8794" font-size="11.5">e.g. herdr-core</text>
-
-  <!-- in-process tty path -->
-  <path d="M 512 235 H 840 V 210" fill="none" stroke="#7B3FE4" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arrow-purple)"/>
-  <text x="676" y="228" fill="#7B3FE4" font-size="10.5" text-anchor="middle">no forwarder · no socket</text>
-
-  <!-- approval parking lane -->
-  <rect x="40" y="300" width="880" height="96" rx="10" fill="#FBFCFE" stroke="#E4E9F2"/>
-  <text x="56" y="324" fill="#141821" font-size="12.5" font-weight="700">approval parking — a settled ask is echoed as [ask &lt;id&gt;] &lt;tool&gt; → &lt;outcome&gt; (source=supervisor|attached)</text>
-
-  <rect x="56" y="334" width="248" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="68" y="353" fill="#141821" font-size="12" font-weight="700">approval/request</text>
-  <text x="68" y="369" fill="#5B6673" font-size="11">park ask &lt;6hex&gt;</text>
-
-  <rect x="336" y="334" width="240" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="348" y="353" fill="#141821" font-size="12" font-weight="700">root report</text>
-  <text x="348" y="369" fill="#5B6673" font-size="11">blocked · kind=permission</text>
-
-  <rect x="616" y="334" width="288" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="628" y="353" fill="#141821" font-size="12" font-weight="700">/approve · /reject</text>
-  <text x="628" y="369" fill="#5B6673" font-size="11">allowed-once · rejected</text>
-
-  <line x1="304" y1="355" x2="334" y2="355" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
-  <line x1="576" y1="355" x2="614" y2="355" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
-
-  <!-- stdin relay lane -->
-  <rect x="40" y="408" width="880" height="88" rx="10" fill="#FBFCFE" stroke="#E4E9F2"/>
-  <text x="56" y="432" fill="#141821" font-size="12.5" font-weight="700">stdin relay — one input line is one line frame: bare text steers, the rest are commands</text>
-
-  <rect x="56" y="442" width="248" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="68" y="461" fill="#141821" font-size="12" font-weight="700">supervisor paste + submit</text>
-  <text x="68" y="477" fill="#5B6673" font-size="11">→ line frame</text>
-
-  <rect x="336" y="442" width="240" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="348" y="461" fill="#141821" font-size="12" font-weight="700">parseLine</text>
-  <text x="348" y="477" fill="#5B6673" font-size="11">steer · cancel · new · attach</text>
-
-  <rect x="616" y="442" width="288" height="42" rx="8" fill="#FFFFFF" stroke="#D9E0EA"/>
-  <text x="628" y="461" fill="#141821" font-size="12" font-weight="700">echo line</text>
-  <text x="628" y="477" fill="#5B6673" font-size="11">→ what the supervisor reads</text>
-
-  <line x1="304" y1="463" x2="334" y2="463" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
-  <line x1="576" y1="463" x2="614" y2="463" stroke="#40506A" stroke-width="1.4" marker-end="url(#arrow-ink)"/>
-
-  <!-- legend -->
-  <line x1="40" y1="516" x2="80" y2="516" stroke="#2F6FEB" stroke-width="2"/>
-  <text x="88" y="520" fill="#40506A" font-size="11.5">control socket: dsh web + dsh-sup in the supervisor's PTY</text>
-  <line x1="430" y1="516" x2="470" y2="516" stroke="#7B3FE4" stroke-width="2" stroke-dasharray="6 4"/>
-  <text x="478" y="520" fill="#40506A" font-size="11.5">in-process tty: dsh web started inside the supervised terminal</text>
+  <rect width="1200" height="640" fill="#FFFFFF"/>
+  <text x="64" y="54" fill="#2F6FEB" font-size="13" font-weight="600" letter-spacing="0.08em">dsh-supervision</text>
+  <text x="1136" y="54" fill="#7A8794" font-size="12" text-anchor="end">infrastructure for super agents</text>
+  <text x="64" y="112" fill="#141821" font-size="30" font-weight="700">Your agent works in the browser.</text>
+  <text x="64" y="154" fill="#141821" font-size="30" font-weight="700">You steer it from the terminal.</text>
+  <text x="64" y="194" fill="#5B6673" font-size="15">A running DSH session bridges into any supervisor that reads OSC 7501 — state goes out, your input comes back, no second session.</text>
+  <rect x="64" y="232" width="470" height="220" rx="14" fill="#F7F9FC" stroke="#D9E0EA"/>
+  <text x="88" y="272" fill="#141821" font-size="19" font-weight="700">dsh web</text>
+  <text x="88" y="296" fill="#7A8794" font-size="13">the session you already run</text>
+  <rect x="88" y="312" width="422" height="30" rx="8" fill="#FFFFFF" stroke="#E4E9F2"/>
+  <text x="102" y="332" fill="#5B6673" font-size="12">Fix the flaky upload test</text>
+  <rect x="88" y="348" width="422" height="30" rx="8" fill="#F2F4F8" stroke="#E4E9F2"/>
+  <text x="102" y="368" fill="#5B6673" font-size="12">› running bash…</text>
+  <rect x="88" y="384" width="422" height="30" rx="8" fill="#FFF6E6" stroke="#E4E9F2"/>
+  <text x="102" y="404" fill="#5B6673" font-size="12">waiting for approval</text>
+  <rect x="88" y="424" width="422" height="24" rx="6" fill="#EEF3FF"/>
+  <text x="102" y="441" fill="#2F6FEB" font-size="11.5">Supervised from terminal · Take back control</text>
+  <line x1="540" y1="318" x2="700" y2="318" stroke="#2F6FEB" stroke-width="1.6" marker-end="url(#a-blue)"/>
+  <text x="620" y="310" fill="#2F6FEB" font-size="10.5" text-anchor="middle">state</text>
+  <text x="620" y="344" fill="#7A8794" font-size="11" text-anchor="middle">bridge</text>
+  <line x1="700" y1="362" x2="540" y2="362" stroke="#2F9E6D" stroke-width="1.6" marker-end="url(#a-green)"/>
+  <text x="620" y="382" fill="#2F9E6D" font-size="10.5" text-anchor="middle">input</text>
+  <rect x="706" y="232" width="430" height="220" rx="14" fill="#F7F9FC" stroke="#D9E0EA"/>
+  <text x="730" y="272" fill="#141821" font-size="19" font-weight="700">terminal supervisor</text>
+  <text x="730" y="296" fill="#7A8794" font-size="13">herdr-core, or anything that reads OSC 7501</text>
+  <text x="730" y="324" fill="#2F9E6D" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">● working      turn 3</text>
+  <text x="730" y="350" fill="#C77D00" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">● blocked      bash approval</text>
+  <text x="730" y="376" fill="#7A8794" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">› use postgres for the queue</text>
+  <rect x="730" y="396" width="150" height="24" rx="12" fill="#EEFAF3" stroke="#7FCFA6"/>
+  <text x="746" y="413" fill="#2F9E6D" font-size="11">✓ approved once</text>
+  <circle cx="68" cy="500" r="5" fill="#2F6FEB"/>
+  <text x="84" y="505" fill="#141821" font-size="15" font-weight="700">See</text>
+  <text x="64" y="534" fill="#5B6673" font-size="12.5">One status record per session,</text>
+  <text x="64" y="556" fill="#5B6673" font-size="12.5">always the current state.</text>
+  <circle cx="452" cy="500" r="5" fill="#7B3FE4"/>
+  <text x="468" y="505" fill="#141821" font-size="15" font-weight="700">Steer</text>
+  <text x="448" y="534" fill="#5B6673" font-size="12.5">Type into the running turn —</text>
+  <text x="448" y="556" fill="#5B6673" font-size="12.5">cancel, switch, attach.</text>
+  <circle cx="836" cy="500" r="5" fill="#2F9E6D"/>
+  <text x="852" y="505" fill="#141821" font-size="15" font-weight="700">Approve</text>
+  <text x="832" y="534" fill="#5B6673" font-size="12.5">Answer parked tool approvals</text>
+  <text x="832" y="556" fill="#5B6673" font-size="12.5">without leaving the terminal.</text>
+  <text x="64" y="612" fill="#7A8794" font-size="12">OSC 7501 · any supervisor · no restart, no second session</text>
 </svg>
