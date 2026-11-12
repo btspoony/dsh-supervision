@@ -135,6 +135,12 @@ class FakeHost {
   presetsDelay = 0
   /** Every read of `agentPresets`, for the boot-window assertions. */
   presetReads = 0
+  /** The directory whose workspace the fake registry resolves, if any. */
+  workspacePath: string | undefined
+  /** Sessions attached to that workspace, for UI-visibility coverage. */
+  readonly attachedSessions: string[] = []
+  /** Sessions the fake registry unarchived. */
+  readonly unarchivedSessions: string[] = []
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -175,6 +181,14 @@ class FakeHost {
         if (name === 'webServer') return this.attachServer ? this.server : undefined
         if (name === 'agentDefaultModel') {
           return this.defaultModel === undefined ? undefined : { currentSelection: () => this.defaultModel }
+        }
+        if (name === 'workspaceRegistry') {
+          return {
+            resolveByPath: async (path: string) => this.workspacePath === undefined || path !== this.workspacePath
+              ? undefined
+              : { attachSession: async (id: string) => { this.attachedSessions.push(id) } },
+            unarchiveSession: async (id: string) => { this.unarchivedSessions.push(id) },
+          }
         }
         if (name === 'agentPresets') {
           this.presetReads += 1
@@ -639,6 +653,34 @@ test('the factory keeps retrying after the preset wait inside the same window', 
     assert.equal(host.presetReads, 6)
     host.dispose()
   })
+})
+
+test('a created session is attached to its workspace and unarchived', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.workspacePath = '/repo'
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/repo' } })
+  await client.take(1)
+  assert.deepEqual(host.attachedSessions, host.created, 'the UI lists a session only through its workspace')
+  assert.deepEqual(host.unarchivedSessions, host.created)
+  host.dispose()
+})
+
+test('a session created outside any workspace still answers', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.workspacePath = '/somewhere-else'
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/repo' } })
+  const [welcome] = await client.take(1)
+  assert.equal(welcome?.t, 'welcome')
+  assert.deepEqual(host.attachedSessions, [])
+  host.dispose()
 })
 
 test('a host without a default model service still creates a session', async () => {

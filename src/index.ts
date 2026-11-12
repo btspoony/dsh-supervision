@@ -68,6 +68,12 @@ interface AgentPresetsLike {
   mount(agentCtx: unknown, id?: string): Promise<unknown>
 }
 
+/** The `ctx.workspaceRegistry` surface this plugin reads, when the host mounts it. */
+interface WorkspaceRegistryLike {
+  resolveByPath(path: string): Promise<{ attachSession(sessionId: string): Promise<void> } | undefined>
+  unarchiveSession(sessionId: string): Promise<void>
+}
+
 /**
  * The slice of DSH's `ApprovalRequestEvent` this plugin reads
  * (`packages/interaction/user-approval/src/types.ts:80-100`). The event carries
@@ -322,6 +328,38 @@ function presetsOf(value: unknown): AgentPresetsLike | undefined {
   return value as AgentPresetsLike
 }
 
+/** @returns the host's workspace registry, when a usable one is mounted. */
+function workspaceRegistryOf(value: unknown): WorkspaceRegistryLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { resolveByPath, unarchiveSession } = value as { resolveByPath?: unknown; unarchiveSession?: unknown }
+  if (typeof resolveByPath !== 'function' || typeof unarchiveSession !== 'function') return undefined
+  return value as WorkspaceRegistryLike
+}
+
+/**
+ * A session the GUI creates is attached to its Workspace, and that account is
+ * what makes it appear under a project in the UI. A session created here must
+ * do the same, and leave the archive set: an unattached, archived session still
+ * answers `dsh-sup` but is invisible in the browser. Best-effort by design — a
+ * host without the registry keeps the plain create, and a failed attach must
+ * not discard a session that already exists.
+ * @param value - the `ctx.get('workspaceRegistry')` lookup.
+ * @param cwd - the directory the session was created in.
+ * @param session - the created session id.
+ */
+async function attachToWorkspace(value: unknown, cwd: string, session: string): Promise<void> {
+  const registry = workspaceRegistryOf(value)
+  if (registry === undefined) return
+  try {
+    const workspace = await registry.resolveByPath(cwd)
+    if (workspace === undefined) return
+    await workspace.attachSession(session)
+    await registry.unarchiveSession(session)
+  } catch {
+    // The session is live either way; only its UI attribution is missing.
+  }
+}
+
 /**
  * The root `msg` one parked ask forces: what stopped the tree, and which id
  * answers it.
@@ -493,7 +531,7 @@ function handlersFor(
         throw new BindError(refusalCode(error, 'create-failed'), reasonOf(error))
       }
       try {
-        return (await ctx.agents.create({
+        const agent = (await ctx.agents.create({
           sessionId: `session-${randomUUID()}`,
           meta: { cwd, ...(composition === undefined ? {} : { agentPreset: composition.id }) },
           ...(agentOptions === undefined ? {} : { agentOptions }),
@@ -501,6 +539,8 @@ function handlersFor(
             ? {}
             : { setup: async (agentCtx: unknown) => { await presets.mount(agentCtx, composition.id) } }),
         })).agent
+        await attachToWorkspace(ctx.get?.('workspaceRegistry'), cwd, agent.session.id)
+        return agent
       } catch (error) {
         const reason = reasonOf(error)
         if (retryOnNoFactory && Date.now() < deadline && reason.includes(NO_FACTORY)) {
