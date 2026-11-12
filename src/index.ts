@@ -464,24 +464,25 @@ function handlersFor(
    *   fails fast with `create-failed` instead.
    */
   const create = async (cwd: string, retryOnNoFactory = false): Promise<AgentLike> => {
-    // A session created outside the GUI records no model selection of its own,
-    // so its first turn fails with "no provider/model" until this carries the
-    // profile default. Read reflectively: a host without the service keeps the
-    // plain create.
-    const agentOptions = defaultModelOf(ctx.get?.('agentDefaultModel'))?.currentSelection()
-    // The preset's `mount` is what installs the session's tool set. A create
-    // without it yields an agent with host-level tools only — no bash, no file
-    // tools — which is not a session anyone can supervise.
-    const presets = presetsOf(ctx.get?.('agentPresets'))
-    let composition: { readonly id: string } | undefined
-    try {
-      composition = presets === undefined ? undefined : await presets.resolve(undefined)
-    } catch (error) {
-      throw new BindError(refusalCode(error, 'create-failed'), reasonOf(error))
-    }
     // shortcut: the wait keys off DSH's "no agent factory registered" message;
     // switch to an explicit readiness signal if dsh-agent exposes one.
     for (let attempt = 0; ; attempt += 1) {
+      // Re-read the host services every attempt: a booting profile registers the
+      // preset registry asynchronously, and the tty's first session is created
+      // before it settles. A session created without the preset mount has no
+      // tools, so the boot path waits for it exactly as it waits for the factory.
+      const agentOptions = defaultModelOf(ctx.get?.('agentDefaultModel'))?.currentSelection()
+      const presets = presetsOf(ctx.get?.('agentPresets'))
+      if (retryOnNoFactory && presets === undefined && agentOptions !== undefined && attempt < NO_FACTORY_ATTEMPTS) {
+        await new Promise<void>(resolve => { setTimeout(resolve, NO_FACTORY_DELAY_MS) })
+        continue
+      }
+      let composition: { readonly id: string } | undefined
+      try {
+        composition = presets === undefined ? undefined : await presets.resolve(undefined)
+      } catch (error) {
+        throw new BindError(refusalCode(error, 'create-failed'), reasonOf(error))
+      }
       try {
         return (await ctx.agents.create({
           sessionId: `session-${randomUUID()}`,

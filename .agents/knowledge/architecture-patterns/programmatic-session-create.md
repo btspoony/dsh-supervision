@@ -60,6 +60,10 @@ and no declared dependency keeps the plugin from loading there.
 - **The first session can race the boot.** A profile that boots an agent loop
   late answers `no agent factory registered`; retry that one create, and only
   the one the process makes for itself, so operator commands still fail fast.
+  The same race hides the preset registry: a create that runs before it settles
+  silently mounts no tools (52 host-level tools, no `run_code`), so the boot
+  retry must re-resolve the model and preset services on every attempt instead
+  of reading them once.
 
 ## Verified
 

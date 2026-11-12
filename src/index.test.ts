@@ -129,6 +129,8 @@ class FakeHost {
   defaultModel: { readonly provider: string; readonly model: string } | undefined
   /** Stands in for `ctx.get('agentPresets')`; undefined mimics a host without one. */
   defaultPreset: string | undefined
+  /** Registry reads still to answer absent, for the boot race. */
+  presetsDelay = 0
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -171,6 +173,10 @@ class FakeHost {
         }
         if (name === 'agentPresets') {
           if (this.defaultPreset === undefined) return undefined
+          if (this.presetsDelay > 0) {
+            this.presetsDelay -= 1
+            return undefined
+          }
           return {
             resolve: async () => ({ id: this.defaultPreset ?? '' }),
             mount: async () => { this.mountedPresets.push(this.defaultPreset ?? '') },
@@ -548,6 +554,25 @@ test('a created session carries the default model and mounts the default preset'
   assert.deepEqual(host.createdModels, [{ provider: 'FallbacksChain', model: 'Auto' }])
   assert.deepEqual(host.mountedPresets, ['ptc'])
   host.dispose()
+})
+
+test('the tty boot create waits for a late preset registry and mounts it', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.defaultModel = { provider: 'FallbacksChain', model: 'Auto' }
+  host.defaultPreset = 'ptc'
+  // The profile registers the registry after the tty's first hello runs.
+  host.presetsDelay = 3
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 400 && host.mountedPresets.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.deepEqual(host.mountedPresets, ['ptc'], 'the boot session mounts its tools')
+    assert.equal(tty.raw.at(-1), true)
+    host.dispose()
+  })
 })
 
 test('a host without a default model service still creates a session', async () => {
