@@ -115,6 +115,8 @@ class FakeHost {
   readonly resumed: string[] = []
   /** Creates still to fail with DSH's no-factory refusal, for the boot race. */
   failCreate = 0
+  /** All create calls, including refused ones, for budget assertions. */
+  createCalls = 0
   /** The model selection each create named, so a model-less turn is caught. */
   readonly createdModels: ({ readonly provider: string; readonly model: string } | undefined)[] = []
   /** The preset each create mounted, so a tool-less session is caught. */
@@ -128,7 +130,11 @@ class FakeHost {
   /** Stands in for `ctx.get('agentDefaultModel')`; undefined mimics a host without one. */
   defaultModel: { readonly provider: string; readonly model: string } | undefined
   /** Stands in for `ctx.get('agentPresets')`; undefined mimics a host without one. */
-  defaultPreset: string | undefined
+  defaultPreset: string | undefined = 'ptc'
+  /** Registry reads still to answer absent, for the boot race. */
+  presetsDelay = 0
+  /** Every read of `agentPresets`, for the boot-window assertions. */
+  presetReads = 0
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -149,6 +155,7 @@ class FakeHost {
         get: (id: string) => this.agents.find(agent => agent.id === id),
         list: () => this.agents,
         create: async ({ sessionId, meta, agentOptions, setup }) => {
+          this.createCalls += 1
           if (this.failCreate > 0) {
             this.failCreate -= 1
             throw new Error('no agent factory registered (load an agent-loop plugin)')
@@ -170,7 +177,12 @@ class FakeHost {
           return this.defaultModel === undefined ? undefined : { currentSelection: () => this.defaultModel }
         }
         if (name === 'agentPresets') {
+          this.presetReads += 1
           if (this.defaultPreset === undefined) return undefined
+          if (this.presetsDelay > 0) {
+            this.presetsDelay -= 1
+            return undefined
+          }
           return {
             resolve: async () => ({ id: this.defaultPreset ?? '' }),
             mount: async () => { this.mountedPresets.push(this.defaultPreset ?? '') },
@@ -548,6 +560,85 @@ test('a created session carries the default model and mounts the default preset'
   assert.deepEqual(host.createdModels, [{ provider: 'FallbacksChain', model: 'Auto' }])
   assert.deepEqual(host.mountedPresets, ['ptc'])
   host.dispose()
+})
+
+test('the tty boot create waits for a late preset registry and mounts it', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.defaultModel = { provider: 'FallbacksChain', model: 'Auto' }
+  host.defaultPreset = 'ptc'
+  // The profile registers the registry after the tty's first hello runs.
+  host.presetsDelay = 3
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 400 && host.mountedPresets.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.deepEqual(host.mountedPresets, ['ptc'], 'the boot session mounts its tools')
+    assert.equal(tty.raw.at(-1), true)
+    host.dispose()
+  })
+})
+
+test('a preset-less boot spends one 30 s window, then creates a plain session', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.defaultModel = { provider: 'FallbacksChain', model: 'Auto' }
+  // No preset registry ever mounts: a supported host shape.
+  host.defaultPreset = undefined
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 1700 && host.created.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.equal(host.created.length, 1)
+    // The boot window is read-bounded, not timing-bounded: ~60 polls of 500 ms.
+    assert.ok(host.presetReads >= 60 && host.presetReads <= 63, `preset reads: ${String(host.presetReads)}`)
+    assert.deepEqual(host.mountedPresets, [])
+    host.dispose()
+  })
+})
+
+test('a late preset registry still mounts on a host without the model service', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.defaultPreset = 'ptc'
+  host.presetsDelay = 3
+  // No defaultModel: the preset wait must not depend on it.
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 400 && host.mountedPresets.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.deepEqual(host.mountedPresets, ['ptc'])
+    host.dispose()
+  })
+})
+
+test('the factory keeps retrying after the preset wait inside the same window', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const tty = new FakeTty()
+  host.defaultModel = { provider: 'FallbacksChain', model: 'Auto' }
+  host.defaultPreset = 'ptc'
+  host.presetsDelay = 2
+  host.failCreate = 3
+  await withTerminal({ hc: 'hc-tty' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    for (let attempt = 0; attempt < 600 && host.mountedPresets.length === 0; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    }
+    assert.deepEqual(host.mountedPresets, ['ptc'])
+    // Three refused creates plus the one that mounted: the preset wait did not
+    // consume the factory's attempts, and the factory retry did not skip the mount.
+    // Each create attempt re-reads the registry, so reads = two waits + four creates.
+    assert.equal(host.createCalls, 4)
+    assert.equal(host.presetReads, 6)
+    host.dispose()
+  })
 })
 
 test('a host without a default model service still creates a session', async () => {

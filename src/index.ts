@@ -338,9 +338,14 @@ function askMsg(ask: ParkedAsk): string {
 
 /** DSH's refusal while the profile boots without an agent factory yet. */
 const NO_FACTORY = 'no agent factory registered'
-/** 30 s of 500 ms retries: the agent loop registers its factory while a heavy profile boots. */
-const NO_FACTORY_ATTEMPTS = 60
-const NO_FACTORY_DELAY_MS = 500
+/**
+ * One 30 s boot window for both readiness signals — the preset registry and the
+ * agent factory. They share it, so a profile that mounts neither stalls the boot
+ * once rather than twice, and a profile that mounts both late still gets a
+ * mounted first session.
+ */
+const BOOT_WINDOW_MS = 30_000
+const BOOT_POLL_MS = 500
 
 /**
  * Mount the plugin in two layers.
@@ -464,24 +469,29 @@ function handlersFor(
    *   fails fast with `create-failed` instead.
    */
   const create = async (cwd: string, retryOnNoFactory = false): Promise<AgentLike> => {
-    // A session created outside the GUI records no model selection of its own,
-    // so its first turn fails with "no provider/model" until this carries the
-    // profile default. Read reflectively: a host without the service keeps the
-    // plain create.
-    const agentOptions = defaultModelOf(ctx.get?.('agentDefaultModel'))?.currentSelection()
-    // The preset's `mount` is what installs the session's tool set. A create
-    // without it yields an agent with host-level tools only — no bash, no file
-    // tools — which is not a session anyone can supervise.
-    const presets = presetsOf(ctx.get?.('agentPresets'))
-    let composition: { readonly id: string } | undefined
-    try {
-      composition = presets === undefined ? undefined : await presets.resolve(undefined)
-    } catch (error) {
-      throw new BindError(refusalCode(error, 'create-failed'), reasonOf(error))
-    }
-    // shortcut: the wait keys off DSH's "no agent factory registered" message;
-    // switch to an explicit readiness signal if dsh-agent exposes one.
-    for (let attempt = 0; ; attempt += 1) {
+    // One aggregate window shared by both readiness signals: a slow profile must
+    // not stall the boot past it, and a registry that settles inside it still
+    // yields a mounted first session.
+    const deadline = Date.now() + BOOT_WINDOW_MS
+    // shortcut: the factory wait keys off DSH's "no agent factory registered"
+    // message; switch to an explicit readiness signal if dsh-agent exposes one.
+    for (;;) {
+      // Re-read the host services every attempt: a booting profile registers the
+      // preset registry asynchronously, and the tty's first session is created
+      // before it settles. A session created without the preset mount has no
+      // tools.
+      const agentOptions = defaultModelOf(ctx.get?.('agentDefaultModel'))?.currentSelection()
+      const presets = presetsOf(ctx.get?.('agentPresets'))
+      if (retryOnNoFactory && presets === undefined && Date.now() < deadline) {
+        await new Promise<void>(resolve => { setTimeout(resolve, BOOT_POLL_MS) })
+        continue
+      }
+      let composition: { readonly id: string } | undefined
+      try {
+        composition = presets === undefined ? undefined : await presets.resolve(undefined)
+      } catch (error) {
+        throw new BindError(refusalCode(error, 'create-failed'), reasonOf(error))
+      }
       try {
         return (await ctx.agents.create({
           sessionId: `session-${randomUUID()}`,
@@ -493,8 +503,8 @@ function handlersFor(
         })).agent
       } catch (error) {
         const reason = reasonOf(error)
-        if (retryOnNoFactory && attempt < NO_FACTORY_ATTEMPTS && reason.includes(NO_FACTORY)) {
-          await new Promise<void>(resolve => { setTimeout(resolve, NO_FACTORY_DELAY_MS) })
+        if (retryOnNoFactory && Date.now() < deadline && reason.includes(NO_FACTORY)) {
+          await new Promise<void>(resolve => { setTimeout(resolve, BOOT_POLL_MS) })
           continue
         }
         throw new BindError(refusalCode(error, 'create-failed'), reason)
