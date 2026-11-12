@@ -133,6 +133,8 @@ class FakeHost {
   defaultPreset: string | undefined = 'ptc'
   /** Registry reads still to answer absent, for the boot race. */
   presetsDelay = 0
+  /** Every read of `agentPresets`, for the boot-window assertions. */
+  presetReads = 0
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -175,6 +177,7 @@ class FakeHost {
           return this.defaultModel === undefined ? undefined : { currentSelection: () => this.defaultModel }
         }
         if (name === 'agentPresets') {
+          this.presetReads += 1
           if (this.defaultPreset === undefined) return undefined
           if (this.presetsDelay > 0) {
             this.presetsDelay -= 1
@@ -578,7 +581,7 @@ test('the tty boot create waits for a late preset registry and mounts it', async
   })
 })
 
-test('a preset-less boot creates its first session after the short wait, not the factory window', async () => {
+test('a preset-less boot spends one 30 s window, then creates a plain session', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   const tty = new FakeTty()
@@ -586,14 +589,13 @@ test('a preset-less boot creates its first session after the short wait, not the
   // No preset registry ever mounts: a supported host shape.
   host.defaultPreset = undefined
   await withTerminal({ hc: 'hc-tty' }, async () => {
-    const started = Date.now()
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
-    for (let attempt = 0; attempt < 800 && host.created.length === 0; attempt += 1) {
+    for (let attempt = 0; attempt < 1700 && host.created.length === 0; attempt += 1) {
       await new Promise<void>(resolve => { setTimeout(resolve, 25) })
     }
-    const elapsed = Date.now() - started
     assert.equal(host.created.length, 1)
-    assert.ok(elapsed < 8000, `boot took ${String(elapsed)} ms`)
+    // The boot window is read-bounded, not timing-bounded: ~60 polls of 500 ms.
+    assert.ok(host.presetReads >= 60 && host.presetReads <= 63, `preset reads: ${String(host.presetReads)}`)
     assert.deepEqual(host.mountedPresets, [])
     host.dispose()
   })
@@ -616,7 +618,7 @@ test('a late preset registry still mounts on a host without the model service', 
   })
 })
 
-test('a late preset registry leaves the factory its own retry window', async () => {
+test('the factory keeps retrying after the preset wait inside the same window', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   const tty = new FakeTty()
@@ -630,7 +632,11 @@ test('a late preset registry leaves the factory its own retry window', async () 
       await new Promise<void>(resolve => { setTimeout(resolve, 25) })
     }
     assert.deepEqual(host.mountedPresets, ['ptc'])
-    assert.ok(host.createCalls >= 4, 'the boot create kept retrying past the preset wait')
+    // Three refused creates plus the one that mounted: the preset wait did not
+    // consume the factory's attempts, and the factory retry did not skip the mount.
+    // Each create attempt re-reads the registry, so reads = two waits + four creates.
+    assert.equal(host.createCalls, 4)
+    assert.equal(host.presetReads, 6)
     host.dispose()
   })
 })

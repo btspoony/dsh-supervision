@@ -338,12 +338,14 @@ function askMsg(ask: ParkedAsk): string {
 
 /** DSH's refusal while the profile boots without an agent factory yet. */
 const NO_FACTORY = 'no agent factory registered'
-/** 30 s of 500 ms retries: the agent loop registers its factory while a heavy profile boots. */
-const NO_FACTORY_ATTEMPTS = 60
-const NO_FACTORY_DELAY_MS = 500
-/** 5 s of 500 ms waits: the preset registry settles while the profile boots. */
-const PRESET_ATTEMPTS = 10
-const PRESET_DELAY_MS = 500
+/**
+ * One 30 s boot window for both readiness signals — the preset registry and the
+ * agent factory. They share it, so a profile that mounts neither stalls the boot
+ * once rather than twice, and a profile that mounts both late still gets a
+ * mounted first session.
+ */
+const BOOT_WINDOW_MS = 30_000
+const BOOT_POLL_MS = 500
 
 /**
  * Mount the plugin in two layers.
@@ -467,11 +469,10 @@ function handlersFor(
    *   fails fast with `create-failed` instead.
    */
   const create = async (cwd: string, retryOnNoFactory = false): Promise<AgentLike> => {
-    // Two independent readiness signals, two budgets: a late preset registry
-    // must not spend the factory's window, and a profile without the registry
-    // must not stall the boot any longer than its own short wait.
-    let presetWait = 0
-    let factoryRetry = 0
+    // One aggregate window shared by both readiness signals: a slow profile must
+    // not stall the boot past it, and a registry that settles inside it still
+    // yields a mounted first session.
+    const deadline = Date.now() + BOOT_WINDOW_MS
     // shortcut: the factory wait keys off DSH's "no agent factory registered"
     // message; switch to an explicit readiness signal if dsh-agent exposes one.
     for (;;) {
@@ -481,9 +482,8 @@ function handlersFor(
       // tools.
       const agentOptions = defaultModelOf(ctx.get?.('agentDefaultModel'))?.currentSelection()
       const presets = presetsOf(ctx.get?.('agentPresets'))
-      if (retryOnNoFactory && presets === undefined && presetWait < PRESET_ATTEMPTS) {
-        presetWait += 1
-        await new Promise<void>(resolve => { setTimeout(resolve, PRESET_DELAY_MS) })
+      if (retryOnNoFactory && presets === undefined && Date.now() < deadline) {
+        await new Promise<void>(resolve => { setTimeout(resolve, BOOT_POLL_MS) })
         continue
       }
       let composition: { readonly id: string } | undefined
@@ -503,9 +503,8 @@ function handlersFor(
         })).agent
       } catch (error) {
         const reason = reasonOf(error)
-        if (retryOnNoFactory && factoryRetry < NO_FACTORY_ATTEMPTS && reason.includes(NO_FACTORY)) {
-          factoryRetry += 1
-          await new Promise<void>(resolve => { setTimeout(resolve, NO_FACTORY_DELAY_MS) })
+        if (retryOnNoFactory && Date.now() < deadline && reason.includes(NO_FACTORY)) {
+          await new Promise<void>(resolve => { setTimeout(resolve, BOOT_POLL_MS) })
           continue
         }
         throw new BindError(refusalCode(error, 'create-failed'), reason)
