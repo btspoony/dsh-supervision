@@ -1209,10 +1209,11 @@ function handlersFor(
       const archived = archivedSessions(ctx.get?.('workspaceRegistry'))
       return rows
         .filter(item => !archived.has(item.id) || bridged.has(item.id))
-        // A blank row is a session with no turn yet, hidden the same way the
-        // sidebar hides it — unless a bridge holds it, which is the one session
-        // the operator is steering from this terminal right now.
-        .filter(item => !item.blank || bridged.has(item.id))
+        // A blank row is a session with no turn yet. The sidebar shows one only
+        // while it is the selected session, so listing it here would name an id
+        // with no row to open — a bridge does not change that: one line of input
+        // is what makes the session appear in both places.
+        .filter(item => !item.blank)
         .filter(item => cwd === undefined || item.cwd === cwd)
         .map(item => ({ id: item.id, cwd: item.cwd, live: item.live, bridged: bridged.has(item.id) }))
     },
