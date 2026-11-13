@@ -802,8 +802,8 @@ test('list includes cold sessions and hides blank ones', async () => {
     'a cold persisted session is listed; a blank or cwd-less one is not',
   )
 
-  // A live bridge does not resurrect a blank row: the sidebar would still hide
-  // it, so the operator could never open what the listing named.
+  // A bridge is the one row the operator is steering, so blankness must not
+  // hide it — the same carve-out the archive filter carries.
   const owner = await attached(host, dir, 'session-blank')
   client.write({ t: 'list' })
   await until(() => client.frames.length >= 2, 'the second listing')
@@ -811,9 +811,10 @@ test('list includes cold sessions and hides blank ones', async () => {
   const after = second?.t === 'sessions' ? second.items : []
   assert.deepEqual(
     after.map(item => item.id).sort(),
-    ['session-cold', 'session-live'],
-    'a blank session stays hidden even while bridged',
+    ['session-blank', 'session-cold', 'session-live'],
+    'a bridged blank session is listed, marked bridged',
   )
+  assert.equal(after.find(item => item.id === 'session-blank')?.bridged, true)
   owner.socket.end()
   host.dispose()
 })
@@ -826,11 +827,11 @@ test('list answers from the sidebar controller and drops blank or unowned sessio
   host.controllerItems = [
     { sessionId: 'session-live', cwd: '/repo', blank: false, agentAvailable: true },
     { sessionId: 'session-cold', cwd: '/repo', blank: false, agentAvailable: false },
-    { sessionId: 'session-blank', cwd: '/repo', blank: true, agentAvailable: true },
+    { sessionId: 'session-blank-ctl', cwd: '/repo', blank: true, agentAvailable: true },
     { sessionId: 'session-unowned', cwd: '/repo', blank: false, agentAvailable: false },
     { sessionId: 'session-headless', blank: false, agentAvailable: false },
   ]
-  host.workspaceRecords = [{ path: '/repo', sessionIds: ['session-live', 'session-cold', 'session-blank', 'session-headless'] }]
+  host.workspaceRecords = [{ path: '/repo', sessionIds: ['session-live', 'session-cold', 'session-blank-ctl', 'session-headless'] }]
   apply(host.ctx, config({ socketDir: dir }))
   const client = new Client(await listening(dir))
   await client.ready()
@@ -875,7 +876,7 @@ test('a bridged session no Workspace owns is still listed', async () => {
   host.dispose()
 })
 
-test('the live-agent fallback still hides a blank session', async () => {
+test('the live-agent fallback hides a blank session unless a bridge holds it', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   // No controller and no query: the partial-host shape the fallback exists for.
@@ -889,6 +890,16 @@ test('the live-agent fallback still hides a blank session', async () => {
   const [answer] = await client.take(1)
   const items = answer?.t === 'sessions' ? answer.items : []
   assert.deepEqual(items, [], 'a live session with no turn stays out of the listing')
+
+  // The bridge's own session is the row the operator is steering: blankness
+  // must not hide it.
+  const owner = await attached(host, dir, 'session-empty')
+  client.write({ t: 'list' })
+  await until(() => client.frames.length >= 2, 'the second listing')
+  const second = client.frames.at(-1)
+  const after = second?.t === 'sessions' ? second.items : []
+  assert.equal(after.find(item => item.id === 'session-empty')?.bridged, true)
+  owner.socket.end()
   host.dispose()
 })
 
