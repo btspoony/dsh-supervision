@@ -769,7 +769,7 @@ test('an archived session is not offered by list, unless a bridge holds it', asy
   host.dispose()
 })
 
-test('list includes cold sessions, hides blank ones, and keeps a bridged blank one', async () => {
+test('list includes cold sessions and hides blank ones', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   host.sessionRecords = [
@@ -792,13 +792,18 @@ test('list includes cold sessions, hides blank ones, and keeps a bridged blank o
     'a cold persisted session is listed; a blank or cwd-less one is not',
   )
 
-  // A bridge on a blank session is the one case the operator must still see.
+  // A live bridge does not resurrect a blank row: the sidebar would still hide
+  // it, so the operator could never open what the listing named.
   const owner = await attached(host, dir, 'session-blank')
   client.write({ t: 'list' })
   await until(() => client.frames.length >= 2, 'the second listing')
   const second = client.frames.at(-1)
   const after = second?.t === 'sessions' ? second.items : []
-  assert.equal(after.find(item => item.id === 'session-blank')?.bridged, true)
+  assert.deepEqual(
+    after.map(item => item.id).sort(),
+    ['session-cold', 'session-live'],
+    'a blank session stays hidden even while bridged',
+  )
   owner.socket.end()
   host.dispose()
 })

@@ -1132,13 +1132,14 @@ function handlersFor(
       // An archived session is hidden from the sidebar, so listing it would offer
       // an id nobody can open — unless a bridge holds it right now: that bridge
       // is live and the operator must still see what is steering the session.
-      // A blank session (no turn yet) is hidden the same way: the sidebar shows
-      // no row for it either, and one line of input is what makes it appear.
+      // A blank session (no turn yet) is hidden outright: the sidebar shows no
+      // row for it either, so listing it would offer a session the operator
+      // cannot find; one line of input is what makes it appear in both places.
       const archived = archivedSessions(ctx.get?.('workspaceRegistry'))
       const blank = blankSessions(ctx, records.headers)
       return records.items
         .filter(item => !archived.has(item.id) || bridged.has(item.id))
-        .filter(item => !blank.has(item.id) || bridged.has(item.id))
+        .filter(item => !blank.has(item.id))
         .filter(item => cwd === undefined || item.cwd === cwd)
         .map(item => ({ ...item, bridged: bridged.has(item.id) }))
     },
