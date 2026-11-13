@@ -98,7 +98,7 @@ dsh web (the process you already run)
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
       │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo + mirror lines ──▶ supervisor (reads OSC 7501)
       └── in-process tty   (added when DSH_SUP_TERMINAL_ID or HC_TERMINAL_ID is set)
-            └── OSC 7501 written to this process's own /dev/tty
+            └── OSC 7501 records and mirror lines written to this process's own /dev/tty
 ```
 
 **Activation.** The plugin always opens its socket discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `DSH_SUP_TERMINAL_ID` non-empty (or herdr-core's `HC_TERMINAL_ID`) the process also supervises the terminal it runs in: the same records go to its own `/dev/tty`, while the socket stays open for a `dsh-sup` elsewhere. A session still has exactly one bridge across both surfaces, so a second attach is refused as `busy`. If the terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and keeps the socket surface.

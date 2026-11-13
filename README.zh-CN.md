@@ -98,7 +98,7 @@ dsh web (the process you already run)
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
       │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo + mirror lines ──▶ supervisor (reads OSC 7501)
       └── in-process tty   (added when DSH_SUP_TERMINAL_ID or HC_TERMINAL_ID is set)
-            └── OSC 7501 written to this process's own /dev/tty
+            └── OSC 7501 records and mirror lines written to this process's own /dev/tty
 ```
 
 **挂载规则。**插件总是先把套接口发现面打开——监听器、`0600` 套接口，以及指向它的 `<pid>-<8hex>.json` 注册表条目——这样转发器才有东西可连。效果层（会话监听、OSC 上报、echo 行、stdin 处理）按桥接打开，"有一条桥接"和"有转发器已连接"是同一件事。因此一个只开 GUI 的 `dsh web` 只暴露一个不干活的套接口，别的什么都没有。当 `DSH_SUP_TERMINAL_ID` 非空（或 herdr-core 的 `HC_TERMINAL_ID` 非空）时，进程同时监督自己所在的终端：同样的记录写到自己的 `/dev/tty`，套接口仍然为别处的 `dsh-sup` 开着。一个会话在两条通路上仍只有一条桥接，第二个认领者会收到 `busy`。如果终端打不开——既没有 `/dev/tty`、stdout 也不是 TTY，或者 stdin 不是终端——插件把原因写到 stderr，并保留套接口这条路。
