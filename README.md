@@ -51,7 +51,7 @@ dsh-sup --pid 4711 new                   # pick the backend when several dsh web
 dsh-sup list                             # list every session on every live backend
 ```
 
-`list` prints one table for every live backend and binds nothing. It answers from the same account the sidebar groups — the sessions a Workspace owns — so a persisted session appears even when no agent is loaded for it (`LIVE no`), while archived sessions, blank sessions (never had a turn) and sessions no Workspace owns (subagent logs, folded history) are omitted — with one exception: a session an active bridge holds is always listed, because that bridge is the row the operator is steering right now. `PID` names the `dsh web` process a row came from, so a multi-backend listing stays attributable:
+`list` prints one table for every live backend and binds nothing. It answers from the same account the sidebar groups — the sessions a Workspace owns — so a persisted session appears even when no agent is loaded for it (`LIVE no`), while archived sessions and sessions no Workspace owns (subagent logs, folded history) are omitted. Blank sessions (never had a turn) are omitted too: the sidebar shows one only while it is the selected session, so listing it would name an id with no row to open — send one line and it appears in both places. An archived session is the single exception: an active bridge holds it, so it stays listed. `PID` names the `dsh web` process a row came from, so a multi-backend listing stays attributable:
 
 ```text
 SESSION            PID    CWD                LIVE  BRIDGED

@@ -802,8 +802,8 @@ test('list includes cold sessions and hides blank ones', async () => {
     'a cold persisted session is listed; a blank or cwd-less one is not',
   )
 
-  // A bridge is the one row the operator is steering, so blankness must not
-  // hide it — the same carve-out the archive filter carries.
+  // A live bridge does not resurrect a blank row: the sidebar would still hide
+  // it, so the operator could never open what the listing named.
   const owner = await attached(host, dir, 'session-blank')
   client.write({ t: 'list' })
   await until(() => client.frames.length >= 2, 'the second listing')
@@ -811,10 +811,9 @@ test('list includes cold sessions and hides blank ones', async () => {
   const after = second?.t === 'sessions' ? second.items : []
   assert.deepEqual(
     after.map(item => item.id).sort(),
-    ['session-blank', 'session-cold', 'session-live'],
-    'a bridged blank session is listed, marked bridged',
+    ['session-cold', 'session-live'],
+    'a blank session stays hidden even while bridged',
   )
-  assert.equal(after.find(item => item.id === 'session-blank')?.bridged, true)
   owner.socket.end()
   host.dispose()
 })
@@ -876,7 +875,7 @@ test('a bridged session no Workspace owns is still listed', async () => {
   host.dispose()
 })
 
-test('the live-agent fallback hides a blank session unless a bridge holds it', async () => {
+test('the live-agent fallback hides a blank session, bridged or not', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   // No controller and no query: the partial-host shape the fallback exists for.
@@ -891,14 +890,14 @@ test('the live-agent fallback hides a blank session unless a bridge holds it', a
   const items = answer?.t === 'sessions' ? answer.items : []
   assert.deepEqual(items, [], 'a live session with no turn stays out of the listing')
 
-  // The bridge's own session is the row the operator is steering: blankness
-  // must not hide it.
+  // Bridging it does not change the answer: the sidebar hides it too, so the
+  // listing must not offer an id the operator cannot open.
   const owner = await attached(host, dir, 'session-empty')
   client.write({ t: 'list' })
   await until(() => client.frames.length >= 2, 'the second listing')
   const second = client.frames.at(-1)
   const after = second?.t === 'sessions' ? second.items : []
-  assert.equal(after.find(item => item.id === 'session-empty')?.bridged, true)
+  assert.deepEqual(after, [], 'a bridged blank session stays out of the listing')
   owner.socket.end()
   host.dispose()
 })
