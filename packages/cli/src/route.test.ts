@@ -32,11 +32,11 @@ test('osc reaches the machine sink verbatim and never the human one', () => {
   assert.deepEqual(routeFrame(frame, false), { tty: `${ESC}]7501;state=working${ST}` });
 });
 
-test('echo reaches both sinks when the human one exists, with one newline each', () => {
-  assert.deepEqual(routeFrame({ t: 'echo', text: 'sent' }, true), { tty: 'sent\n', out: 'sent\n' });
+test('echo picks the human sink when stdout is a terminal, so the line prints once', () => {
+  assert.deepEqual(routeFrame({ t: 'echo', text: 'sent' }, true), { out: 'sent\n' });
 });
 
-test('echo stays machine-only without a human sink', () => {
+test('echo keeps the machine sink when stdout is redirected', () => {
   assert.deepEqual(routeFrame({ t: 'echo', text: 'sent' }, false), { tty: 'sent\n' });
 });
 
@@ -51,6 +51,12 @@ test('mirror wraps to the stdout width when the terminal reports one', () => {
   const routed = withColumns(20, () => routeFrame(frame, true));
   assert.deepEqual(routed, { out: `${renderMirror(LONG, 20)}\n` });
   assert.notEqual(routed.out, `${renderMirror(LONG)}\n`);
+});
+
+test('a pty reporting zero columns falls back to the default width, not width one', () => {
+  const frame: OutFrame = { t: 'mirror', item: LONG };
+  const routed = withColumns(0, () => routeFrame(frame, true));
+  assert.deepEqual(routed, { out: `${renderMirror(LONG)}\n` });
 });
 
 test('mirror is dropped when stdout is not a terminal', () => {
