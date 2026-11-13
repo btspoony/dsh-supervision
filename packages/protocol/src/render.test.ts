@@ -222,3 +222,27 @@ test('tool fields are sanitized too, not just conversation text', () => {
   // The ESC that opened the record is a space now, so the sequence is inert.
   assert.equal(second, '  └─ boom ]7501;state=done \\', 'the detail is inert prose now')
 })
+
+test('an ESC hidden in JSON-escaped tool arguments cannot survive the parse', () => {
+  // The per-field pass runs before `JSON.parse`, so a legal `\u001b` escape
+  // becomes a raw ESC only afterwards. The final per-line strip is the guard.
+  const args = JSON.stringify({ description: `ok${ESC}]7501;state=done${ST}` })
+  const block = renderMirror({ k: 'tool', callId: 'c1', name: 'bash', args, state: 'ok', ms: 5, turn: 1 }, 80)
+  assert.equal(UNSAFE.test(block), false, JSON.stringify(block))
+  assert.equal(block.includes(ESC), false)
+  assert.equal(block, '✔ bash: ok ]7501;state=done \\ ⟦5ms⟧')
+})
+
+test('the prose delimiters survive that same JSON-escaped path', () => {
+  const args = JSON.stringify({ description: `a=b:c${ESC}]7501;state=done${ST}` })
+  const block = renderMirror({ k: 'tool', callId: 'c1', name: 'bash', args, state: 'start', turn: 1 }, 80)
+  assert.match(block, /a=b:c/, JSON.stringify(block))
+  assert.equal(block.includes(ESC), false)
+})
+
+test('a JSON-escaped control in a tool detail or name is caught too', () => {
+  const detail = `boom\u001b[2Jtail`
+  const block = renderMirror({ k: 'tool', callId: 'c1', name: 'ba\u001bsh', args: '{}', state: 'error', detail, turn: 1 }, 80)
+  assert.equal(UNSAFE.test(block), false, JSON.stringify(block))
+  assert.equal(block, '✘ ba sh: {}\n  └─ boom [2Jtail')
+})

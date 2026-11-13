@@ -57,8 +57,10 @@ export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): s
   const w = Math.max(1, Math.floor(width))
   const lines: string[] = []
   // Every field below is model or host prose on the same byte stream a
-  // supervisor parses, so control bytes are neutralised before any wrapping:
-  // line breaks and tabs are the only C0 a transcript keeps.
+  // supervisor parses, so control bytes are neutralised before any wrapping.
+  // That per-field pass is not enough on its own — a JSON escape such as
+  // `\u001b` inside tool arguments becomes an ESC only once parsed — so every
+  // finished line is stripped again below, as the invariant.
   switch (item.k) {
     case 'user':
       // The gutter marks the first line only; every later line sits under it.
@@ -66,7 +68,7 @@ export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): s
         wrap(source, w, index === 0 ? '❯ ' : '  ', '  ', lines)
       }
       trimTail(lines)
-      return lines.join('\n')
+      break
     case 'assistant': {
       const reasoning = stripControls(item.reasoning ?? '', '\n\t').split('\n')[0]?.trim() ?? ''
       if (reasoning !== '') wrap(reasoning, w, '· ', '  ', lines)
@@ -83,7 +85,7 @@ export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): s
         const cache = usage.cacheReadTokens
         lines.push(`⟦↑${count(usage.inputTokens)} ↓${count(usage.outputTokens)}${cache === undefined ? '' : ` R${count(cache)}`}⟧`)
       }
-      return lines.join('\n')
+      break
     }
     case 'tool': {
       const glyph = item.state === 'start' ? '⏳' : item.state === 'ok' ? '✔' : '✘'
@@ -95,9 +97,13 @@ export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): s
       const detail = stripControls(item.detail ?? '', '\n\t').split('\n')[0]?.trim() ?? ''
       if (detail !== '') wrap(detail, w, '  └─ ', '     ', lines)
       trimTail(lines)
-      return lines.join('\n')
+      break
     }
   }
+  // The invariant, whatever produced a line: nothing a terminal executes or
+  // reverses ever leaves this function. A new field or helper is covered here
+  // without touching this line.
+  return lines.map(line => stripControls(line, '\t')).join('\n')
 }
 
 /**
