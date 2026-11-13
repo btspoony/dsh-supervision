@@ -338,6 +338,89 @@ function workspaceRegistryOf(value: unknown): WorkspaceRegistryLike | undefined 
   return value as WorkspaceRegistryLike
 }
 
+/** One row of the session listing, before the bridge column is filled in. */
+interface VisibleSession {
+  readonly id: string
+  readonly cwd: string
+  readonly live: boolean
+}
+
+/** The `ctx.sessionQuery` surface this plugin reads, when the host mounts it. */
+interface SessionQueryLike {
+  listSessions(signal?: AbortSignal): Promise<readonly { readonly header: { readonly id: string; readonly cwd?: string }; readonly live: boolean }[]>
+}
+
+/** The `ctx.sessionProjections` surface `blankSessions` needs. */
+interface ProjectionsLike {
+  summaryKeys(): readonly string[]
+}
+
+/** The `ctx.sessionProjectionCache` surface that answers for a cold session. */
+interface ProjectionCacheLike {
+  cachedSnapshot(header: unknown, keys: readonly string[]): { readonly values?: Readonly<Record<string, unknown>> } | undefined
+}
+
+/** @returns the host's session query, when a usable one is mounted. */
+function sessionQueryOf(value: unknown): SessionQueryLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const listSessions = (value as { listSessions?: unknown }).listSessions
+  return typeof listSessions === 'function' ? value as SessionQueryLike : undefined
+}
+
+/**
+ * The sessions this process can attach to: every persisted session, plus the
+ * live ones. Persistence is what makes a cold session visible — the same account
+ * the sidebar reads — so a listing never hides sessions the UI shows.
+ * @param ctx - the plugin context.
+ * @returns the rows, and the headers `blankSessions` evaluates.
+ */
+async function visibleSessions(ctx: PluginContext): Promise<{ readonly items: readonly VisibleSession[]; readonly headers: readonly unknown[] }> {
+  const query = sessionQueryOf(ctx.get?.('sessionQuery'))
+  if (query === undefined) {
+    return {
+      items: ctx.agents.list().map(agent => ({
+        id: agent.session.id,
+        cwd: agent.session.header?.cwd ?? '',
+        live: true,
+      })),
+      headers: ctx.agents.list().map(agent => agent.session.header),
+    }
+  }
+  const records = await query.listSessions()
+  return {
+    items: records
+      .filter(record => record.header.cwd !== undefined)
+      .map(record => ({ id: record.header.id, cwd: record.header.cwd ?? '', live: record.live })),
+    headers: records.map(record => record.header),
+  }
+}
+
+/**
+ * The ids of sessions with no turn yet. The sidebar hides them, so an `attach`
+ * to one would land on a session the operator cannot see; the projection cache
+ * answers for cold sessions exactly as it does for the UI's own list.
+ * @param ctx - the plugin context.
+ * @param headers - the session headers to evaluate.
+ * @returns the blank ids; empty when the host mounts no projection services.
+ */
+function blankSessions(ctx: PluginContext, headers: readonly unknown[]): ReadonlySet<string> {
+  const projections = ctx.get?.('sessionProjections') as ProjectionsLike | undefined
+  const cache = ctx.get?.('sessionProjectionCache') as ProjectionCacheLike | undefined
+  const blank = new Set<string>()
+  if (typeof projections?.summaryKeys !== 'function' || typeof cache?.cachedSnapshot !== 'function') return blank
+  const keys = projections.summaryKeys()
+  for (const header of headers) {
+    try {
+      const metadata = cache.cachedSnapshot(header, keys)?.values?.['sessionListMetadata'] as { readonly blank?: boolean } | undefined
+      if (metadata?.blank === true) blank.add((header as { readonly id: string }).id)
+    } catch {
+      // A row the cache cannot answer is listed: a missing projection column is
+      // no reason to hide a session.
+    }
+  }
+  return blank
+}
+
 /**
  * The sessions an operator may pick: a host with a workspace registry hides the
  * archive set in its sidebar, so a listing that showed archived sessions would
@@ -1038,22 +1121,26 @@ function handlersFor(
       }
     },
 
-    list(cwd: string | undefined): readonly SessionItem[] {
+    async list(cwd: string | undefined): Promise<readonly SessionItem[]> {
       // The shared bridge table, not one transport's private one: with both
       // surfaces mounted, a session held by the tty is bridged to the socket too.
+      // Persistence is the source: a cold session is a real attach target, and a
+      // listing that only saw live agents hid every session created before this
+      // process started. A host without the query service still gets the live
+      // set, which is what it can answer synchronously.
+      const records = await visibleSessions(ctx)
       // An archived session is hidden from the sidebar, so listing it would offer
       // an id nobody can open — unless a bridge holds it right now: that bridge
       // is live and the operator must still see what is steering the session.
+      // A blank session (no turn yet) is hidden the same way: the sidebar shows
+      // no row for it either, and one line of input is what makes it appear.
       const archived = archivedSessions(ctx.get?.('workspaceRegistry'))
-      return ctx.agents.list()
-        .filter(agent => !archived.has(agent.session.id) || bridged.has(agent.session.id))
-        .map(agent => ({
-          id: agent.session.id,
-          cwd: agent.session.header?.cwd ?? '',
-          live: true,
-          bridged: bridged.has(agent.session.id),
-        }))
+      const blank = blankSessions(ctx, records.headers)
+      return records.items
+        .filter(item => !archived.has(item.id) || bridged.has(item.id))
+        .filter(item => !blank.has(item.id) || bridged.has(item.id))
         .filter(item => cwd === undefined || item.cwd === cwd)
+        .map(item => ({ ...item, bridged: bridged.has(item.id) }))
     },
 
     bye(session: string): void {

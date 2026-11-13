@@ -145,6 +145,10 @@ class FakeHost {
   readonly unarchivedSessions: string[] = []
   /** The registry's archive set, as the sidebar would see it. */
   archived: string[] = []
+  /** What `sessionQuery` answers, when the host mounts it; `undefined` hides it. */
+  sessionRecords: { header: { id: string; cwd?: string }; live: boolean }[] | undefined = undefined
+  /** Sessions the projection cache marks blank (no turn yet). */
+  blankSessions: string[] = []
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -197,6 +201,19 @@ class FakeHost {
               : { attachSession: async (id: string) => { this.attachedSessions.push(id) } },
             unarchiveSession: async (id: string) => { this.unarchivedSessions.push(id) },
             archivedSessionIds: this.archived,
+          }
+        }
+        if (name === 'sessionQuery') {
+          return this.sessionRecords === undefined
+            ? undefined
+            : { listSessions: async () => this.sessionRecords ?? [] }
+        }
+        if (name === 'sessionProjections') return { summaryKeys: () => ['sessionListMetadata'] }
+        if (name === 'sessionProjectionCache') {
+          return {
+            cachedSnapshot: (header: { id: string }) => ({
+              values: { sessionListMetadata: { blank: this.blankSessions.includes(header.id) } },
+            }),
           }
         }
         if (name === 'agentPresets') {
@@ -748,6 +765,40 @@ test('an archived session is not offered by list, unless a bridge holds it', asy
     'a bridged archived session stays visible',
   )
   assert.equal(afterItems.find(item => item.id === 'session-held')?.bridged, true)
+  owner.socket.end()
+  host.dispose()
+})
+
+test('list includes cold sessions, hides blank ones, and keeps a bridged blank one', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.sessionRecords = [
+    { header: { id: 'session-live', cwd: '/repo' }, live: true },
+    { header: { id: 'session-cold', cwd: '/repo' }, live: false },
+    { header: { id: 'session-blank', cwd: '/repo' }, live: true },
+    { header: { id: 'session-headless' }, live: true },
+  ]
+  host.blankSessions = ['session-blank']
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+
+  client.write({ t: 'list' })
+  const [first] = await client.take(1)
+  const items = first?.t === 'sessions' ? first.items : []
+  assert.deepEqual(
+    items.map(item => [item.id, item.live]),
+    [['session-live', true], ['session-cold', false]],
+    'a cold persisted session is listed; a blank or cwd-less one is not',
+  )
+
+  // A bridge on a blank session is the one case the operator must still see.
+  const owner = await attached(host, dir, 'session-blank')
+  client.write({ t: 'list' })
+  await until(() => client.frames.length >= 2, 'the second listing')
+  const second = client.frames.at(-1)
+  const after = second?.t === 'sessions' ? second.items : []
+  assert.equal(after.find(item => item.id === 'session-blank')?.bridged, true)
   owner.socket.end()
   host.dispose()
 })

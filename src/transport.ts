@@ -52,7 +52,7 @@ export interface TransportHandlers {
   /** A stdin line from a bound forwarder. */
   line(text: string, bridge: Bridge): void
   /** The attachable sessions for a `list`; never binds anything. */
-  list(cwd: string | undefined, bridged: (session: string) => boolean): readonly SessionItem[]
+  list(cwd: string | undefined, bridged: (session: string) => boolean): readonly SessionItem[] | Promise<readonly SessionItem[]>
   /** The bridge holding `session` is gone: it said goodbye, dropped, or moved. */
   bye(session: string): void
 }
@@ -293,7 +293,9 @@ export class SocketTransport implements Transport {
         handlers.line(frame.text, connection)
         return
       case 'list': {
-        const items = handlers.list(frame.cwd, session => this.#bridged.has(session))
+        // Cold sessions come from persistence, so the answer is awaited; the
+        // connection queue keeps frames in order while it resolves.
+        const items = await handlers.list(frame.cwd, session => this.#bridged.has(session))
         connection.send({ t: 'sessions', items })
         return
       }
