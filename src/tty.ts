@@ -10,7 +10,7 @@
  * The terminal stays in the driver's own line mode. Raw mode disables ISIG,
  * ECHO, IXON and line editing, which steals Ctrl+C, Ctrl+Z, Ctrl+\\, Ctrl+S/Q
  * and input echo from the operator; the bridge only needs whole lines, and line
- * mode already delivers those.
+ * mode delivers those.
  */
 
 import { createWriteStream, openSync } from 'node:fs'
@@ -91,13 +91,11 @@ export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; s
       }
     },
     stop(): void {
-      if (stopped) return
-      stopped = true
-      // The buffered lines were typed for a session that no longer has a
-      // reader: replaying them onto a stopped feed is how an orphan session
-      // gets created, so the queue dies with the feed.
+      // Idempotent but never a no-op: an `end` already set `stopped`, and the
+      // listeners must still be detached or they outlive the bridge.
       complete.length = 0
       rest = ''
+      stopped = true
       input.off('data', onData)
       input.off('end', onEnd)
       input.pause()
@@ -215,6 +213,10 @@ export function openTtyIO(
   // The driver's own line mode is kept: editing, echo, Ctrl+C/Z/\\ and Ctrl+S/Q
   // behave exactly as they do without the plugin, while stdin still yields
   // complete lines.
+  // shortcut: the line discipline caps one line at MAX_CANON (4096 bytes on
+  // Linux, 1024 on macOS); a longer paste is truncated by the kernel before this
+  // process sees it. Revisit if steering with multi-kilobyte prompts becomes a
+  // real workflow — the fix is a second, opt-in raw-mode input path.
   const feed = lineFeed(stdin)
   let closed = false
 

@@ -180,7 +180,12 @@ export class TtyTransport implements Transport {
     this.#teardown(session)
   }
 
-  /** Reads lines one at a time, so an in-flight hello holds the lines behind it. */
+  /**
+   * Reads lines one at a time, so an in-flight hello holds the lines behind it.
+   * A feed that ends (Ctrl+D on a terminal in line mode, a closed stdin) is a
+   * dead keyboard: the bridge must be told, or it stays bound with no way to
+   * steer and the operator sees nothing.
+   */
   async #consume(): Promise<void> {
     try {
       for await (const line of this.#io.lines()) {
@@ -207,6 +212,22 @@ export class TtyTransport implements Transport {
       }
     } catch {
       // The terminal itself is gone: there is no surface left to report to.
+    }
+    // The loop ends only on `close`, on death, or on end-of-input. The first two
+    // have already done their teardown; an ended feed has not.
+    if (this.#closed || this.#dead) return
+    const session = this.#session
+    // Report before marking the surface dead: a dead surface drops every frame.
+    this.#write({ t: 'error', code: 'internal', message: 'terminal input ended (Ctrl+D); restart dsh web to supervise again' })
+    this.#dead = true
+    if (session !== undefined) {
+      this.#release()
+      this.#teardown(session)
+    }
+    try {
+      this.#io.close()
+    } catch {
+      // Nothing left to release.
     }
   }
 

@@ -108,6 +108,8 @@ protocol rule exists twice. It claims its first session through a synthesized
 ends the bridge, not the transport: the owner re-enters with `/new` or
 `/attach` from the same keyboard. The terminal never leaves the driver's line
 mode, so the operator keeps `Ctrl+C`, `Ctrl+Z`, `Ctrl+\`, echo and editing.
+The line discipline caps one line at `MAX_CANON` (4 KB on Linux, 1 KB on macOS),
+so a longer paste reaches the agent truncated.
 `Ctrl+S`/`Ctrl+Q` remain pty flow control: on the `/dev/tty` surface a paused
 terminal holds the bridge's records in an ordered non-blocking queue rather
 than stalling the host; the stdout fallback keeps the synchronous write. A terminal that cannot be opened — including a stdin that is not a
@@ -335,14 +337,13 @@ discovery = config.enabled !== false && HC_TERMINAL_ID is empty   // create sock
 effect    = config.enabled !== false && a bridge has completed `welcome`
 ```
 
-- **With `HC_TERMINAL_ID` set, nothing is created.** The tty itself is the
-  discovery surface: the process reports on the terminal it was started in,
-  writes no socket and no registry entry, and leaves no file a forwarder could
-  connect to. Opening that terminal is the tty path's only discovery step, and
-  a terminal that cannot be opened — or a stdin that is not a terminal — mounts
-  neither layer, so the host keeps its sessions.
-- Emptied of that case, the **discovery layer** runs for a process without
-  `HC_TERMINAL_ID`. It creates the `0600` socket and the registry entry, and
+- **With `HC_TERMINAL_ID` set, both surfaces open.** The socket discovery
+  surface (listener, `0600` socket, registry entry) always mounts, and the tty
+  is appended as an additional reporting surface on the terminal the process was
+  started in. A terminal that cannot be opened — or a stdin that is not a
+  terminal — drops only that surface and writes the reason to stderr, so the
+  socket, its registry entry and every hosted session stay available.
+- **Without a terminal id**, the **discovery layer** is the whole surface. It creates the `0600` socket and the registry entry, and
   nothing else: no OSC, no event subscription, no stdin read, no approval
   listener.
 - The **effect layer** mounts only after a bridge has completed `welcome` — a
@@ -475,7 +476,7 @@ Node built-ins only: `node:net`, `node:fs`, `node:path`, `node:os`,
 | **P0** | plugin: `osc.ts`, `state.ts`, `transport.ts` (socket + registry); forwarder: socket client, tty writer, stdin reader | Encoder tests pass; hc shows `reported:true`, `turn:1`, echo lines through the forwarder |
 | **P1** | command grammar, `steer`/`cancel`, session selection, `list`, busy/locked refusals, child records; browser banner + `reclaim` route | Same-turn steering proven on the session log; `dsh-sup list` accurate; dual-bridge refusal; banner appears and reclaim returns approvals to the GUI |
 | **P2** | approval bridge, subagent tree claim, audit echo | Blocked root + exit 9 + `--force /approve`; subagent ask reaches root; GUI untouched when no bridge |
-| **P3** (delivered) | in-process transport: `TtyTransport` renders `OutFrame`s through `renderFrame` and reads the same `parseLine` grammar inside the web process; `apply()` selects it when `HC_TERMINAL_ID` is set, so no forwarder and no socket exist on that path | `src/tty-transport.test.ts` covers the first-session claim, re-entry, reclaim and close; the two `HC_TERMINAL_ID` cases in `src/index.test.ts` assert the tty transport mounts and nothing is opened on the socket path |
+| **P3** (delivered) | in-process transport: `TtyTransport` renders `OutFrame`s through `renderFrame` and reads the same `parseLine` grammar inside the web process; `apply()` appends it when `DSH_SUP_TERMINAL_ID` (or `HC_TERMINAL_ID`) is set, beside the socket surface, which is always open | `src/tty-transport.test.ts` covers the first-session claim, re-entry, reclaim and close; `src/index.test.ts` asserts both surfaces mount together and a failed terminal drops only the tty |
 
 Both transports share the protocol, grammar and approval modules; the
 `HC_TERMINAL_ID` selection rule in § In-process transport is the only difference,

@@ -565,21 +565,33 @@ test('openTtyIO fails closed when stdin is not a terminal', () => {
   assert.equal(no.listenerCount('data'), 0)
 })
 
-test('the terminal is never put into raw mode, so the driver keeps every control key', async () => {
+test('a mounted bridge never puts the terminal into raw mode', async () => {
+  // Drive the real transport over a real TtyIO: a regression that reinstates raw
+  // mode anywhere in the mount path fails here, not just at openTtyIO.
   const stdin = new FakeStdin()
-  // A spy on the one API that could steal Ctrl+C/Z/\\, echo and editing.
   const rawCalls: boolean[] = []
   Object.assign(stdin, { setRawMode: (mode: boolean) => { rawCalls.push(mode) } })
-  const writer = { write: () => true, close: () => {} }
-  const open = openTtyIO(stdin as TtyStdin, () => ({ ok: true, writer }))
+  const out: string[] = []
+  const open = openTtyIO(stdin as TtyStdin, () => ({
+    ok: true,
+    writer: { write: (text: string) => { out.push(text); return true }, close: () => {} },
+  }))
   assert.equal(open.ok, true)
   if (!open.ok) return
 
-  // Driving the whole lifecycle — a line through a bound bridge, then close —
-  // must never touch the terminal mode.
+  const host = new Host()
+  const transport = new TtyTransport(open.io)
+  await transport.start(host.handlers)
+  await until(() => host.bridge?.session !== undefined)
+
+  // A line typed while bound reaches the host, and no terminal mode was touched.
+  void open.io.lines()
   stdin.emit('data', 'a steer line\n')
-  open.io.close()
+  await until(() => host.lines.length === 1)
+  assert.deepEqual(host.lines, [{ text: 'a steer line', session: host.bridge?.session }])
   assert.deepEqual(rawCalls, [], 'raw mode is never entered, so ISIG/ECHO/IXON stay on')
+
+  await transport.close()
   assert.equal(stdin.listenerCount('data'), 0, 'the feed is detached on close')
 })
 
@@ -618,4 +630,36 @@ test('the stdout fallback treats a throwing write as a dead surface', () => {
   assert.equal(writer.write('boom'), false)
   assert.equal(calls, 1)
   assert.equal(writer.write('again'), false, 'the surface stays dead')
+})
+
+
+test('end of terminal input reports and finishes the bridge instead of leaving it bound', async () => {
+  const stdin = new FakeStdin()
+  const out: string[] = []
+  let closed = 0
+  const open = openTtyIO(stdin as TtyStdin, () => ({
+    ok: true,
+    writer: { write: (text: string) => { out.push(text); return true }, close: () => { closed += 1 } },
+  }))
+  assert.equal(open.ok, true)
+  if (!open.ok) return
+
+  const host = new Host()
+  const transport = new TtyTransport(open.io)
+  await transport.start(host.handlers)
+  await until(() => host.bridge?.session !== undefined)
+
+  // Ctrl+D in line mode is EOF on stdin: the keyboard is gone for good.
+  stdin.emit('end')
+  await until(() => host.byes.length === 1)
+
+  // The operator is told, the session is released, and the feed is detached.
+  const last = out.at(-1) ?? ''
+  assert.match(last, /state=error/)
+  // `msg` rides base64 inside the record, exactly as the forwarder writes it.
+  const msg = /:msg=([^:\u001b]+)/.exec(last)?.[1] ?? ''
+  assert.match(Buffer.from(msg, 'base64').toString('utf8'), /terminal input ended/)
+  assert.equal(host.bridge?.session, undefined)
+  assert.equal(closed, 1, 'the dead keyboard is closed')
+  assert.equal(stdin.listenerCount('data'), 0, 'the listeners are detached even though end stopped the feed')
 })
