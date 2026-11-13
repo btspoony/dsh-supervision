@@ -18,6 +18,7 @@ import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
 import { parseLine } from './stdin.js'
 import { registerSupervisionRoutes, supervisionState } from './routes.js'
+import { registerSkill } from './skill.js'
 import type { RouteRegistrar, SupervisionFacts, SupervisionState } from './routes.js'
 import { SocketTransport } from './transport.js'
 import type { Bridge, Transport, TransportHandlers } from './transport.js'
@@ -638,6 +639,10 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
       },
     }))
   }
+
+  // Read reflectively like the rest: a host without a skill registry still loads,
+  // and the manual is the only copy of what the agent needs to know.
+  registerSkill(ctx)
 
   ctx.effect(() => () => {
     // A disposed plugin cannot answer anything: the parked asks fail closed

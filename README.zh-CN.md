@@ -82,6 +82,10 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 只要会话处于桥接状态，GUI 输入框上方就会出现监督横幅——`Supervised from <terminal> (pid <n>) · approvals are answered there`——旁边是「Take back control」按钮。它请求回收路由；桥接被丢弃，监督方收到清除记录，`dsh-sup` 转发器以 `0` 退出。
 
+### 给 agent 的技能
+
+插件自带 `use-dsh-supervision` 技能：被监督会话里的 agent 因此知道需要同版本的 `dsh-sup` 转发器，会用 `dsh-sup --version` 核对，并在用户同意后才提出安装。`dsh-sup --skill` 会打印转发器的完整手册。
+
 ## 如何上报
 
 一个 `dsh web` 进程拥有一棵会话树，插件挂在其中，开控制套接口；当进程本身跑在被监督的终端里时，再叠加一条进程内 tty 通路。
