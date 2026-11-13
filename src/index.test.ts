@@ -1113,7 +1113,7 @@ test('the attached session mirrors its conversation; a child session emits none'
       { t: 'mirror', item: { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'start', turn: 1 } },
       {
         t: 'mirror',
-        item: { k: 'tool', callId: 'c1', name: 'bash', args: '', state: 'ok', detail: 'a.txt', ms: 12, turn: 1 },
+        item: { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'a.txt', ms: 12, turn: 1 },
       },
     ])
     // Nothing else reaches the wire: not the synthetic message, not the child.

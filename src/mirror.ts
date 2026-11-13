@@ -54,10 +54,14 @@ export interface SessionEvent {
   }
 }
 
-/** What one started call leaves behind for its result: its name and start time. */
+/**
+ * What one started call leaves behind for its result. The host's result event
+ * carries neither name nor arguments, so the result prints what its call said.
+ */
 export interface CallRecord {
   readonly name: string
-  readonly at: number
+  readonly args: string
+  readonly time: number
 }
 
 /**
@@ -105,17 +109,18 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
     case 'tool/call': {
       const { callId, name } = data
       if (callId === undefined || callId === '' || name === undefined || name === '') return undefined
-      remember(calls, callId, { name, at: event.time ?? Date.now() })
-      return { k: 'tool', callId, name, args: head(data.arguments ?? '', MAX_ITEM_ARGS), state: 'start', turn }
+      const args = head(data.arguments ?? '', MAX_ITEM_ARGS)
+      remember(calls, callId, { time: event.time ?? Date.now(), name, args })
+      return { k: 'tool', callId, name, args, state: 'start', turn }
     }
     case 'tool/result': {
       const callId = data.message?.toolCallId
       if (callId === undefined || callId === '') return undefined
       const record = calls.get(callId)
       calls.delete(callId)
-      // The call's name exists only in its own event, so a result whose call
-      // this bridge never saw (older than the bound, or before the attach) has
-      // nothing honest to print.
+      // The call's name and arguments exist only in its own event, so a result
+      // whose call this bridge never saw (older than the bound, or before the
+      // attach) has nothing honest to print.
       if (record === undefined) return undefined
       const blocks = data.message?.content ?? []
       const last = blocks.filter(block => block.type === 'text' && (block.text ?? '').trim() !== '').at(-1)?.text
@@ -124,10 +129,10 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
         k: 'tool',
         callId,
         name: record.name,
-        args: '',
+        args: record.args,
         state: data.message?.isError === true ? 'error' : 'ok',
         ...(detail === '' ? {} : { detail }),
-        ms: Math.max(0, (event.time ?? Date.now()) - record.at),
+        ms: Math.max(0, (event.time ?? Date.now()) - record.time),
         turn,
       }
     }

@@ -110,7 +110,7 @@ test('a tool call starts, remembers its time, and its result reports ms and deta
     k: 'tool',
     callId: 'c1',
     name: 'bash',
-    args: '',
+    args: '{"command":"ls"}',
     state: 'ok',
     detail: 'a.txt',
     ms: 12,
@@ -171,13 +171,16 @@ test('the call table is bounded and drops the oldest entry', () => {
   assert.equal(calls.has(`c${String(MAX_CALLS + 3)}`), true, 'the newest call is kept')
 })
 
-test('the args cap holds on a tool call', () => {
-  const item = mirrorOf(
-    { type: 'tool/call', data: { callId: 'c9', name: 'bash', arguments: 'a'.repeat(MAX_ITEM_ARGS * 2) } },
-    table(),
-  )
+test('the args cap holds on a tool call and on its result', () => {
+  const calls = table()
+  const args = 'a'.repeat(MAX_ITEM_ARGS * 2)
+  const item = mirrorOf({ type: 'tool/call', time: 0, data: { callId: 'c9', name: 'bash', arguments: args } }, calls)
   assert.ok(item !== undefined && item.k === 'tool')
   assert.equal(item.args.length, MAX_ITEM_ARGS)
+
+  const result = mirrorOf({ type: 'tool/result', time: 1, data: { message: { toolCallId: 'c9', content: [] } } }, calls)
+  assert.ok(result !== undefined && result.k === 'tool')
+  assert.equal(result.args, item.args, 'the result echoes the call it remembers')
 })
 
 test('every other event type maps to nothing', () => {
