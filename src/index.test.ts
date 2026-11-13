@@ -53,7 +53,7 @@ after(() => {
 interface FakeAgent {
   id: string
   status: 'idle' | 'running'
-  session: { id: string; header: { cwd?: string } }
+  session: { id: string; header: { id?: string; cwd?: string } }
   steer(message: UserMessage): void
   cancel(cause: { readonly kind: 'user' }): void
 }
@@ -268,7 +268,7 @@ class FakeHost {
     const agent: FakeAgent = {
       id,
       status: 'idle',
-      session: { id, header: { cwd } },
+      session: { id, header: { id, cwd } },
       steer: message => { this.steered.push({ session: id, message }) },
       cancel: cause => { this.cancelled.push(`${id}:${cause.kind}`) },
     }
@@ -843,6 +843,52 @@ test('list answers from the sidebar controller and drops blank or unowned sessio
     [['session-live', true], ['session-cold', false]],
     'cold sessions are listed; blank, unowned and cwd-less ones are not',
   )
+  host.dispose()
+})
+
+test('a bridged session no Workspace owns is still listed', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.controllerItems = [
+    { sessionId: 'session-owned', cwd: '/repo', blank: false, agentAvailable: true },
+    { sessionId: 'session-stray', cwd: '/tmp/no-workspace', blank: false, agentAvailable: true },
+  ]
+  host.workspaceRecords = [{ path: '/repo', sessionIds: ['session-owned'] }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+
+  client.write({ t: 'list' })
+  const [first] = await client.take(1)
+  const before = first?.t === 'sessions' ? first.items : []
+  assert.deepEqual(before.map(item => item.id), ['session-owned'], 'an unowned session is not offered')
+
+  // A session created in a directory with no Workspace is real and unowned; the
+  // bridge holding it is the one row the operator must still find.
+  const owner = await attached(host, dir, 'session-stray')
+  client.write({ t: 'list' })
+  await until(() => client.frames.length >= 2, 'the second listing')
+  const second = client.frames.at(-1)
+  const after = second?.t === 'sessions' ? second.items : []
+  assert.equal(after.find(item => item.id === 'session-stray')?.bridged, true)
+  owner.socket.end()
+  host.dispose()
+})
+
+test('the live-agent fallback still hides a blank session', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  // No controller and no query: the partial-host shape the fallback exists for.
+  host.add('session-empty', '/repo')
+  host.blankSessions = ['session-empty']
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+
+  client.write({ t: 'list' })
+  const [answer] = await client.take(1)
+  const items = answer?.t === 'sessions' ? answer.items : []
+  assert.deepEqual(items, [], 'a live session with no turn stays out of the listing')
   host.dispose()
 })
 

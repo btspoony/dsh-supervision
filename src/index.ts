@@ -421,8 +421,12 @@ function sessionQueryOf(value: unknown): SessionQueryLike | undefined {
  * @param ctx - the plugin context.
  * @returns one row per visible session, blank included so the caller decides.
  */
-async function visibleSessions(ctx: PluginContext): Promise<readonly VisibleSession[]> {
+async function visibleSessions(ctx: PluginContext, isBridged: (session: string) => boolean): Promise<readonly VisibleSession[]> {
   const owned = workspaceSessions(ctx.get?.('workspaceRegistry'))
+  // Ownership narrows the listing, but it must never hide the session a bridge
+  // is steering right now: a session created in a directory with no Workspace is
+  // real, bridged and unowned — exactly the row the operator needs most.
+  const keep = (session: string): boolean => owned === undefined || owned.has(session) || isBridged(session)
   // The controller is the service the sidebar itself calls: it carries the
   // blank flag and the live agent for both hot and cold sessions. Without it,
   // the raw query plus the projection cache answer the same question.
@@ -431,21 +435,23 @@ async function visibleSessions(ctx: PluginContext): Promise<readonly VisibleSess
     const { items } = await controller.list({})
     return items
       .filter(item => item.cwd !== undefined)
-      .filter(item => owned === undefined || owned.has(item.sessionId))
+      .filter(item => keep(item.sessionId))
       .map(item => ({ id: item.sessionId, cwd: item.cwd ?? '', live: item.agentAvailable, blank: item.blank }))
   }
   const query = sessionQueryOf(ctx.get?.('sessionQuery'))
   if (query === undefined) {
-    return ctx.agents.list().map(agent => ({
+    const agents = ctx.agents.list()
+    const blank = blankSessions(ctx, agents.map(agent => agent.session.header))
+    return agents.map(agent => ({
       id: agent.session.id,
       cwd: agent.session.header?.cwd ?? '',
       live: true,
-      blank: false,
+      blank: blank.has(agent.session.id),
     }))
   }
   const records = (await query.listSessions())
     .filter(record => record.header.cwd !== undefined)
-    .filter(record => owned === undefined || owned.has(record.header.id))
+    .filter(record => keep(record.header.id))
   const blank = blankSessions(ctx, records.map(record => record.header))
   return records.map(record => ({
     id: record.header.id,
@@ -1188,7 +1194,7 @@ function handlersFor(
       // listing that only saw live agents hid every session created before this
       // process started. A host without the query service still gets the live
       // set, which is what it can answer synchronously.
-      const rows = await visibleSessions(ctx)
+      const rows = await visibleSessions(ctx, session => bridged.has(session))
       // An archived session is hidden from the sidebar, so listing it would offer
       // an id nobody can open — unless a bridge holds it right now: that bridge
       // is live and the operator must still see what is steering the session.
