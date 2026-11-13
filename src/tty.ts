@@ -6,9 +6,14 @@
  * they do for the forwarder. Nothing here throws: a missing terminal is a
  * reported reason, not a dead `dsh web`, and a failed write is reported to the
  * caller rather than raised into the host.
+ *
+ * The terminal stays in the driver's own line mode. Raw mode disables ISIG,
+ * ECHO, IXON and line editing, which steals Ctrl+C, Ctrl+Z, Ctrl+\\, Ctrl+S/Q
+ * and input echo from the operator; the bridge only needs whole lines, and line
+ * mode delivers those.
  */
 
-import { closeSync, openSync, writeSync } from 'node:fs'
+import { createWriteStream, openSync } from 'node:fs'
 import { splitLines } from './stdin.js'
 import type { TtyIO } from './tty-transport.js'
 
@@ -27,61 +32,6 @@ export type TtyWriterOpen =
   | { readonly ok: true; readonly writer: TtyWriter }
   | { readonly ok: false; readonly reason: string }
 
-/**
- * Open the process's own terminal for reporting.
- * @returns the writer, or the reason neither `/dev/tty` nor a TTY stdout exists.
- */
-export function openDevTty(): TtyWriterOpen {
-  try {
-    const fd = openSync('/dev/tty', 'w')
-    // shortcut: the write is still synchronous, so a stopped pty (Ctrl-S) will
-    // stall this process's event loop. An async sink would buffer without bound
-    // instead, which is worse in-process; upgrade when the terminal can be
-    // written from a child process or with bounded buffering.
-    return {
-      ok: true,
-      writer: {
-        write: text => {
-          try {
-            writeSync(fd, text)
-            return true
-          } catch {
-            // A pty that went away (`EIO`) or a stale fd (`EBADF`) is a dead
-            // surface; the caller finishes the bridge instead of throwing here,
-            // where a host emitter would turn it into a dead `dsh web`.
-            return false
-          }
-        },
-        close: () => {
-          try {
-            closeSync(fd)
-          } catch {
-            // Already closed by the OS at process exit.
-          }
-        },
-      },
-    }
-  } catch {
-    // A container, a remote shell or a redirected `dsh web` has no `/dev/tty`;
-    // stdout is the honest second choice, and a pipe is no surface at all.
-    if (process.stdout.isTTY !== true) {
-      return { ok: false, reason: 'no tty: /dev/tty is unavailable and stdout is not a terminal' }
-    }
-    return {
-      ok: true,
-      writer: {
-        write: text => {
-          // A full stdout buffer is backpressure, not a dead surface; a vanished
-          // pipe reports through `error` on the stream, never through this value.
-          process.stdout.write(text)
-          return true
-        },
-        close: () => {},
-      },
-    }
-  }
-}
-
 /** The stdin surface `lineFeed` needs, so a fake stream can stand in for it. */
 export interface LineSource {
   setEncoding(encoding: BufferEncoding): unknown
@@ -96,8 +46,6 @@ export interface LineSource {
 /** The stdin surface `openTtyIO` needs, so a stub can stand in for a real one. */
 export type TtyStdin = LineSource & {
   readonly isTTY?: boolean
-  readonly isRaw?: boolean
-  setRawMode?(raw: boolean): void
 }
 
 /**
@@ -143,13 +91,11 @@ export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; s
       }
     },
     stop(): void {
-      if (stopped) return
-      stopped = true
-      // The buffered lines were typed for a session that no longer has a
-      // reader: replaying them onto a stopped feed is how an orphan session
-      // gets created, so the queue dies with the feed.
+      // Idempotent but never a no-op: an `end` already set `stopped`, and the
+      // listeners must still be detached or they outlive the bridge.
       complete.length = 0
       rest = ''
+      stopped = true
       input.off('data', onData)
       input.off('end', onEnd)
       input.pause()
@@ -159,15 +105,99 @@ export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; s
 }
 
 /**
+ * A non-blocking writer over an open terminal fd. A synchronous write stalls the
+ * whole host when the operator presses Ctrl+S (XOFF stops pty output); with a
+ * stream the records queue in order and the event loop keeps servicing sessions,
+ * socket frames and approvals until Ctrl+Q resumes the terminal.
+ * @param fd - an open writable terminal fd; the stream owns closing it.
+ * @returns the writer the transport renders frames through.
+ */
+function streamWriter(fd: number): TtyWriter {
+  const stream = createWriteStream('', { fd, autoClose: true })
+  // A pty that vanished (`EIO`) or a stale fd (`EBADF`) surfaces here; the next
+  // write reports the dead surface so the caller finishes the bridge instead of
+  // throwing into a host emitter.
+  let dead = false
+  stream.on('error', () => { dead = true })
+  return {
+    write: text => {
+      if (dead || stream.destroyed) return false
+      try {
+        stream.write(text)
+        return true
+      } catch {
+        dead = true
+        return false
+      }
+    },
+    close: () => {
+      try {
+        stream.end()
+      } catch {
+        // Already closed by the OS at process exit.
+      }
+    },
+  }
+}
+
+/**
+ * Open the process's own terminal for reporting.
+ * @returns the writer, or the reason neither `/dev/tty` nor a TTY stdout exists.
+ */
+export function openDevTty(): TtyWriterOpen {
+  try {
+    const fd = openSync('/dev/tty', 'w')
+    return { ok: true, writer: streamWriter(fd) }
+  } catch {
+    // A container, a remote shell or a redirected `dsh web` has no `/dev/tty`;
+    // stdout is the honest second choice, and a pipe is no surface at all.
+    if (process.stdout.isTTY !== true) {
+      return { ok: false, reason: 'no tty: /dev/tty is unavailable and stdout is not a terminal' }
+    }
+    return { ok: true, writer: stdoutWriter(process.stdout) }
+  }
+}
+
+/** The stdout surface `stdoutWriter` writes to; a stub stands in for it. */
+export interface StdoutLike {
+  write(text: string): unknown
+  on(event: 'error', listener: (error: Error) => void): unknown
+  readonly destroyed?: boolean
+}
+
+/**
+ * The fallback writer. It shares the primary writer's failure contract: a
+ * vanished pty emits `error` on stdout, and an unhandled one would take down
+ * the host, so the surface goes dead and the caller finishes the bridge.
+ * @param stdout - the process's stdout, or a stub in a test.
+ * @returns the writer the transport renders frames through.
+ */
+export function stdoutWriter(stdout: StdoutLike = process.stdout): TtyWriter {
+  let dead = false
+  stdout.on('error', () => { dead = true })
+  return {
+    write: text => {
+      if (dead || stdout.destroyed === true) return false
+      try {
+        stdout.write(text)
+        return true
+      } catch {
+        dead = true
+        return false
+      }
+    },
+    close: () => {},
+  }
+}
+
+/**
  * Opens the reporting surface and the owning keyboard.
  * @param stdin - the process's own stdin, or a stub in a test.
- * @param interrupt - delivers the stop signal a raw-mode Ctrl+C stands for;
- *   injectable so a test never signals its own runner.
- * @returns the io, or the reason neither surface exists.
+ * @param openWriter - the terminal writer opener; a stub stands in for `/dev/tty`.
+ * @returns the io, or the reason no surface exists.
  */
 export function openTtyIO(
   stdin: TtyStdin = process.stdin,
-  interrupt: () => void = () => { process.kill(process.pid, 'SIGINT') },
   openWriter: () => TtyWriterOpen = openDevTty,
 ): TtyOpen {
   // The read side is the owner's keyboard or nothing: a redirected stdin is a
@@ -180,39 +210,25 @@ export function openTtyIO(
   if (!opened.ok) return opened
   const { write, close: closeWriter } = opened.writer
 
-  // A terminal stdin is guaranteed above, so `setRawMode` is present in
-  // production; the optional call keeps a test stub without it usable.
-  const input = stdin
-  /** The mode the host was in when we mounted; restored whenever unbridged. */
-  const previousRaw = input.isRaw === true
-  const setMode = (raw: boolean): void => { input.setRawMode?.(raw) }
-  const feed = lineFeed(input)
+  // The driver's own line mode is kept: editing, echo, Ctrl+C/Z/\\ and Ctrl+S/Q
+  // behave exactly as they do without the plugin, while stdin still yields
+  // complete lines.
+  // shortcut: the line discipline caps one line at MAX_CANON (4096 bytes on
+  // Linux, 1024 on macOS); a longer paste is truncated by the kernel before this
+  // process sees it. Revisit if steering with multi-kilobyte prompts becomes a
+  // real workflow — the fix is a second, opt-in raw-mode input path.
+  const feed = lineFeed(stdin)
   let closed = false
-  // Raw mode disables the terminal's ISIG, so Ctrl+C arrives as a byte and
-  // would otherwise be swallowed as stray input. A supervisor must never eat
-  // its own stop key: restore the terminal, then hand the host the signal that
-  // byte stands for.
-  const onInterrupt = (chunk: string): void => {
-    if (!chunk.includes('\u0003')) return
-    setMode(previousRaw)
-    interrupt()
-  }
-  input.on('data', onInterrupt)
 
   return {
     ok: true,
     io: {
       write,
       lines: () => feed.lines(),
-      // Raw only while a bridge is bound: cooked mode keeps line editing normal
-      // for the `/new` and `/attach` re-entry lines.
-      setRaw: raw => { setMode(raw ? true : previousRaw) },
       close: () => {
         if (closed) return
         closed = true
-        input.off('data', onInterrupt)
         feed.stop()
-        setMode(previousRaw)
         closeWriter()
       },
     },

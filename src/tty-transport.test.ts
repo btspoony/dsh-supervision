@@ -10,7 +10,7 @@ import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
 import { PROTO } from 'dsh-supervision-protocol'
 import type { HelloFrame } from 'dsh-supervision-protocol'
-import { lineFeed, openTtyIO } from './tty.js'
+import { lineFeed, openTtyIO, stdoutWriter } from './tty.js'
 import type { LineSource, TtyStdin } from './tty.js'
 import { TtyTransport } from './tty-transport.js'
 import type { TtyIO } from './tty-transport.js'
@@ -49,7 +49,6 @@ class Latch {
 /** A terminal that records what it received and replays lines a test pushes. */
 class FakeTty implements TtyIO {
   readonly out: string[] = []
-  readonly raw: boolean[] = []
   closes = 0
   /** When set, every write throws: a pty the process can no longer reach. */
   broken = false
@@ -63,10 +62,6 @@ class FakeTty implements TtyIO {
     return true
   }
 
-  setRaw(raw: boolean): void {
-    this.raw.push(raw)
-  }
-
   close(): void {
     this.closes += 1
     this.#ended = true
@@ -77,10 +72,6 @@ class FakeTty implements TtyIO {
   type(line: string): void {
     this.#queue.push(line)
     this.#wake?.()
-  }
-
-  get rawNow(): boolean {
-    return this.raw.at(-1) ?? false
   }
 
   async *lines(): AsyncGenerator<string> {
@@ -152,10 +143,9 @@ async function mounted(): Promise<{ io: FakeTty; host: Host; transport: TtyTrans
 test('start creates the first session from the bare default hello', async () => {
   const { io, host } = await mounted()
   assert.deepEqual(host.hellos, [{ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: process.cwd() } }])
-  // `welcome` reaches the terminal as the root idle record, raw mode is on.
+  // `welcome` reaches the terminal as the root idle record.
   assert.equal(io.out.length, 1)
   assert.match(io.out[0] ?? '', /state=idle/)
-  assert.deepEqual(io.raw, [true])
 })
 
 test('send renders through renderFrame and drops frames the tty cannot show', async () => {
@@ -187,15 +177,13 @@ test('a refused create renders the error record and stays mounted', async () => 
   // `msg` rides base64 inside the OSC record, exactly as the forwarder writes it.
   const msg = /:msg=([^:\u001b]+)/.exec(io.out.at(-1) ?? '')?.[1] ?? ''
   assert.equal(Buffer.from(msg, 'base64').toString('utf8'), 'create-failed: no model')
-  // The bridge is finished, so the terminal is back in cooked mode.
-  assert.equal(io.rawNow, false)
+  // The bridge is finished.
   assert.deepEqual(host.byes, [])
 
   // The operator retries on the same keyboard: the transport never unmounted.
   host.refuse = undefined
   io.type('/new /tmp')
   await until(() => host.hellos.length === 2)
-  await until(() => io.rawNow)
   assert.deepEqual(host.hellos[1], { t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/tmp' } })
 })
 
@@ -266,7 +254,6 @@ test('reclaim still clears the record when the teardown bye throws', async () =>
   assert.equal(transport.reclaim('session-1'), true)
   assert.deepEqual(host.byes, ['session-1'])
   assert.match(io.out.at(-1) ?? '', /state=clear/)
-  assert.equal(io.rawNow, false)
 })
 
 test('a throwing bye does not escape a write that killed the surface', async () => {
@@ -278,7 +265,6 @@ test('a throwing bye does not escape a write that killed the surface', async () 
   // frame; the bridge is finished either way.
   assert.doesNotThrow(() => { transport.send({ t: 'echo', text: 'boom' }) })
   assert.deepEqual(host.byes, ['session-1'])
-  assert.equal(io.rawNow, false)
 })
 
 test('a throwing bye does not escape a bind that switches sessions', async () => {
@@ -371,7 +357,6 @@ test('reclaim returns false when the session is not bound', async () => {
   const { io, host, transport } = await mounted()
   assert.equal(transport.reclaim('session-other'), false)
   assert.deepEqual(host.byes, [])
-  assert.equal(io.rawNow, true)
 })
 
 test('reclaim drops the binding, says bye, clears the record and stays mounted', async () => {
@@ -380,12 +365,10 @@ test('reclaim drops the binding, says bye, clears the record and stays mounted',
   assert.equal(transport.reclaim('session-1'), true)
   assert.deepEqual(host.byes, ['session-1'])
   assert.match(io.out.at(-1) ?? '', /state=clear/)
-  assert.equal(io.rawNow, false)
 
   // Mounted: a re-entry line binds again.
   io.type('/attach session-2')
   await until(() => host.hellos.length === 2)
-  await until(() => io.rawNow)
   assert.deepEqual(host.hellos[1], { t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-2' })
 })
 
@@ -403,7 +386,6 @@ test('a claim that settles after close binds nothing', async () => {
   hold.open()
   await started
   assert.equal(host.bridge?.session, undefined)
-  assert.equal(io.rawNow, false)
   assert.deepEqual(host.byes, [])
 })
 
@@ -413,7 +395,6 @@ test('close says bye for the bound session, clears, and releases the terminal', 
   await transport.close()
   assert.deepEqual(host.byes, ['session-1'])
   assert.match(io.out.at(-1) ?? '', /state=clear/)
-  assert.equal(io.rawNow, false)
   assert.equal(io.closes, 1)
 
   // Nothing is read once closed, even if the terminal still delivers a line.
@@ -424,24 +405,11 @@ test('close says bye for the bound session, clears, and releases the terminal', 
 
 /** stdin's shape for `lineFeed`: only the events and mode calls it uses. */
 class FakeStdin extends EventEmitter implements LineSource {
-  readonly modes: boolean[] = []
   encoding: BufferEncoding | undefined
   resumed = false
   paused = false
   /** A terminal stdin; `undefined` models a pipe, as the real field does. */
   isTTY: boolean | undefined = true
-
-  /**
-   * The real stdin's `setRawMode` only exists on a terminal; this fake offers it
-   * so `setRaw`'s delegation can be observed.
-   */
-  setRawMode(mode: boolean): void {
-    this.modes.push(mode)
-  }
-
-  get isRaw(): boolean {
-    return this.modes.at(-1) ?? false
-  }
 
   setEncoding(encoding: BufferEncoding): this {
     this.encoding = encoding
@@ -550,7 +518,6 @@ test('a write that throws ends the bridge instead of reaching the caller', async
 
   // The bridge is finished through the same teardown a socket drop runs …
   assert.deepEqual(host.byes, ['session-1'])
-  assert.equal(io.rawNow, false)
   // … the dead surface is released, and nothing more is ever written to it.
   assert.equal(io.closes, 1)
   io.broken = false
@@ -569,7 +536,6 @@ test('a throw from the line handler runs bye for the bound session, then release
   // The handlers' bridge is finished, not just the transport's binding: without
   // `bye` the session's listeners and parked asks outlive it.
   assert.deepEqual(host.byes, ['session-1'])
-  assert.equal(io.rawNow, false)
   // The failure is still reported to the terminal, and that record stands.
   assert.match(io.out.at(-1) ?? '', /state=error/)
 })
@@ -599,29 +565,101 @@ test('openTtyIO fails closed when stdin is not a terminal', () => {
   assert.equal(no.listenerCount('data'), 0)
 })
 
-test('raw mode hands Ctrl+C back as SIGINT instead of swallowing it', () => {
+test('a mounted bridge never puts the terminal into raw mode', async () => {
+  // Drive the real transport over a real TtyIO: a regression that reinstates raw
+  // mode anywhere in the mount path fails here, not just at openTtyIO.
   const stdin = new FakeStdin()
-  let interrupts = 0
-  const writer = { write: () => true, close: () => {} }
-  const open = openTtyIO(
-    stdin as TtyStdin,
-    () => { interrupts += 1 },
-    () => ({ ok: true, writer }),
-  )
+  const rawCalls: boolean[] = []
+  Object.assign(stdin, { setRawMode: (mode: boolean) => { rawCalls.push(mode) } })
+  const out: string[] = []
+  const open = openTtyIO(stdin as TtyStdin, () => ({
+    ok: true,
+    writer: { write: (text: string) => { out.push(text); return true }, close: () => {} },
+  }))
   assert.equal(open.ok, true)
   if (!open.ok) return
 
-  // A bridge is bound: the terminal goes raw and ISIG is off.
-  open.io.setRaw(true)
-  assert.equal(stdin.isRaw, true)
-  stdin.emit('data', '\u0003')
-  assert.equal(interrupts, 1, 'the stop key reaches the host as its signal')
-  assert.equal(stdin.isRaw, false, 'the terminal is cooked before the signal runs')
+  const host = new Host()
+  const transport = new TtyTransport(open.io)
+  await transport.start(host.handlers)
+  await until(() => host.bridge?.session !== undefined)
 
-  // Ordinary input never fires it, and re-entering raw does not stack listeners.
-  open.io.setRaw(true)
-  stdin.emit('data', 'a line with no stop')
-  assert.equal(interrupts, 1)
-  open.io.close()
-  assert.equal(stdin.listenerCount('data'), 0, 'close detaches the stop listener')
+  // A line typed while bound reaches the host, and no terminal mode was touched.
+  void open.io.lines()
+  stdin.emit('data', 'a steer line\n')
+  await until(() => host.lines.length === 1)
+  assert.deepEqual(host.lines, [{ text: 'a steer line', session: host.bridge?.session }])
+  assert.deepEqual(rawCalls, [], 'raw mode is never entered, so ISIG/ECHO/IXON stay on')
+
+  await transport.close()
+  assert.equal(stdin.listenerCount('data'), 0, 'the feed is detached on close')
+})
+
+
+test('the stdout fallback reports a vanished surface instead of throwing', () => {
+  const listeners: ((error: Error) => void)[] = []
+  let wrote = 0
+  const stdout = {
+    destroyed: false,
+    write: () => { wrote += 1; return true },
+    on: (event: 'error', listener: (error: Error) => void) => {
+      if (event === 'error') listeners.push(listener)
+      return stdout
+    },
+  }
+  const writer = stdoutWriter(stdout as never)
+  assert.equal(writer.write('first'), true)
+  assert.equal(wrote, 1)
+
+  // A vanished pty emits 'error' on stdout; the writer must swallow it and
+  // report a dead surface, or Node turns it into an uncaught exception that
+  // takes the whole host down.
+  assert.equal(listeners.length, 1, 'the writer subscribes to the surface it writes to')
+  for (const listener of listeners) listener(new Error('EIO'))
+  assert.equal(writer.write('after'), false)
+  assert.equal(wrote, 1, 'a dead surface is never written again')
+})
+
+test('the stdout fallback treats a throwing write as a dead surface', () => {
+  let calls = 0
+  const stdout = {
+    write: () => { calls += 1; throw new Error('EBADF') },
+    on: () => stdout,
+  }
+  const writer = stdoutWriter(stdout as never)
+  assert.equal(writer.write('boom'), false)
+  assert.equal(calls, 1)
+  assert.equal(writer.write('again'), false, 'the surface stays dead')
+})
+
+
+test('end of terminal input reports and finishes the bridge instead of leaving it bound', async () => {
+  const stdin = new FakeStdin()
+  const out: string[] = []
+  let closed = 0
+  const open = openTtyIO(stdin as TtyStdin, () => ({
+    ok: true,
+    writer: { write: (text: string) => { out.push(text); return true }, close: () => { closed += 1 } },
+  }))
+  assert.equal(open.ok, true)
+  if (!open.ok) return
+
+  const host = new Host()
+  const transport = new TtyTransport(open.io)
+  await transport.start(host.handlers)
+  await until(() => host.bridge?.session !== undefined)
+
+  // Ctrl+D in line mode is EOF on stdin: the keyboard is gone for good.
+  stdin.emit('end')
+  await until(() => host.byes.length === 1)
+
+  // The operator is told, the session is released, and the feed is detached.
+  const last = out.at(-1) ?? ''
+  assert.match(last, /state=error/)
+  // `msg` rides base64 inside the record, exactly as the forwarder writes it.
+  const msg = /:msg=([^:\u001b]+)/.exec(last)?.[1] ?? ''
+  assert.match(Buffer.from(msg, 'base64').toString('utf8'), /terminal input ended/)
+  assert.equal(host.bridge?.session, undefined)
+  assert.equal(closed, 1, 'the dead keyboard is closed')
+  assert.equal(stdin.listenerCount('data'), 0, 'the listeners are detached even though end stopped the feed')
 })

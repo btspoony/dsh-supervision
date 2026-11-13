@@ -21,9 +21,7 @@ export interface TtyIO {
   write(text: string): boolean
   /** Complete input lines from the owning keyboard, already split. */
   lines(): AsyncIterable<string>
-  /** Raw mode while a bridge is bound; the previous mode otherwise. */
-  setRaw(raw: boolean): void
-  /** Release the terminal and restore its prior state; idempotent. */
+  /** Release the terminal; idempotent. */
   close(): void
 }
 
@@ -124,7 +122,6 @@ export class TtyTransport implements Transport {
     if (this.#closed || this.#dead) return false
     const previous = this.#session
     this.#session = session
-    this.#io.setRaw(true)
     // A switch releases the old session, exactly as the socket transport does.
     if (previous !== undefined && previous !== session) this.#teardown(previous)
     return true
@@ -143,10 +140,9 @@ export class TtyTransport implements Transport {
     }
   }
 
-  /** Holds no session from now on: the terminal goes back to cooked mode. */
+  /** Holds no session from now on. */
   #release(): void {
     this.#session = undefined
-    this.#io.setRaw(false)
   }
 
   /** Renders one frame to the terminal; frames with no tty rendering are dropped. */
@@ -177,14 +173,19 @@ export class TtyTransport implements Transport {
     const session = this.#session
     if (this.#closed || session === undefined) return
     // The surface this bridge reported through is gone, so the bridge is
-    // finished: release (raw mode back), then run the same `bye` a socket drop
+    // finished: release the binding, then run the same `bye` a socket drop
     // does — it drops the session's listeners and fails its parked asks closed.
     // The transport stays mounted, not the bridge.
     this.#release()
     this.#teardown(session)
   }
 
-  /** Reads lines one at a time, so an in-flight hello holds the lines behind it. */
+  /**
+   * Reads lines one at a time, so an in-flight hello holds the lines behind it.
+   * A feed that ends (Ctrl+D on a terminal in line mode, a closed stdin) is a
+   * dead keyboard: the bridge must be told, or it stays bound with no way to
+   * steer and the operator sees nothing.
+   */
   async #consume(): Promise<void> {
     try {
       for await (const line of this.#io.lines()) {
@@ -211,6 +212,22 @@ export class TtyTransport implements Transport {
       }
     } catch {
       // The terminal itself is gone: there is no surface left to report to.
+    }
+    // The loop ends only on `close`, on death, or on end-of-input. The first two
+    // have already done their teardown; an ended feed has not.
+    if (this.#closed || this.#dead) return
+    const session = this.#session
+    // Report before marking the surface dead: a dead surface drops every frame.
+    this.#write({ t: 'error', code: 'internal', message: 'terminal input ended (Ctrl+D); restart dsh web to supervise again' })
+    this.#dead = true
+    if (session !== undefined) {
+      this.#release()
+      this.#teardown(session)
+    }
+    try {
+      this.#io.close()
+    } catch {
+      // Nothing left to release.
     }
   }
 

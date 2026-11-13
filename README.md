@@ -60,7 +60,7 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 Backends are found through `$DSH_HOME/supervision` (`~/.dsh/supervision` when `DSH_HOME` is unset). A bridge needs exactly one live backend; with several, the refusal names each candidate's `pid` and socket, and `--pid` picks one. `--cwd` applies to `new` and `list` only; `list` without it shows every session, with the CWD column naming where each one lives.
 
-While a bridge is bound the terminal runs in raw mode, so Ctrl+C would otherwise arrive as a stray byte and be swallowed. The plugin restores the terminal and delivers the signal to `dsh web`, so the process still stops normally from its own terminal.
+The bridge reads stdin in the terminal's own line mode — it never enters raw mode — so `Ctrl+C`, `Ctrl+Z`, `Ctrl+\`, input echo and line editing keep working as they do without the plugin. `Ctrl+S`/`Ctrl+Q` stay the terminal driver's flow control: on the `/dev/tty` surface a paused terminal holds the bridge's records in an ordered queue instead of blocking the host, and they flush on resume. The stdout fallback (no controlling terminal) keeps a synchronous write, so there a paused terminal still stalls it. Operator input is read a line at a time, after Enter; the line discipline caps one line at its `MAX_CANON` (4 KB on Linux, 1 KB on macOS), so a much longer paste reaches the agent truncated.
 
 **Empty sessions stay out of the web UI.** A session created here is attached to its project, but the DSH sidebar lists a session only after its first message. Until then it exists in `dsh-sup list` and on the bridge, with no row under the project. Send one line from the terminal (or attach and steer) and it appears.
 
