@@ -51,7 +51,7 @@ dsh-sup --pid 4711 new                   # pick the backend when several dsh web
 dsh-sup list                             # list every session on every live backend
 ```
 
-`list` prints one table for every live backend and binds nothing. Archived sessions are omitted (the sidebar hides them too), except one an active bridge holds. `PID` names the `dsh web` process a row came from, so a multi-backend listing stays attributable:
+`list` prints one table for every live backend and binds nothing. It reads the same session account as the sidebar: a persisted session appears even when no agent is loaded for it (`LIVE no`), while archived sessions (unless an active bridge holds one) and blank sessions (never had a turn) are omitted. `PID` names the `dsh web` process a row came from, so a multi-backend listing stays attributable:
 
 ```text
 SESSION            PID    CWD                LIVE  BRIDGED
