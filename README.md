@@ -96,14 +96,14 @@ One `dsh web` process owns one session tree; the plugin mounts in it and opens i
 dsh web (the process you already run)
 └── dsh-supervision plugin
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
-      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo lines ──▶ supervisor (reads OSC 7501)
+      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo + mirror lines ──▶ supervisor (reads OSC 7501)
       └── in-process tty   (added when DSH_SUP_TERMINAL_ID or HC_TERMINAL_ID is set)
             └── OSC 7501 written to this process's own /dev/tty
 ```
 
 **Activation.** The plugin always opens its socket discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `DSH_SUP_TERMINAL_ID` non-empty (or herdr-core's `HC_TERMINAL_ID`) the process also supervises the terminal it runs in: the same records go to its own `/dev/tty`, while the socket stays open for a `dsh-sup` elsewhere. A session still has exactly one bridge across both surfaces, so a second attach is refused as `busy`. If the terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and keeps the socket surface.
 
-**Transcript output.** The bridge also forwards the conversation itself. A `mirror` frame carries one item — an operator message, an assistant reply with its `⟦↑in ↓out⟧` usage line, or a tool call — and the forwarder writes it as append-only lines: no colour, no markdown, no spinner, no alternate screen, no line ever rewritten, and nothing from before the attach replayed. OSC 7501 records keep going to `/dev/tty`, so a real supervisor still reads the machine surface; the transcript lines go to stdout, and only when stdout is a TTY, so `dsh-sup … | tee log` stays machine-clean. `echo` lines reach exactly one sink: stdout when the operator has a TTY, `/dev/tty` otherwise.
+**Transcript output.** The bridge also forwards the conversation itself. A `mirror` frame carries one item — an operator message, an assistant reply (with a `⟦↑in ↓out⟧` usage line whenever the adapter reported token usage), or a tool call — and the forwarder writes it as append-only lines: no colour, no markdown, no spinner, no alternate screen, no line ever rewritten, and nothing from before the attach replayed. OSC 7501 records keep going to `/dev/tty`, so a real supervisor still reads the machine surface; the transcript lines go to stdout, and only when stdout is a TTY, so `dsh-sup … | tee log` stays machine-clean. `echo` lines reach exactly one sink: stdout when the operator has a TTY, `/dev/tty` otherwise.
 
 ```text
 ❯ implement the mirror

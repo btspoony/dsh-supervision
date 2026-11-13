@@ -44,14 +44,19 @@ refused with `busy`. Once bridged, lines you type go into the session, and the
 GUI shows a supervision banner with **Take back control**.
 
 The bridge also forwards the conversation into your terminal: every operator
-message, every assistant reply (with its `⟦↑in ↓out⟧` usage line) and every tool
-call prints as its own append-only block — no colour, no markdown, no spinner, no
-rewritten line, and nothing from before the attach replayed. Those lines go to
-stdout, and only when stdout is a TTY, so a piped or redirected run keeps its
-stdout machine-clean. The machine records are unchanged: OSC 7501 still goes to
-`/dev/tty`, and each `echo` line (`[turn <n>] <state>`, `[ask <id>] …`) goes to
-exactly one sink — stdout when you have a TTY, `/dev/tty` otherwise. Input
-handling is untouched: line mode, no raw mode, no alternate screen.
+message, every assistant reply (with a `⟦↑in ↓out⟧` usage line when the adapter
+reported token usage) and every tool call prints as its own append-only block — no
+colour, no markdown, no spinner, no rewritten line, and nothing from before the
+attach replayed. Those lines go to stdout, and only when stdout is a TTY, so a
+piped or redirected run keeps its stdout machine-clean. The machine records are
+unchanged: OSC 7501 still goes to `/dev/tty`, and the `echo` lines —
+`[turn <n>] <state>`, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> →
+<outcome> (source=supervisor|attached)`, the `/status` answer
+`session=<id> state=<state> turn=<n> asks=<ids>` (`-` when nothing is parked),
+`refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`,
+`unknown command /<verb>` — reach exactly one sink each: stdout when you have a
+TTY, `/dev/tty` otherwise. Input handling is untouched: line mode, no raw mode, no
+alternate screen.
 
 ```text
 ❯ implement the mirror

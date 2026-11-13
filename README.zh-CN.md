@@ -96,14 +96,14 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 dsh web (the process you already run)
 └── dsh-supervision plugin
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
-      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo lines ──▶ supervisor (reads OSC 7501)
+      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo + mirror lines ──▶ supervisor (reads OSC 7501)
       └── in-process tty   (added when DSH_SUP_TERMINAL_ID or HC_TERMINAL_ID is set)
             └── OSC 7501 written to this process's own /dev/tty
 ```
 
 **挂载规则。**插件总是先把套接口发现面打开——监听器、`0600` 套接口，以及指向它的 `<pid>-<8hex>.json` 注册表条目——这样转发器才有东西可连。效果层（会话监听、OSC 上报、echo 行、stdin 处理）按桥接打开，"有一条桥接"和"有转发器已连接"是同一件事。因此一个只开 GUI 的 `dsh web` 只暴露一个不干活的套接口，别的什么都没有。当 `DSH_SUP_TERMINAL_ID` 非空（或 herdr-core 的 `HC_TERMINAL_ID` 非空）时，进程同时监督自己所在的终端：同样的记录写到自己的 `/dev/tty`，套接口仍然为别处的 `dsh-sup` 开着。一个会话在两条通路上仍只有一条桥接，第二个认领者会收到 `busy`。如果终端打不开——既没有 `/dev/tty`、stdout 也不是 TTY，或者 stdin 不是终端——插件把原因写到 stderr，并保留套接口这条路。
 
-**对话输出。**桥接也会把对话本身转发出来。一条 `mirror` 帧携带一个条目——操作者的一句话、一条带 `⟦↑in ↓out⟧` 用量行的助手回复，或一次工具调用——转发器把它写成只追加的行：无颜色、无 markdown、无 spinner、不切备用屏，写出的行从不重写，attach 之前的内容也不回放。OSC 7501 记录照旧写到 `/dev/tty`，真正的 supervisor 读的仍是这个机器面；对话行写到 stdout，且只在 stdout 是 TTY 时写，所以 `dsh-sup … | tee log` 写出的文件依然干净。`echo` 行只去一个去处：操作者有 TTY 时是 stdout，否则是 `/dev/tty`。
+**对话输出。**桥接也会把对话本身转发出来。一条 `mirror` 帧携带一个条目——操作者的一句话、一条助手回复（适配器上报了 token 用量时才多一行 `⟦↑in ↓out⟧`）、或一次工具调用——转发器把它写成只追加的行：无颜色、无 markdown、无 spinner、不切备用屏，写出的行从不重写，attach 之前的内容也不回放。OSC 7501 记录照旧写到 `/dev/tty`，真正的 supervisor 读的仍是这个机器面；对话行写到 stdout，且只在 stdout 是 TTY 时写，所以 `dsh-sup … | tee log` 写出的文件依然干净。`echo` 行只去一个去处：操作者有 TTY 时是 stdout，否则是 `/dev/tty`。
 
 ```text
 ❯ 把 mirror 实现出来
