@@ -43,6 +43,25 @@ dsh-sup list                        # list sessions on every live backend; binds
 refused with `busy`. Once bridged, lines you type go into the session, and the
 GUI shows a supervision banner with **Take back control**.
 
+The bridge also forwards the conversation into your terminal: every operator
+message, every assistant reply (with its `⟦↑in ↓out⟧` usage line) and every tool
+call prints as its own append-only block — no colour, no markdown, no spinner, no
+rewritten line, and nothing from before the attach replayed. Those lines go to
+stdout, and only when stdout is a TTY, so a piped or redirected run keeps its
+stdout machine-clean. The machine records are unchanged: OSC 7501 still goes to
+`/dev/tty`, and each `echo` line (`[turn <n>] <state>`, `[ask <id>] …`) goes to
+exactly one sink — stdout when you have a TTY, `/dev/tty` otherwise. Input
+handling is untouched: line mode, no raw mode, no alternate screen.
+
+```text
+❯ implement the mirror
+· One assistant/message per step; no deltas to stream.
+⟦↑1,234 ↓340 R900⟧
+✔ bash: List the protocol package ⟦12ms⟧
+  └─ packages/protocol/src
+[turn 4] working
+```
+
 `list` prints one table per live backend and filters nothing by default.
 
 ## Options
