@@ -1,4 +1,4 @@
 ---
 category: Fixed
 ---
-- `dsh-sup list` now reads persisted sessions, not only live agents: a session created before this `dsh web` started is listed with `LIVE no` instead of disappearing, matching the sidebar. Blank sessions (never had a turn) stay hidden, exactly as the sidebar hides them.
+- `dsh-sup list` now answers from the same account the sidebar groups: a session created before this `dsh web` started appears with `LIVE no` instead of being missing, while blank sessions (never had a turn), sessions no Workspace owns and archived sessions stay out — unless an active bridge holds them, since that row is what the operator is steering. The previous reply enumerated every persisted session, and a real history overflowed one protocol frame — the socket then closed with no answer at all.
