@@ -149,6 +149,10 @@ class FakeHost {
   sessionRecords: { header: { id: string; cwd?: string }; live: boolean }[] | undefined = undefined
   /** Sessions the projection cache marks blank (no turn yet). */
   blankSessions: string[] = []
+  /** What the sidebar's `sessionController.list` answers, when mounted. */
+  controllerItems: { sessionId: string; cwd?: string; blank: boolean; agentAvailable: boolean }[] | undefined = undefined
+  /** Workspace memberships the registry reports, when it can list them. */
+  workspaceRecords: { path: string; sessionIds: string[] }[] | undefined = undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -201,7 +205,13 @@ class FakeHost {
               : { attachSession: async (id: string) => { this.attachedSessions.push(id) } },
             unarchiveSession: async (id: string) => { this.unarchivedSessions.push(id) },
             archivedSessionIds: this.archived,
+            ...(this.workspaceRecords === undefined ? {} : { list: () => this.workspaceRecords ?? [] }),
           }
+        }
+        if (name === 'sessionController') {
+          return this.controllerItems === undefined
+            ? undefined
+            : { list: async () => ({ items: this.controllerItems ?? [] }) }
         }
         if (name === 'sessionQuery') {
           return this.sessionRecords === undefined
@@ -805,6 +815,34 @@ test('list includes cold sessions and hides blank ones', async () => {
     'a blank session stays hidden even while bridged',
   )
   owner.socket.end()
+  host.dispose()
+})
+
+test('list answers from the sidebar controller and drops blank or unowned sessions', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  // The sidebar's own summary: one live row, one cold row, one blank row, and
+  // one session no Workspace owns (a subagent log in the same persistence).
+  host.controllerItems = [
+    { sessionId: 'session-live', cwd: '/repo', blank: false, agentAvailable: true },
+    { sessionId: 'session-cold', cwd: '/repo', blank: false, agentAvailable: false },
+    { sessionId: 'session-blank', cwd: '/repo', blank: true, agentAvailable: true },
+    { sessionId: 'session-unowned', cwd: '/repo', blank: false, agentAvailable: false },
+    { sessionId: 'session-headless', blank: false, agentAvailable: false },
+  ]
+  host.workspaceRecords = [{ path: '/repo', sessionIds: ['session-live', 'session-cold', 'session-blank', 'session-headless'] }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+
+  client.write({ t: 'list' })
+  const [first] = await client.take(1)
+  const items = first?.t === 'sessions' ? first.items : []
+  assert.deepEqual(
+    items.map(item => [item.id, item.live]),
+    [['session-live', true], ['session-cold', false]],
+    'cold sessions are listed; blank, unowned and cwd-less ones are not',
+  )
   host.dispose()
 })
 

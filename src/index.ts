@@ -343,11 +343,57 @@ interface VisibleSession {
   readonly id: string
   readonly cwd: string
   readonly live: boolean
+  readonly blank: boolean
+}
+
+/** The `ctx.sessionController` surface: the sidebar's own summary. */
+interface SessionControllerLike {
+  list(request: Record<string, never>, signal?: AbortSignal): Promise<{ readonly items: readonly {
+    readonly sessionId: string
+    readonly cwd?: string
+    readonly blank: boolean
+    readonly agentAvailable: boolean
+  }[] }>
+}
+
+/** @returns the host's session controller, when a usable one is mounted. */
+function sessionControllerOf(value: unknown): SessionControllerLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const list = (value as { list?: unknown }).list
+  return typeof list === 'function' ? value as SessionControllerLike : undefined
 }
 
 /** The `ctx.sessionQuery` surface this plugin reads, when the host mounts it. */
 interface SessionQueryLike {
   listSessions(signal?: AbortSignal): Promise<readonly { readonly header: { readonly id: string; readonly cwd?: string }; readonly live: boolean }[]>
+}
+
+/** The `ctx.workspaceRegistry` listing surface: what the sidebar groups. */
+interface WorkspaceListLike {
+  list(): readonly { readonly sessionIds: readonly string[] }[]
+}
+
+/**
+ * Every session a Workspace owns — the sidebar's own account. Anything else in
+ * persistence is a session the UI has no row for (subagent logs, folded
+ * history), so listing it would offer an attach nobody can place.
+ * @param value - the `ctx.get('workspaceRegistry')` lookup.
+ * @returns the owned ids, or `undefined` when the host exposes no listing.
+ */
+function workspaceSessions(value: unknown): ReadonlySet<string> | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const list = (value as { list?: unknown }).list
+  if (typeof list !== 'function') return undefined
+  const ids = new Set<string>()
+  try {
+    for (const workspace of (value as WorkspaceListLike).list()) {
+      for (const id of workspace.sessionIds) ids.add(id)
+    }
+  } catch {
+    // A registry that cannot list owns nothing the plugin can prove; list all.
+    return undefined
+  }
+  return ids
 }
 
 /** The `ctx.sessionProjections` surface `blankSessions` needs. */
@@ -368,31 +414,45 @@ function sessionQueryOf(value: unknown): SessionQueryLike | undefined {
 }
 
 /**
- * The sessions this process can attach to: every persisted session, plus the
- * live ones. Persistence is what makes a cold session visible — the same account
- * the sidebar reads — so a listing never hides sessions the UI shows.
+ * The sessions an operator can place in the UI: the sidebar's own summary,
+ * narrowed to the sessions a Workspace owns. `sessionQuery` also holds subagent
+ * logs and folded history, and a listing of all of them overflows one protocol
+ * frame, so the owned set is what a listing offers.
  * @param ctx - the plugin context.
- * @returns the rows, and the headers `blankSessions` evaluates.
+ * @returns one row per visible session, blank included so the caller decides.
  */
-async function visibleSessions(ctx: PluginContext): Promise<{ readonly items: readonly VisibleSession[]; readonly headers: readonly unknown[] }> {
+async function visibleSessions(ctx: PluginContext): Promise<readonly VisibleSession[]> {
+  const owned = workspaceSessions(ctx.get?.('workspaceRegistry'))
+  // The controller is the service the sidebar itself calls: it carries the
+  // blank flag and the live agent for both hot and cold sessions. Without it,
+  // the raw query plus the projection cache answer the same question.
+  const controller = sessionControllerOf(ctx.get?.('sessionController'))
+  if (controller !== undefined) {
+    const { items } = await controller.list({})
+    return items
+      .filter(item => item.cwd !== undefined)
+      .filter(item => owned === undefined || owned.has(item.sessionId))
+      .map(item => ({ id: item.sessionId, cwd: item.cwd ?? '', live: item.agentAvailable, blank: item.blank }))
+  }
   const query = sessionQueryOf(ctx.get?.('sessionQuery'))
   if (query === undefined) {
-    return {
-      items: ctx.agents.list().map(agent => ({
-        id: agent.session.id,
-        cwd: agent.session.header?.cwd ?? '',
-        live: true,
-      })),
-      headers: ctx.agents.list().map(agent => agent.session.header),
-    }
+    return ctx.agents.list().map(agent => ({
+      id: agent.session.id,
+      cwd: agent.session.header?.cwd ?? '',
+      live: true,
+      blank: false,
+    }))
   }
-  const records = await query.listSessions()
-  return {
-    items: records
-      .filter(record => record.header.cwd !== undefined)
-      .map(record => ({ id: record.header.id, cwd: record.header.cwd ?? '', live: record.live })),
-    headers: records.map(record => record.header),
-  }
+  const records = (await query.listSessions())
+    .filter(record => record.header.cwd !== undefined)
+    .filter(record => owned === undefined || owned.has(record.header.id))
+  const blank = blankSessions(ctx, records.map(record => record.header))
+  return records.map(record => ({
+    id: record.header.id,
+    cwd: record.header.cwd ?? '',
+    live: record.live,
+    blank: blank.has(record.header.id),
+  }))
 }
 
 /**
@@ -1128,7 +1188,7 @@ function handlersFor(
       // listing that only saw live agents hid every session created before this
       // process started. A host without the query service still gets the live
       // set, which is what it can answer synchronously.
-      const records = await visibleSessions(ctx)
+      const rows = await visibleSessions(ctx)
       // An archived session is hidden from the sidebar, so listing it would offer
       // an id nobody can open — unless a bridge holds it right now: that bridge
       // is live and the operator must still see what is steering the session.
@@ -1136,12 +1196,11 @@ function handlersFor(
       // row for it either, so listing it would offer a session the operator
       // cannot find; one line of input is what makes it appear in both places.
       const archived = archivedSessions(ctx.get?.('workspaceRegistry'))
-      const blank = blankSessions(ctx, records.headers)
-      return records.items
+      return rows
         .filter(item => !archived.has(item.id) || bridged.has(item.id))
-        .filter(item => !blank.has(item.id))
+        .filter(item => !item.blank)
         .filter(item => cwd === undefined || item.cwd === cwd)
-        .map(item => ({ ...item, bridged: bridged.has(item.id) }))
+        .map(item => ({ id: item.id, cwd: item.cwd, live: item.live, bridged: bridged.has(item.id) }))
     },
 
     bye(session: string): void {
