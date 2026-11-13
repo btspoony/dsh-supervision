@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseArgs } from './args.js';
+import { parseArgs, usageText } from './args.js';
 
 const base = '/work';
 
@@ -58,6 +58,19 @@ test('unknown words, options and bad values are usage errors, never a guess', ()
   ]) {
     assert.equal(parseArgs(argv, base).kind, 'usage', `argv: ${argv.join(' ')}`);
   }
+});
+
+test('--version and --skill are terminal flags that take no operand', () => {
+  assert.deepEqual(parseArgs(['--version'], base), { kind: 'version' });
+  assert.deepEqual(parseArgs(['--skill'], base), { kind: 'skill' });
+  for (const argv of [['new', '--version'], ['--skill', '--pid', '7'], ['--skill', 'list']]) {
+    assert.equal(parseArgs(argv, base).kind, 'usage', `argv: ${argv.join(' ')}`);
+  }
+});
+
+test('the usage text names both informational flags', () => {
+  assert.match(usageText, /dsh-sup --version/);
+  assert.match(usageText, /dsh-sup --skill/);
 });
 
 test('a usage result always names a reason', () => {
