@@ -10,7 +10,7 @@ import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
 import { PROTO } from 'dsh-supervision-protocol'
 import type { HelloFrame } from 'dsh-supervision-protocol'
-import { lineFeed, openTtyIO } from './tty.js'
+import { lineFeed, openTtyIO, stdoutWriter } from './tty.js'
 import type { LineSource, TtyStdin } from './tty.js'
 import { TtyTransport } from './tty-transport.js'
 import type { TtyIO } from './tty-transport.js'
@@ -581,4 +581,41 @@ test('the terminal is never put into raw mode, so the driver keeps every control
   open.io.close()
   assert.deepEqual(rawCalls, [], 'raw mode is never entered, so ISIG/ECHO/IXON stay on')
   assert.equal(stdin.listenerCount('data'), 0, 'the feed is detached on close')
+})
+
+
+test('the stdout fallback reports a vanished surface instead of throwing', () => {
+  const listeners: ((error: Error) => void)[] = []
+  let wrote = 0
+  const stdout = {
+    destroyed: false,
+    write: () => { wrote += 1; return true },
+    on: (event: 'error', listener: (error: Error) => void) => {
+      if (event === 'error') listeners.push(listener)
+      return stdout
+    },
+  }
+  const writer = stdoutWriter(stdout as never)
+  assert.equal(writer.write('first'), true)
+  assert.equal(wrote, 1)
+
+  // A vanished pty emits 'error' on stdout; the writer must swallow it and
+  // report a dead surface, or Node turns it into an uncaught exception that
+  // takes the whole host down.
+  assert.equal(listeners.length, 1, 'the writer subscribes to the surface it writes to')
+  for (const listener of listeners) listener(new Error('EIO'))
+  assert.equal(writer.write('after'), false)
+  assert.equal(wrote, 1, 'a dead surface is never written again')
+})
+
+test('the stdout fallback treats a throwing write as a dead surface', () => {
+  let calls = 0
+  const stdout = {
+    write: () => { calls += 1; throw new Error('EBADF') },
+    on: () => stdout,
+  }
+  const writer = stdoutWriter(stdout as never)
+  assert.equal(writer.write('boom'), false)
+  assert.equal(calls, 1)
+  assert.equal(writer.write('again'), false, 'the surface stays dead')
 })

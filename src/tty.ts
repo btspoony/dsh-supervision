@@ -156,18 +156,39 @@ export function openDevTty(): TtyWriterOpen {
     if (process.stdout.isTTY !== true) {
       return { ok: false, reason: 'no tty: /dev/tty is unavailable and stdout is not a terminal' }
     }
-    return {
-      ok: true,
-      writer: {
-        write: text => {
-          // A full stdout buffer is backpressure, not a dead surface; a vanished
-          // pipe reports through `error` on the stream, never through this value.
-          process.stdout.write(text)
-          return true
-        },
-        close: () => {},
-      },
-    }
+    return { ok: true, writer: stdoutWriter(process.stdout) }
+  }
+}
+
+/** The stdout surface `stdoutWriter` writes to; a stub stands in for it. */
+export interface StdoutLike {
+  write(text: string): unknown
+  on(event: 'error', listener: (error: Error) => void): unknown
+  readonly destroyed?: boolean
+}
+
+/**
+ * The fallback writer. It shares the primary writer's failure contract: a
+ * vanished pty emits `error` on stdout, and an unhandled one would take down
+ * the host, so the surface goes dead and the caller finishes the bridge.
+ * @param stdout - the process's stdout, or a stub in a test.
+ * @returns the writer the transport renders frames through.
+ */
+export function stdoutWriter(stdout: StdoutLike = process.stdout): TtyWriter {
+  let dead = false
+  stdout.on('error', () => { dead = true })
+  return {
+    write: text => {
+      if (dead || stdout.destroyed === true) return false
+      try {
+        stdout.write(text)
+        return true
+      } catch {
+        dead = true
+        return false
+      }
+    },
+    close: () => {},
   }
 }
 
