@@ -92,6 +92,25 @@ test('a foreign candidate is not ours to load', async () => {
   assert.equal(await skillProvider().get(foreign), undefined)
 })
 
+test('a manual without a description yields no candidate and no throw', async () => {
+  // The host rejects an empty description outside its per-provider catch, so
+  // offering no candidate is the only safe answer to an unparseable manual.
+  const provider = skillProvider(() => ({ description: '', body: '# no frontmatter\n' }))
+  assert.deepEqual(await provider.list(), [])
+  const requested: SkillCandidateLike = {
+    path: '/tmp/SKILL.md',
+    name: 'use-dsh-supervision',
+    description: '',
+    source: 'bundled',
+    provider: 'dsh-supervision',
+    rank: 600,
+    locator: 'x',
+    resourceBase: { kind: 'directory', path: '/tmp' },
+    invocation: { modelInvocable: true, userInvocable: true },
+  }
+  assert.equal(await provider.get(requested), undefined)
+})
+
 test('a host without a skill service still loads, and disposal unregisters', () => {
   assert.doesNotThrow(() => mount(undefined))
   assert.doesNotThrow(() => mount({}))

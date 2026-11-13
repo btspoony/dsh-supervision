@@ -69,17 +69,32 @@ export function registerSkill(ctx: SkillMountContext): void {
   ctx.effect(() => skills.registerProvider(() => skillProvider()))
 }
 
-/** Builds the provider the registry borrows: one candidate, rendered on demand. */
-export function skillProvider(): SkillProviderLike {
+/** What the provider renders from the packaged manual. */
+interface SkillManual {
+  readonly description: string
+  readonly body: string
+}
+
+/**
+ * Builds the provider the registry borrows: one candidate, rendered on demand.
+ * `read` is injectable so the no-description path can be exercised without a
+ * malformed file on disk.
+ */
+export function skillProvider(read: () => SkillManual = readManual): SkillProviderLike {
   return {
     name: PROVIDER,
     list: async () => {
-      const { description } = readManual()
+      const { description } = read()
+      // The host validates candidates outside its per-provider catch, so a
+      // description the validator rejects would take every skill in the process
+      // down. An unparseable manual is therefore simply not a candidate.
+      if (description === '') return []
       return [{ ...summary(description), rank: RANK, locator: manualPath }]
     },
     get: async (requested) => {
       if (requested.name !== SKILL_NAME) return undefined
-      const { description, body } = readManual()
+      const { description, body } = read()
+      if (description === '') return undefined
       return { ...summary(description), content: body }
     },
   }
@@ -99,7 +114,7 @@ function summary(description: string): Omit<SkillCandidateLike, 'rank' | 'locato
 }
 
 /** Reads the packaged manual: the frontmatter description and the rendered body. */
-function readManual(): { readonly description: string; readonly body: string } {
+function readManual(): SkillManual {
   const markdown = readFileSync(manualUrl, 'utf8')
   const end = markdown.startsWith('---\n') ? markdown.indexOf('\n---\n', 3) : -1
   const front = end === -1 ? '' : markdown.slice(4, end)
