@@ -598,3 +598,30 @@ test('openTtyIO fails closed when stdin is not a terminal', () => {
   assert.equal(openTtyIO(no as TtyStdin).ok, false)
   assert.equal(no.listenerCount('data'), 0)
 })
+
+test('raw mode hands Ctrl+C back as SIGINT instead of swallowing it', () => {
+  const stdin = new FakeStdin()
+  let interrupts = 0
+  const writer = { write: () => true, close: () => {} }
+  const open = openTtyIO(
+    stdin as TtyStdin,
+    () => { interrupts += 1 },
+    () => ({ ok: true, writer }),
+  )
+  assert.equal(open.ok, true)
+  if (!open.ok) return
+
+  // A bridge is bound: the terminal goes raw and ISIG is off.
+  open.io.setRaw(true)
+  assert.equal(stdin.isRaw, true)
+  stdin.emit('data', '\u0003')
+  assert.equal(interrupts, 1, 'the stop key reaches the host as its signal')
+  assert.equal(stdin.isRaw, false, 'the terminal is cooked before the signal runs')
+
+  // Ordinary input never fires it, and re-entering raw does not stack listeners.
+  open.io.setRaw(true)
+  stdin.emit('data', 'a line with no stop')
+  assert.equal(interrupts, 1)
+  open.io.close()
+  assert.equal(stdin.listenerCount('data'), 0, 'close detaches the stop listener')
+})

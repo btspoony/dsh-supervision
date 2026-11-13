@@ -60,6 +60,8 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 Backends are found through `$DSH_HOME/supervision` (`~/.dsh/supervision` when `DSH_HOME` is unset). A bridge needs exactly one live backend; with several, the refusal names each candidate's `pid` and socket, and `--pid` picks one. `--cwd` applies to `new` and `list` only; `list` without it shows every session, with the CWD column naming where each one lives.
 
+While a bridge is bound the terminal runs in raw mode, so Ctrl+C would otherwise arrive as a stray byte and be swallowed. The plugin restores the terminal and delivers the signal to `dsh web`, so the process still stops normally from its own terminal.
+
 **Empty sessions stay out of the web UI.** A session created here is attached to its project, but the DSH sidebar lists a session only after its first message. Until then it exists in `dsh-sup list` and on the bridge, with no row under the project. Send one line from the terminal (or attach and steer) and it appears.
 
 ### Answer an approval
