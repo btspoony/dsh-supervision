@@ -4,6 +4,7 @@ import { EXIT, exitCodeFor } from './exit.js';
 import { runList } from './list.js';
 import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
+import { skillText, version } from './skill.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, renderFrame, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
@@ -29,6 +30,12 @@ async function main(argv: readonly string[]): Promise<number> {
   if (parsed.kind === 'usage') {
     process.stderr.write(`${parsed.reason}\n${usageText}\n`);
     return EXIT.usage;
+  }
+
+  // Informational output: answered before the registry, so it works with no live dsh web.
+  if (parsed.kind === 'version' || parsed.kind === 'skill') {
+    process.stdout.write(parsed.kind === 'version' ? `${version()}\n` : skillText());
+    return EXIT.ok;
   }
 
   const entries = readRegistry(supervisionDir(process.env));

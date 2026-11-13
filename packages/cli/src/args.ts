@@ -4,6 +4,8 @@ export type Parsed =
   | { readonly kind: 'new'; readonly cwd: string; readonly pid?: number }
   | { readonly kind: 'attach'; readonly session: string; readonly pid?: number }
   | { readonly kind: 'list'; readonly cwd?: string; readonly pid?: number }
+  | { readonly kind: 'version' }
+  | { readonly kind: 'skill' }
   | { readonly kind: 'usage'; readonly reason: string };
 
 export const usageText = [
@@ -11,6 +13,8 @@ export const usageText = [
   '       dsh-sup attach <session-id> [--pid <n>]',
   '       dsh-sup <session-id> [--pid <n>]',
   '       dsh-sup list [--pid <n>] [--cwd <path>]   (every session; --cwd filters)',
+  '       dsh-sup --version',
+  '       dsh-sup --skill      (print the forwarder manual)',
 ].join('\n');
 
 /**
@@ -18,6 +22,11 @@ export const usageText = [
  * directory `--cwd` resolves against, passed in so this stays free of `process`.
  */
 export function parseArgs(argv: readonly string[], base: string): Parsed {
+  // The informational flags are terminal and take no operand, so they are only
+  // valid alone; anywhere else they stay unknown options.
+  if (argv.length === 1 && argv[0] === '--version') return { kind: 'version' };
+  if (argv.length === 1 && argv[0] === '--skill') return { kind: 'skill' };
+
   const words: string[] = [];
   let cwd: string | undefined;
   let pid: number | undefined;

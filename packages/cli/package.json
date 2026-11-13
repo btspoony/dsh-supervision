@@ -20,7 +20,8 @@
   },
   "files": [
     "lib/main.js",
-    "bin/**"
+    "bin/**",
+    "skills"
   ],
   "scripts": {
     "build": "pnpm --filter dsh-supervision-protocol build && tsc -p tsconfig.json && rm -rf lib && tsdown",
