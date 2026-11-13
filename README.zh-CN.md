@@ -82,7 +82,7 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 只要会话处于桥接状态，GUI 输入框上方就会出现监督横幅——`Supervised from <terminal> (pid <n>) · approvals are answered there`——旁边是「Take back control」按钮。它请求回收路由；桥接被丢弃，监督方收到清除记录，`dsh-sup` 转发器以 `0` 退出。
 
-不用打开会话也能看出来：侧边栏里被接管的会话行带一圈醒目的蓝色描边和鲸鱼尾巴徽标，不会被误当成可以随手输入自己的会话。点进去后输入框会被盖住，显示 `Supervised from dsh-sup — this composer is locked.` 与「Unlock」按钮——在你按下它把会话收回来之前，输入框一直保持遮挡。
+不用打开会话也能看出来：侧边栏里被接管的会话行带一圈醒目的蓝色描边和鲸鱼尾巴徽标，不会被误当成可以随手输入自己的会话。点进去后输入框会被一层遮罩盖住（`Supervised from dsh-sup — this composer is covered.`），编辑器被置为 `inert`，鼠标点不进去、已经聚焦的光标也打不了字。「Unlock」按钮发起回收；只有确认释放成功才会撤掉遮罩，被拒绝的解锁会保留遮罩。
 
 ### 给 agent 的技能
 

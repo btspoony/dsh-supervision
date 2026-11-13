@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { bridgedIds, guardFor, rowSessionId } from './dom.js'
+import { bridgedIds, rowSessionId } from './dom.js'
+import { guardFor } from './dom.guard.js'
 
 test('a sidebar row key yields its session id', () => {
   assert.equal(rowSessionId('session:session-abc'), 'session-abc')
