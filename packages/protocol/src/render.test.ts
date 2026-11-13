@@ -70,7 +70,25 @@ const MIRROR: readonly { readonly name: string; readonly item: MirrorItem; reado
     lines: '❯ one two\n  three four\n  five',
   },
   {
-    name: 'an assistant block carries its thought line, suffix and usage',
+    name: 'a user turn ending in a newline leaves no blank trailing line',
+    item: { k: 'user', text: 'hi\n' },
+    width: 100,
+    lines: '❯ hi',
+  },
+  {
+    name: 'a user turn keeps an interior blank line but not a trailing one',
+    item: { k: 'user', text: 'a\n\nb\n' },
+    width: 100,
+    lines: '❯ a\n\n  b',
+  },
+  {
+    name: 'an assistant block ending in a newline leaves no blank trailing line',
+    item: { k: 'assistant', text: 'done\n', turn: 1 },
+    width: 100,
+    lines: 'done',
+  },
+  {
+    name: 'an assistant usage line pins the ratified §3.1/§3.4 form ⟦↑in ↓out Rcache⟧',
     item: {
       k: 'assistant',
       reasoning: 'Tool-call blocks come one per step.\nno deltas to stream.',
