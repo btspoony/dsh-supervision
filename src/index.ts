@@ -626,19 +626,31 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
 
   // Read reflectively, not through `inject`: a CLI-only host mounts no webserver,
   // and a declared dependency would keep the plugin from loading there at all.
-  const server = registrarOf(ctx.get?.('webServer'))
-  if (server !== undefined) {
-    ctx.effect(() => registerSupervisionRoutes(server, {
-      snapshot,
-      // Both surfaces share one bridge table, so every surface holding the
-      // session must release it; `some` would leave a stale transport binding.
-      reclaim: session => {
-        let reclaimed = false
-        for (const transport of transports) reclaimed = transport.reclaim(session) || reclaimed
-        return reclaimed
-      },
-    }))
+  // The service can still arrive after this plugin in the profile's patch order,
+  // so the routes wait for it instead of silently staying unregistered: a 404 on
+  // `/dsh-supervision/state` is what the browser half sees as "not supervised".
+  const attachRoutes = (remaining: number): void => {
+    const server = registrarOf(ctx.get?.('webServer'))
+    if (server !== undefined) {
+      ctx.effect(() => registerSupervisionRoutes(server, {
+        snapshot,
+        // Both surfaces share one bridge table, so every surface holding the
+        // session must release it; `some` would leave a stale transport binding.
+        reclaim: session => {
+          let reclaimed = false
+          for (const transport of transports) reclaimed = transport.reclaim(session) || reclaimed
+          return reclaimed
+        },
+      }))
+      return
+    }
+    if (remaining > 0) {
+      const timer = setTimeout(() => { attachRoutes(remaining - 1) }, BOOT_POLL_MS)
+      // A host that never serves a browser must not keep the process alive.
+      if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+    }
   }
+  attachRoutes(BOOT_WINDOW_MS / BOOT_POLL_MS)
 
   // Read reflectively like the rest: a host without a skill registry still loads,
   // and the manual is the only copy of what the agent needs to know.

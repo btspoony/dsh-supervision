@@ -82,6 +82,8 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 While a session is bridged the GUI shows a supervision banner above the composer — `Supervised from <terminal> (pid <n>) · approvals are answered there` — with a **Take back control** button. It posts to the reclaim route; the bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
 
+The same state is visible before opening the session: its sidebar row gets a heavy blue outline and a whale-tail badge, so a supervised session cannot be mistaken for one that is yours to type into. Opening it covers the composer with `Supervised from dsh-sup — this composer is locked.` and an **Unlock** button — the composer stays covered until that button takes the session back.
+
 ### Agent skill
 
 The plugin ships a `use-dsh-supervision` skill, so the agent inside a supervised session knows it needs the same-version `dsh-sup` forwarder, checks it with `dsh-sup --version`, and offers the install only after the user agrees. `dsh-sup --skill` prints the forwarder's full manual.
