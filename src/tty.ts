@@ -16,6 +16,72 @@ export type TtyOpen =
   | { readonly ok: true; readonly io: TtyIO }
   | { readonly ok: false; readonly reason: string }
 
+/** The write half of a terminal: `/dev/tty`, or stdout as the fallback. */
+export interface TtyWriter {
+  write(text: string): boolean
+  close(): void
+}
+
+/** A terminal writer or the reason this process has none. */
+export type TtyWriterOpen =
+  | { readonly ok: true; readonly writer: TtyWriter }
+  | { readonly ok: false; readonly reason: string }
+
+/**
+ * Open the process's own terminal for reporting.
+ * @returns the writer, or the reason neither `/dev/tty` nor a TTY stdout exists.
+ */
+export function openDevTty(): TtyWriterOpen {
+  try {
+    const fd = openSync('/dev/tty', 'w')
+    // shortcut: the write is still synchronous, so a stopped pty (Ctrl-S) will
+    // stall this process's event loop. An async sink would buffer without bound
+    // instead, which is worse in-process; upgrade when the terminal can be
+    // written from a child process or with bounded buffering.
+    return {
+      ok: true,
+      writer: {
+        write: text => {
+          try {
+            writeSync(fd, text)
+            return true
+          } catch {
+            // A pty that went away (`EIO`) or a stale fd (`EBADF`) is a dead
+            // surface; the caller finishes the bridge instead of throwing here,
+            // where a host emitter would turn it into a dead `dsh web`.
+            return false
+          }
+        },
+        close: () => {
+          try {
+            closeSync(fd)
+          } catch {
+            // Already closed by the OS at process exit.
+          }
+        },
+      },
+    }
+  } catch {
+    // A container, a remote shell or a redirected `dsh web` has no `/dev/tty`;
+    // stdout is the honest second choice, and a pipe is no surface at all.
+    if (process.stdout.isTTY !== true) {
+      return { ok: false, reason: 'no tty: /dev/tty is unavailable and stdout is not a terminal' }
+    }
+    return {
+      ok: true,
+      writer: {
+        write: text => {
+          // A full stdout buffer is backpressure, not a dead surface; a vanished
+          // pipe reports through `error` on the stream, never through this value.
+          process.stdout.write(text)
+          return true
+        },
+        close: () => {},
+      },
+    }
+  }
+}
+
 /** The stdin surface `lineFeed` needs, so a fake stream can stand in for it. */
 export interface LineSource {
   setEncoding(encoding: BufferEncoding): unknown
@@ -95,57 +161,24 @@ export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; s
 /**
  * Opens the reporting surface and the owning keyboard.
  * @param stdin - the process's own stdin, or a stub in a test.
+ * @param interrupt - delivers the stop signal a raw-mode Ctrl+C stands for;
+ *   injectable so a test never signals its own runner.
  * @returns the io, or the reason neither surface exists.
  */
-export function openTtyIO(stdin: TtyStdin = process.stdin): TtyOpen {
+export function openTtyIO(
+  stdin: TtyStdin = process.stdin,
+  interrupt: () => void = () => { process.kill(process.pid, 'SIGINT') },
+  openWriter: () => TtyWriterOpen = openDevTty,
+): TtyOpen {
   // The read side is the owner's keyboard or nothing: a redirected stdin is a
   // pipe any writer can feed, and treating it as the owner would hand it the
   // command channel. Checked first, so a refusal opens no fd.
   if (stdin.isTTY !== true) {
     return { ok: false, reason: 'no tty: stdin is not a terminal' }
   }
-
-  let write: (text: string) => boolean
-  let closeWriter: () => void
-
-  try {
-    const fd = openSync('/dev/tty', 'w')
-    // shortcut: the write is still synchronous, so a stopped pty (Ctrl-S) will
-    // stall this process's event loop. An async sink would buffer without bound
-    // instead, which is worse in-process; upgrade when the terminal can be
-    // written from a child process or with bounded buffering.
-    write = text => {
-      try {
-        writeSync(fd, text)
-        return true
-      } catch {
-        // A pty that went away (`EIO`) or a stale fd (`EBADF`) is a dead
-        // surface; the caller finishes the bridge instead of throwing here,
-        // where a host emitter would turn it into a dead `dsh web`.
-        return false
-      }
-    }
-    closeWriter = () => {
-      try {
-        closeSync(fd)
-      } catch {
-        // Already closed by the OS at process exit.
-      }
-    }
-  } catch {
-    // A container, a remote shell or a redirected `dsh web` has no `/dev/tty`;
-    // stdout is the honest second choice, and a pipe is no surface at all.
-    if (process.stdout.isTTY !== true) {
-      return { ok: false, reason: 'no tty: /dev/tty is unavailable and stdout is not a terminal' }
-    }
-    write = text => {
-      // A full stdout buffer is backpressure, not a dead surface; a vanished
-      // pipe reports through `error` on the stream, never through this value.
-      process.stdout.write(text)
-      return true
-    }
-    closeWriter = () => {}
-  }
+  const opened = openWriter()
+  if (!opened.ok) return opened
+  const { write, close: closeWriter } = opened.writer
 
   // A terminal stdin is guaranteed above, so `setRawMode` is present in
   // production; the optional call keeps a test stub without it usable.
@@ -155,6 +188,16 @@ export function openTtyIO(stdin: TtyStdin = process.stdin): TtyOpen {
   const setMode = (raw: boolean): void => { input.setRawMode?.(raw) }
   const feed = lineFeed(input)
   let closed = false
+  // Raw mode disables the terminal's ISIG, so Ctrl+C arrives as a byte and
+  // would otherwise be swallowed as stray input. A supervisor must never eat
+  // its own stop key: restore the terminal, then hand the host the signal that
+  // byte stands for.
+  const onInterrupt = (chunk: string): void => {
+    if (!chunk.includes('\u0003')) return
+    setMode(previousRaw)
+    interrupt()
+  }
+  input.on('data', onInterrupt)
 
   return {
     ok: true,
@@ -167,6 +210,7 @@ export function openTtyIO(stdin: TtyStdin = process.stdin): TtyOpen {
       close: () => {
         if (closed) return
         closed = true
+        input.off('data', onInterrupt)
         feed.stop()
         setMode(previousRaw)
         closeWriter()
