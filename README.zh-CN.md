@@ -51,7 +51,7 @@ dsh-sup --pid 4711 new                   # pick the backend when several dsh web
 dsh-sup list                             # list every session on every live backend
 ```
 
-`list` 对每个存活后端打印一张表，不建立任何桥接。`PID` 列标明该行来自哪个 `dsh web` 进程，多后端时也能对得上：
+`list` 对每个存活后端打印一张表，不建立任何桥接。已归档的会话不会列出（侧边栏同样不显示），例外是正被桥接持有的那个。`PID` 列标明该行来自哪个 `dsh web` 进程，多后端时也能对得上：
 
 ```text
 SESSION            PID    CWD                LIVE  BRIDGED

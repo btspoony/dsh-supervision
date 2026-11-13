@@ -143,6 +143,8 @@ class FakeHost {
   readonly attachedSessions: string[] = []
   /** Sessions the fake registry unarchived. */
   readonly unarchivedSessions: string[] = []
+  /** The registry's archive set, as the sidebar would see it. */
+  archived: string[] = []
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -194,6 +196,7 @@ class FakeHost {
               ? undefined
               : { attachSession: async (id: string) => { this.attachedSessions.push(id) } },
             unarchiveSession: async (id: string) => { this.unarchivedSessions.push(id) },
+            archivedSessionIds: this.archived,
           }
         }
         if (name === 'agentPresets') {
@@ -712,6 +715,40 @@ test('a session created outside any workspace still answers', async () => {
   const [welcome] = await client.take(1)
   assert.equal(welcome?.t, 'welcome')
   assert.deepEqual(host.attachedSessions, [])
+  host.dispose()
+})
+
+test('an archived session is not offered by list, unless a bridge holds it', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-live', '/repo')
+  host.add('session-gone', '/repo')
+  host.add('session-held', '/repo')
+  host.archived = ['session-gone', 'session-held']
+  apply(host.ctx, config({ socketDir: dir }))
+
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'list' })
+  const [before] = await client.take(1)
+  const beforeItems = before?.t === 'sessions' ? before.items : []
+  assert.deepEqual(beforeItems.map(item => item.id), ['session-live'], 'no row for an archived id')
+
+  // A live bridge is what the operator is holding; hiding it would erase the
+  // only surface that shows the session is steered from here.
+  const owner = await attached(host, dir, 'session-held')
+  client.write({ t: 'list' })
+  // The second listing is this client's second frame; `attached` uses its own client.
+  await until(() => client.frames.length >= 2, 'the second listing')
+  const after = client.frames.at(-1)
+  const afterItems = after?.t === 'sessions' ? after.items : []
+  assert.deepEqual(
+    afterItems.map(item => item.id).sort(),
+    ['session-held', 'session-live'],
+    'a bridged archived session stays visible',
+  )
+  assert.equal(afterItems.find(item => item.id === 'session-held')?.bridged, true)
+  owner.socket.end()
   host.dispose()
 })
 
