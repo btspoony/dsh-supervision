@@ -78,9 +78,11 @@ different session, while the terminal renders the one it holds.
 
 ## Trade-offs accepted
 
-- The in-process write stays synchronous, with exception containment and a
-  labelled shortcut for the blocking half. A bounded asynchronous sink would be
-  the fix; unbounded buffering would trade a stall for unbounded memory.
+- The in-process write goes through a non-blocking stream over the terminal
+  fd, so a stopped pty (Ctrl+S) queues records in order instead of stalling the
+  host's event loop. The queue is unbounded by design: a terminal paused for a
+  long time grows it, which is the deliberate trade for never freezing every
+  hosted session and approval route.
 - Real-terminal behaviour (record interleaving with host logs, a stopped
   terminal) is stated as unverified in the delivery plan rather than claimed.
 - The bridge reads only complete lines, so it never needs raw mode; stealing

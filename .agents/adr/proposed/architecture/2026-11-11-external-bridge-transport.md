@@ -107,7 +107,9 @@ protocol rule exists twice. It claims its first session through a synthesized
 `hello` carrying a create arm in `process.cwd()`, and a refusal or a `reclaim`
 ends the bridge, not the transport: the owner re-enters with `/new` or
 `/attach` from the same keyboard. The terminal never leaves the driver's line
-mode, so the operator keeps Ctrl+C, Ctrl+Z, Ctrl+\, Ctrl+S/Q, echo and editing. A terminal that cannot be opened — including a stdin that is not a
+mode, so the operator keeps `Ctrl+C`, `Ctrl+Z`, `Ctrl+\`, echo and editing.
+`Ctrl+S`/`Ctrl+Q` remain pty flow control: a paused terminal holds the bridge's
+records in an ordered non-blocking queue rather than stalling the host. A terminal that cannot be opened — including a stdin that is not a
 terminal, since a pipe any writer can feed must never become the owner's
 command channel — writes the reason to stderr and mounts nothing, so the host
 keeps its sessions.

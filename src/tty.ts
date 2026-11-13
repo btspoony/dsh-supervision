@@ -13,7 +13,7 @@
  * mode already delivers those.
  */
 
-import { closeSync, openSync, writeSync } from 'node:fs'
+import { createWriteStream, openSync } from 'node:fs'
 import { splitLines } from './stdin.js'
 import type { TtyIO } from './tty-transport.js'
 
@@ -107,39 +107,49 @@ export function lineFeed(input: LineSource): { lines(): AsyncIterable<string>; s
 }
 
 /**
+ * A non-blocking writer over an open terminal fd. A synchronous write stalls the
+ * whole host when the operator presses Ctrl+S (XOFF stops pty output); with a
+ * stream the records queue in order and the event loop keeps servicing sessions,
+ * socket frames and approvals until Ctrl+Q resumes the terminal.
+ * @param fd - an open writable terminal fd; the stream owns closing it.
+ * @returns the writer the transport renders frames through.
+ */
+function streamWriter(fd: number): TtyWriter {
+  const stream = createWriteStream('', { fd, autoClose: true })
+  // A pty that vanished (`EIO`) or a stale fd (`EBADF`) surfaces here; the next
+  // write reports the dead surface so the caller finishes the bridge instead of
+  // throwing into a host emitter.
+  let dead = false
+  stream.on('error', () => { dead = true })
+  return {
+    write: text => {
+      if (dead || stream.destroyed) return false
+      try {
+        stream.write(text)
+        return true
+      } catch {
+        dead = true
+        return false
+      }
+    },
+    close: () => {
+      try {
+        stream.end()
+      } catch {
+        // Already closed by the OS at process exit.
+      }
+    },
+  }
+}
+
+/**
  * Open the process's own terminal for reporting.
  * @returns the writer, or the reason neither `/dev/tty` nor a TTY stdout exists.
  */
 export function openDevTty(): TtyWriterOpen {
   try {
     const fd = openSync('/dev/tty', 'w')
-    // shortcut: the write is still synchronous, so a stopped pty (Ctrl-S) will
-    // stall this process's event loop. An async sink would buffer without bound
-    // instead, which is worse in-process; upgrade when the terminal can be
-    // written from a child process or with bounded buffering.
-    return {
-      ok: true,
-      writer: {
-        write: text => {
-          try {
-            writeSync(fd, text)
-            return true
-          } catch {
-            // A pty that went away (`EIO`) or a stale fd (`EBADF`) is a dead
-            // surface; the caller finishes the bridge instead of throwing here,
-            // where a host emitter would turn it into a dead `dsh web`.
-            return false
-          }
-        },
-        close: () => {
-          try {
-            closeSync(fd)
-          } catch {
-            // Already closed by the OS at process exit.
-          }
-        },
-      },
-    }
+    return { ok: true, writer: streamWriter(fd) }
   } catch {
     // A container, a remote shell or a redirected `dsh web` has no `/dev/tty`;
     // stdout is the honest second choice, and a pipe is no surface at all.

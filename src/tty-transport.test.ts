@@ -565,20 +565,20 @@ test('openTtyIO fails closed when stdin is not a terminal', () => {
   assert.equal(no.listenerCount('data'), 0)
 })
 
-test('the terminal stays in line mode, so the driver owns every control key', () => {
+test('the terminal is never put into raw mode, so the driver keeps every control key', async () => {
   const stdin = new FakeStdin()
+  // A spy on the one API that could steal Ctrl+C/Z/\\, echo and editing.
+  const rawCalls: boolean[] = []
+  Object.assign(stdin, { setRawMode: (mode: boolean) => { rawCalls.push(mode) } })
   const writer = { write: () => true, close: () => {} }
   const open = openTtyIO(stdin as TtyStdin, () => ({ ok: true, writer }))
   assert.equal(open.ok, true)
   if (!open.ok) return
 
-  // No member can put the terminal into raw mode: Ctrl+C, Ctrl+Z, Ctrl+\,
-  // Ctrl+S/Q, echo and line editing all stay with the terminal driver.
-  assert.equal('setRaw' in open.io, false)
-  assert.equal(typeof (stdin as { setRawMode?: unknown }).setRawMode, 'undefined', 'raw mode is never entered')
-  assert.equal(stdin.listenerCount('data'), 1, 'only the line feed reads stdin')
-
-  // Closing detaches the feed, so the terminal is handed back untouched.
+  // Driving the whole lifecycle — a line through a bound bridge, then close —
+  // must never touch the terminal mode.
+  stdin.emit('data', 'a steer line\n')
   open.io.close()
-  assert.equal(stdin.listenerCount('data'), 0)
+  assert.deepEqual(rawCalls, [], 'raw mode is never entered, so ISIG/ECHO/IXON stay on')
+  assert.equal(stdin.listenerCount('data'), 0, 'the feed is detached on close')
 })
