@@ -3,9 +3,11 @@
  * is covered and made `inert`, so neither a pointer nor an already-focused
  * caret can type into it. The guard itself sits beside the editor, because an
  * `inert` subtree cannot host the button that takes the session back.
+ *
+ * Both mechanisms are re-asserted on every paint: the host may swap the editor
+ * node while keeping its container, and a guard that trusted its own earlier
+ * DOM writes would then show "covered" over a typeable editor.
  */
-
-import type { SupervisionState } from './banner.js'
 
 /** The composer guard node id. */
 export const GUARD_ID = 'dsh-sup-guard'
@@ -32,19 +34,31 @@ function guardNode(doc: Document): HTMLElement | null {
 }
 
 /**
- * Remove the guard and put the editor back exactly as it was.
+ * Re-assert the covered state on one editor and its container.
+ * @param host - the editor's parent.
+ * @param holder - the container the guard overlays.
+ */
+function cover(host: HTMLElement, holder: HTMLElement): void {
+  host.setAttribute(HOST_ATTR, '')
+  host.setAttribute('inert', '')
+  if (!holder.hasAttribute(HOLDER_ATTR)) holder.setAttribute(HOLDER_ATTR, holder.style.position)
+  if (holder.style.position !== 'relative') holder.style.position = 'relative'
+}
+
+/**
+ * Remove the guard and put every editor and container back as it was.
  * @param doc - the page document.
  */
 export function releaseGuard(doc: Document): void {
-  const host = doc.querySelector<HTMLElement>(`[${HOST_ATTR}]`)
-  if (host !== null) {
+  // Every marked node, not the first: a host that replaced the editor can leave
+  // the old node behind, and a leftover `inert` would freeze typing for good.
+  for (const host of doc.querySelectorAll<HTMLElement>(`[${HOST_ATTR}]`)) {
     host.removeAttribute(HOST_ATTR)
     host.removeAttribute('inert')
-    const holder = host.parentElement
-    if (holder !== null && holder.hasAttribute(HOLDER_ATTR)) {
-      holder.style.position = holder.getAttribute(HOLDER_ATTR) ?? ''
-      holder.removeAttribute(HOLDER_ATTR)
-    }
+  }
+  for (const holder of doc.querySelectorAll<HTMLElement>(`[${HOLDER_ATTR}]`)) {
+    holder.style.position = holder.getAttribute(HOLDER_ATTR) ?? ''
+    holder.removeAttribute(HOLDER_ATTR)
   }
   guardNode(doc)?.remove()
 }
@@ -76,15 +90,14 @@ export function syncGuard(
   const existing = guardNode(doc)
   if (existing !== null && existing.parentElement === holder) {
     // The guard outlives a session switch in the same composer: retarget it, so
-    // Unlock never reclaims the session that was selected before this one.
+    // Unlock never reclaims the session selected before this one, and re-assert
+    // the covered state in case the host swapped the editor under the guard.
     existing.setAttribute(SESSION_ATTR, selected ?? '')
+    cover(host, holder)
     return
   }
   releaseGuard(doc)
-  host.setAttribute(HOST_ATTR, '')
-  host.setAttribute('inert', '')
-  holder.setAttribute(HOLDER_ATTR, holder.style.position)
-  holder.style.position = 'relative'
+  cover(host, holder)
   const guard = doc.createElement('div')
   guard.id = GUARD_ID
   guard.setAttribute(SESSION_ATTR, selected ?? '')

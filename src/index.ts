@@ -18,7 +18,7 @@ import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
 import { parseLine } from './stdin.js'
 import { registerSupervisionRoutes, supervisionState } from './routes.js'
-import { registerSkill } from './skill.js'
+import { isSkillsLike, registerSkill } from './skill.js'
 import type { RouteRegistrar, SupervisionFacts, SupervisionState } from './routes.js'
 import { SocketTransport } from './transport.js'
 import type { Bridge, Transport, TransportHandlers } from './transport.js'
@@ -630,22 +630,30 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   // so the routes wait for it instead of silently staying unregistered: a 404 on
   // `/dsh-supervision/state` is what the browser half sees as "not supervised".
   // Both the routes and the bundled skill read a service the profile may mount
-  // after this plugin, so one boot window serves both: a service that never
-  // arrives leaves that surface unmounted rather than failing the plugin.
-  const whenService = (name: string, use: () => void, remaining: number): void => {
-    if (ctx.get?.(name) !== undefined) {
-      use()
+  // after this plugin, so one boot window serves both. Presence is not readiness:
+  // a placeholder that lacks the member is still waited on, and a service that
+  // never becomes usable leaves that surface unmounted rather than failing the
+  // plugin.
+  const whenService = (
+    name: string,
+    ready: (value: unknown) => boolean,
+    use: (value: unknown) => void,
+    remaining: number,
+  ): void => {
+    const value: unknown = ctx.get?.(name)
+    if (ready(value)) {
+      use(value)
       return
     }
     if (remaining > 0) {
-      const timer = setTimeout(() => { whenService(name, use, remaining - 1) }, BOOT_POLL_MS)
+      const timer = setTimeout(() => { whenService(name, ready, use, remaining - 1) }, BOOT_POLL_MS)
       // A host that never mounts the service must not keep the process alive.
       if (typeof timer === 'object' && 'unref' in timer) timer.unref()
     }
   }
   const attempts = BOOT_WINDOW_MS / BOOT_POLL_MS
-  whenService('webServer', () => {
-    const server = registrarOf(ctx.get?.('webServer'))
+  whenService('webServer', value => registrarOf(value) !== undefined, value => {
+    const server = registrarOf(value)
     if (server === undefined) return
     ctx.effect(() => registerSupervisionRoutes(server, {
       snapshot,
@@ -658,11 +666,12 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
       },
     }))
   }, attempts)
+  whenService('skills', value => isSkillsLike(value), () => { registerSkill(ctx) }, attempts)
 
   // Read reflectively like the rest: a host without a skill registry still loads,
   // and the manual is the only copy of what the agent needs to know. The same
   // late-mount window applies: the registry may arrive after this plugin.
-  whenService('skills', () => { registerSkill(ctx) }, attempts)
+
 
   ctx.effect(() => () => {
     // A disposed plugin cannot answer anything: the parked asks fail closed
