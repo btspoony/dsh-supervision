@@ -72,6 +72,8 @@ interface AgentPresetsLike {
 interface WorkspaceRegistryLike {
   resolveByPath(path: string): Promise<{ attachSession(sessionId: string): Promise<void> } | undefined>
   unarchiveSession(sessionId: string): Promise<void>
+  /** The registry-global archive set; the sidebar hides every id in it. */
+  readonly archivedSessionIds: readonly string[]
 }
 
 /**
@@ -334,6 +336,19 @@ function workspaceRegistryOf(value: unknown): WorkspaceRegistryLike | undefined 
   const { resolveByPath, unarchiveSession } = value as { resolveByPath?: unknown; unarchiveSession?: unknown }
   if (typeof resolveByPath !== 'function' || typeof unarchiveSession !== 'function') return undefined
   return value as WorkspaceRegistryLike
+}
+
+/**
+ * The sessions an operator may pick: a host with a workspace registry hides the
+ * archive set in its sidebar, so a listing that showed archived sessions would
+ * offer ids with no row to open. A host without the registry lists everything.
+ * @param value - the `ctx.get('workspaceRegistry')` lookup.
+ * @returns the archived session ids, or an empty set.
+ */
+function archivedSessions(value: unknown): ReadonlySet<string> {
+  const registry = workspaceRegistryOf(value)
+  const ids = registry?.archivedSessionIds
+  return new Set(Array.isArray(ids) ? ids : [])
 }
 
 /**
@@ -1026,7 +1041,12 @@ function handlersFor(
     list(cwd: string | undefined): readonly SessionItem[] {
       // The shared bridge table, not one transport's private one: with both
       // surfaces mounted, a session held by the tty is bridged to the socket too.
+      // An archived session is hidden from the sidebar, so listing it would offer
+      // an id nobody can open — unless a bridge holds it right now: that bridge
+      // is live and the operator must still see what is steering the session.
+      const archived = archivedSessions(ctx.get?.('workspaceRegistry'))
       return ctx.agents.list()
+        .filter(agent => !archived.has(agent.session.id) || bridged.has(agent.session.id))
         .map(agent => ({
           id: agent.session.id,
           cwd: agent.session.header?.cwd ?? '',
