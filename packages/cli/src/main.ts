@@ -4,9 +4,10 @@ import { EXIT, exitCodeFor } from './exit.js';
 import { runList } from './list.js';
 import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
+import { routeFrame } from './route.js';
 import { skillText, version } from './skill.js';
 import { openTty } from './tty.js';
-import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, renderFrame, supervisionDir } from 'dsh-supervision-protocol';
+import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
 
 /** A root record restates `app`, because hc replaces the record whole. */
@@ -118,8 +119,11 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
           settle(exitCodeFor(frame.code));
           return;
         }
-        const bytes = renderFrame(frame);
-        if (bytes !== undefined) tty.write(bytes);
+        const routed = routeFrame(frame, process.stdout.isTTY === true);
+        if (routed.tty !== undefined) tty.write(routed.tty);
+        // The human sink is stdout itself, never the tty writer: a redirected
+        // stdout must stay free of the machine surface.
+        if (routed.out !== undefined) process.stdout.write(routed.out);
         // The root `idle` must precede any stdin read, which is what makes hc's
         // readiness gate and `started: true` work.
         if (frame.t === 'welcome') {

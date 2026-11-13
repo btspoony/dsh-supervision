@@ -17,6 +17,7 @@ const aliveOnly = (...pids: number[]) => (candidate: RegistryEntry): boolean => 
 test('a malformed or foreign registry entry is rejected', () => {
   assert.equal(isRegistryEntry(null), false);
   assert.equal(isRegistryEntry({ proto: PROTO + 1, pid: 1, socket: '/s', startedAt: 1, dshVersion: 'x' }), false);
+  assert.equal(isRegistryEntry({ proto: 1, pid: 1, socket: '/s', startedAt: 1, dshVersion: 'x' }), false);
   assert.equal(isRegistryEntry({ proto: PROTO, pid: '1', socket: '/s', startedAt: 1, dshVersion: 'x' }), false);
   assert.equal(isRegistryEntry({ proto: PROTO, pid: 1, socket: '', startedAt: 1, dshVersion: 'x' }), false);
   assert.equal(isRegistryEntry({ proto: PROTO, pid: 1, socket: '/s', startedAt: 1, dshVersion: 'x' }), true);
@@ -65,6 +66,7 @@ test('readRegistry skips malformed and foreign files in a temp registry dir', (t
   writeFileSync(join(dir, '42-abcdef12.json'), JSON.stringify(entry));
   writeFileSync(join(dir, 'broken.json'), '{');
   writeFileSync(join(dir, 'foreign.json'), JSON.stringify({ ...entry, proto: PROTO + 1 }));
+  writeFileSync(join(dir, 'stale.json'), JSON.stringify({ ...entry, proto: 1 }));
   writeFileSync(join(dir, 'note.txt'), 'ignored');
 
   assert.deepEqual(readRegistry(dir), [entry]);

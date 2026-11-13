@@ -62,12 +62,14 @@ export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): s
       for (const [index, source] of item.text.split('\n').entries()) {
         wrap(source, w, index === 0 ? '❯ ' : '  ', '  ', lines)
       }
+      trimTail(lines)
       return lines.join('\n')
     case 'assistant': {
       const reasoning = item.reasoning?.split('\n')[0]?.trim() ?? ''
       if (reasoning !== '') wrap(reasoning, w, '· ', '  ', lines)
       const text = item.text ?? ''
       if (text.trim() !== '') for (const source of text.split('\n')) wrap(source, w, '', '', lines)
+      trimTail(lines)
       if (item.interrupted === true) {
         const last = lines.length - 1
         if (last === -1) lines.push('(interrupted)')
@@ -88,9 +90,18 @@ export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): s
       wrap(`${glyph} ${head}${meta}`, w, '', '  ', lines)
       const detail = item.detail?.split('\n')[0]?.trim() ?? ''
       if (detail !== '') wrap(detail, w, '  └─ ', '     ', lines)
+      trimTail(lines)
       return lines.join('\n')
     }
   }
+}
+
+/**
+ * Drops trailing blank lines, so a source that ends with `\n` cannot leave the
+ * block newline-terminated. Interior blank lines are kept.
+ */
+function trimTail(lines: string[]): void {
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
 }
 
 /**

@@ -62,7 +62,7 @@ test('a terminated frame over the cap is rejected too', () => {
 test('invalid JSON and unknown frame types stop the stream', () => {
   assert.equal(decodeChunk('', 'not json\n').ok, false);
   assert.equal(decodeChunk('', '{"t":"nope"}\n').ok, false);
-  assert.equal(decodeChunk('', '{"t":"welcome","proto":2}\n').ok, false);
+  assert.equal(decodeChunk('', `{"t":"welcome","proto":${String(PROTO + 1)}}\n`).ok, false);
 });
 
 test('a welcome must name a known state and a whole turn count', () => {
