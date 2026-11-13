@@ -23,6 +23,17 @@ const WORD = /^[A-Za-z0-9_.+-]+$/
 /** C0, DEL, C1, and the bidi overrides — none may reach a terminal verbatim. */
 const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
 
+/**
+ * Neutralises every byte a terminal would execute or reorder: an `ESC` here can
+ * forge a 7501 record and a bidi override can reverse what a person reads.
+ * @param text - caller-controlled text, such as model output.
+ * @param keep - C0 characters legitimate at this sink; prose keeps `'\n\t'`.
+ * @returns `text` with every other control replaced by a space.
+ */
+export function stripControls(text: string, keep = ''): string {
+  return text.replace(CONTROLS, char => (keep.includes(char) ? char : ' '))
+}
+
 const STATES: readonly string[] = ['idle', 'working', 'done', 'blocked', 'error']
 const KINDS: readonly string[] = ['permission', 'question', 'auth']
 
@@ -60,7 +71,7 @@ export interface ReportFields {
 
 /** One control-free line, whitespace collapsed. */
 export function clean(text: string): string {
-  return text.replace(CONTROLS, ' ').replace(/\s+/g, ' ').trim()
+  return stripControls(text).replace(/\s+/g, ' ').trim()
 }
 
 /**

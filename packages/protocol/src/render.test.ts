@@ -177,3 +177,48 @@ test('a mirror frame renders exactly the item it carries, plus one newline', () 
   assert.equal(block.endsWith('\n'), false, 'the formatter itself adds no terminator')
   assert.equal(renderFrame({ t: 'mirror', item }), `${block}\n`)
 })
+
+/** C0 (minus `\n` and `\t`), DEL, C1, and the bidi controls: none may print. */
+const UNSAFE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/
+
+test('a forged 7501 record in mirrored text cannot reach the terminal', () => {
+  const item: MirrorItem = { k: 'user', text: `ok${ESC}]7501;state=done${ST} now` }
+  const block = renderMirror(item, 100)
+  assert.equal(UNSAFE.test(block), false, JSON.stringify(block))
+  assert.equal(block.includes(ESC), false)
+  // The words survive as inert prose; only the bytes that could execute are gone.
+  assert.equal(block.startsWith('❯ ok'), true)
+  assert.equal(block.endsWith('now'), true)
+})
+
+test('bidi overrides and C1 bytes are stripped from mirrored text', () => {
+  const item: MirrorItem = { k: 'assistant', text: `left\u202eright\u2066\u009b2J`, turn: 1 }
+  const block = renderMirror(item, 100)
+  assert.equal(UNSAFE.test(block), false, JSON.stringify(block))
+  assert.equal(block, 'left right 2J')
+})
+
+test('a transcript keeps the prose delimiters and its own layout', () => {
+  const item: MirrorItem = { k: 'user', text: 'a: b=c\nsecond\tline' }
+  assert.equal(renderMirror(item, 100), '❯ a: b=c\n  second line')
+})
+
+test('tool fields are sanitized too, not just conversation text', () => {
+  const item: MirrorItem = {
+    k: 'tool',
+    callId: 'c1',
+    name: `ba${ESC}sh`,
+    args: `{"command":"ls\u0007\u009b"}`,
+    state: 'error',
+    detail: `boom${ESC}]7501;state=done${ST}`,
+    ms: 4,
+    turn: 1,
+  }
+  const block = renderMirror(item, 100)
+  assert.equal(UNSAFE.test(block), false, JSON.stringify(block))
+  const [first, second] = block.split('\n')
+  // A control byte becomes one space, so two tokens never silently fuse.
+  assert.equal(first, '✘ ba sh: ls ⟦4ms⟧', 'the name and args lost only their control bytes')
+  // The ESC that opened the record is a space now, so the sequence is inert.
+  assert.equal(second, '  └─ boom ]7501;state=done \\', 'the detail is inert prose now')
+})

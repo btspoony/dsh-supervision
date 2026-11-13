@@ -10,13 +10,13 @@
 
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
-import { PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
+import { MAX_FRAME, PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
 import type { ErrorCode, HelloFrame, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
-import { mirrorOf } from './mirror.js'
+import { mirrorFrame, mirrorOf } from './mirror.js'
 import type { CallRecord, SessionEvent } from './mirror.js'
 import { parseLine } from './stdin.js'
 import { registerSupervisionRoutes, supervisionState } from './routes.js'
@@ -694,6 +694,8 @@ function handlersFor(
   readonly snapshot: () => SupervisionState
 } {
   const bridged = new Map<string, BridgeState>()
+  /** Set once the first oversized mirror is dropped, so stderr says it once. */
+  let mirrorDropped = false
   /** The effect layer's listeners, open while at least one bridge is live. */
   let subscriptions: readonly (() => void)[] | undefined
   /**
@@ -978,7 +980,16 @@ function handlersFor(
           // A mirror is per bridged session: only the attached one is
           // conversation here, and a child's transcript belongs to its own.
           const item = mirrorOf(event, state.calls)
-          if (item !== undefined) state.bridge.send({ t: 'mirror', item })
+          if (item !== undefined) {
+            // An oversized frame would close the socket, so it is dropped here
+            // instead; once is enough to say so on stderr.
+            const frame = mirrorFrame(item)
+            if (frame !== undefined) state.bridge.send(frame)
+            else if (!mirrorDropped) {
+              mirrorDropped = true
+              process.stderr.write(`dsh-supervision: mirror frame over ${String(MAX_FRAME)} bytes dropped\n`)
+            }
+          }
           if (fact !== undefined) feed(state, fact)
           continue
         }

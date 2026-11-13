@@ -4,7 +4,15 @@
  * timing a tool result needs. No socket, clock, or process state here.
  */
 
-import { MAX_ITEM_ARGS, MAX_ITEM_DETAIL, MAX_ITEM_REASONING, MAX_ITEM_TEXT } from 'dsh-supervision-protocol'
+import {
+  MAX_FRAME,
+  MAX_ITEM_ARGS,
+  MAX_ITEM_CALL_ID,
+  MAX_ITEM_DETAIL,
+  MAX_ITEM_NAME,
+  MAX_ITEM_REASONING,
+  MAX_ITEM_TEXT,
+} from 'dsh-supervision-protocol'
 import type { MirrorItem } from 'dsh-supervision-protocol'
 
 /** One model-visible content block, reduced to the shapes the mirror reads. */
@@ -91,9 +99,9 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
     }
     case 'assistant/message': {
       const { turn } = data
-      // A step with no turn cannot be placed in the transcript; inventing one
-      // would report a turn the event never claimed.
-      if (turn === undefined) return undefined
+      // A step with no usable turn cannot be placed in the transcript; inventing
+      // one would report a turn the event never claimed.
+      if (!isCount(turn)) return undefined
       // Tool-call blocks are ignored: their own `tool/call` carries them.
       const text = head(blockText(data.message?.content, 'text'), MAX_ITEM_TEXT)
       const reasoning = head(blockText(data.message?.content, 'reasoning').split('\n')[0]?.trim() ?? '', MAX_ITEM_REASONING)
@@ -112,8 +120,12 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
     }
     case 'tool/call': {
       const { callId, name, turn } = data
-      if (turn === undefined) return undefined
+      if (!isCount(turn)) return undefined
       if (callId === undefined || callId === '' || name === undefined || name === '') return undefined
+      // An identifier over its cap is dropped rather than cut: the result side
+      // looks its call up by this exact string, so a truncated id would print a
+      // tool header that could never pair with its own result.
+      if (!fits(callId, MAX_ITEM_CALL_ID) || !fits(name, MAX_ITEM_NAME)) return undefined
       const args = head(data.arguments ?? '', MAX_ITEM_ARGS)
       remember(calls, callId, { time: event.time, name, args })
       return { k: 'tool', callId, name, args, state: 'start', turn }
@@ -121,8 +133,8 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
     case 'tool/result': {
       const { turn } = data
       const callId = data.message?.toolCallId
-      if (turn === undefined) return undefined
-      if (callId === undefined || callId === '') return undefined
+      if (!isCount(turn)) return undefined
+      if (callId === undefined || callId === '' || !fits(callId, MAX_ITEM_CALL_ID)) return undefined
       const record = calls.get(callId)
       calls.delete(callId)
       // The call's name and arguments exist only in its own event, so a result
@@ -134,7 +146,7 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
       const detail = tail(last ?? data.error?.reason ?? '', MAX_ITEM_DETAIL)
       // Both stamps come from the host: a missing one leaves the duration
       // unknown, never a wall-clock guess.
-      const ms = event.time === undefined || record.time === undefined ? undefined : Math.max(0, event.time - record.time)
+      const ms = isCount(event.time) && isCount(record.time) ? Math.max(0, event.time - record.time) : undefined
       return {
         k: 'tool',
         callId,
@@ -149,6 +161,18 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
     default:
       return undefined
   }
+}
+
+/**
+ * The frame to send for one item, or `undefined` when the encoded frame would
+ * not fit the wire. `encodeFrame` refuses an oversized frame by closing the
+ * socket, and a transcript line must never cost the supervisor its attach, so
+ * the drop happens here instead. The per-field caps already keep every real
+ * item well inside the limit; this is the guarantee that does not depend on them.
+ */
+export function mirrorFrame(item: MirrorItem): { readonly t: 'mirror'; readonly item: MirrorItem } | undefined {
+  const frame = { t: 'mirror', item } as const
+  return Buffer.byteLength(JSON.stringify(frame), 'utf8') < MAX_FRAME ? frame : undefined
 }
 
 /** Record one started call, dropping the oldest entry when the table is full. */
@@ -174,19 +198,83 @@ function blockText(blocks: readonly ContentBlock[] | undefined, kind: 'text' | '
 function usageOf(usage: EventUsage | undefined): NonNullable<Extract<MirrorItem, { k: 'assistant' }>['usage']> | undefined {
   const inputTokens = usage?.inputTokens
   const outputTokens = usage?.outputTokens
-  if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') return undefined
+  // The forwarder stops the stream on a number it rejects, and the host payload
+  // is untrusted, so only counts the wire accepts are ever emitted.
+  if (!isCount(inputTokens) || !isCount(outputTokens)) return undefined
   const cacheReadTokens = usage?.cacheReadTokens
-  return typeof cacheReadTokens === 'number'
-    ? { inputTokens, outputTokens, cacheReadTokens }
-    : { inputTokens, outputTokens }
+  return isCount(cacheReadTokens) ? { inputTokens, outputTokens, cacheReadTokens } : { inputTokens, outputTokens }
 }
 
-/** Truncate to `limit`, keeping the head; a cap is a cap, never a marker. */
+/** True when `text` already fits a wire cap, so an identifier needs no cut. */
+function fits(text: string, limit: number): boolean {
+  let bytes = 0
+  for (const char of text) {
+    bytes += wireWidth(char)
+    if (bytes > limit) return false
+  }
+  return true
+}
+
+/**
+ * The bytes one code point costs inside a JSON string literal. JSON escapes a
+ * quote, a backslash, every C0 control and a lone surrogate, so a raw UTF-8
+ * count understates the wire — which is exactly how a `.length` cap let a
+ * control flood encode to ~98 KB.
+ */
+function wireWidth(char: string): number {
+  const code = char.charCodeAt(0)
+  if (code >= 0x20 && code !== 0x22 && code !== 0x5c) {
+    // A lone surrogate is escaped as `\udXXX`; a paired one is one code point,
+    // and its UTF-8 width is what the wire carries.
+    const lone = char.length === 1 && code >= 0xd800 && code <= 0xdfff
+    return lone ? 6 : Buffer.byteLength(char, 'utf8')
+  }
+  const short = code === 0x22 || code === 0x5c || (code >= 0x08 && code <= 0x0d && code !== 0x0b)
+  return short ? 2 : 6
+}
+
+/** Proves a host number is one the protocol's `isCount` will accept back. */
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** Truncate to `limit` wire bytes, keeping the head; a cap is a cap, never a marker. */
 function head(text: string, limit: number): string {
-  return text.length > limit ? text.slice(0, limit) : text
+  return fit(text, limit, 'head')
 }
 
-/** Truncate to `limit`, keeping the tail: an error's reason is at the end. */
+/** Truncate to `limit` wire bytes, keeping the tail: an error's reason is at the end. */
 function tail(text: string, limit: number): string {
-  return text.length > limit ? text.slice(-limit) : text
+  return fit(text, limit, 'tail')
+}
+
+/**
+ * The part of `text` within `limit` wire bytes, from its head or its tail. The
+ * wire is what counts — JSON escaping and multibyte text both grow there — so a
+ * control flood is cut far sooner than its `.length` suggests. A surrogate pair
+ * is never split, so no half character is ever emitted.
+ */
+function fit(text: string, limit: number, from: 'head' | 'tail'): string {
+  if (from === 'head') {
+    let bytes = 0
+    let end = 0
+    for (const char of text) {
+      bytes += wireWidth(char)
+      if (bytes > limit) return text.slice(0, end)
+      end += char.length
+    }
+    return text
+  }
+  let bytes = 0
+  let start = text.length
+  while (start > 0) {
+    // Step over a whole pair, never half of one.
+    const low = text.charCodeAt(start - 1)
+    const high = start > 1 ? text.charCodeAt(start - 2) : 0
+    const size = low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff ? 2 : 1
+    bytes += wireWidth(text.slice(start - size, start))
+    if (bytes > limit) return text.slice(start)
+    start -= size
+  }
+  return text
 }

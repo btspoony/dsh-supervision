@@ -8,7 +8,7 @@
  */
 
 import { isRecord, type MirrorItem, type OutFrame } from './frames.js'
-import { APP_NAME, encodeReport } from './osc.js'
+import { APP_NAME, encodeReport, stripControls } from './osc.js'
 
 /** Default wrap width when the caller has no terminal width of its own. */
 const DEFAULT_WIDTH = 100
@@ -56,18 +56,21 @@ export function renderFrame(frame: OutFrame): string | undefined {
 export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): string {
   const w = Math.max(1, Math.floor(width))
   const lines: string[] = []
+  // Every field below is model or host prose on the same byte stream a
+  // supervisor parses, so control bytes are neutralised before any wrapping:
+  // line breaks and tabs are the only C0 a transcript keeps.
   switch (item.k) {
     case 'user':
       // The gutter marks the first line only; every later line sits under it.
-      for (const [index, source] of item.text.split('\n').entries()) {
+      for (const [index, source] of stripControls(item.text, '\n\t').split('\n').entries()) {
         wrap(source, w, index === 0 ? '❯ ' : '  ', '  ', lines)
       }
       trimTail(lines)
       return lines.join('\n')
     case 'assistant': {
-      const reasoning = item.reasoning?.split('\n')[0]?.trim() ?? ''
+      const reasoning = stripControls(item.reasoning ?? '', '\n\t').split('\n')[0]?.trim() ?? ''
       if (reasoning !== '') wrap(reasoning, w, '· ', '  ', lines)
-      const text = item.text ?? ''
+      const text = stripControls(item.text ?? '', '\n\t')
       if (text.trim() !== '') for (const source of text.split('\n')) wrap(source, w, '', '', lines)
       trimTail(lines)
       if (item.interrupted === true) {
@@ -84,11 +87,12 @@ export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): s
     }
     case 'tool': {
       const glyph = item.state === 'start' ? '⏳' : item.state === 'ok' ? '✔' : '✘'
-      const summary = summarize(item.args)
-      const head = summary === '' ? item.name : `${item.name}: ${summary}`
+      const summary = summarize(stripControls(item.args, '\n\t'))
+      const name = stripControls(item.name)
+      const head = summary === '' ? name : `${name}: ${summary}`
       const meta = item.state !== 'start' && item.ms !== undefined ? ` ⟦${String(item.ms)}ms⟧` : ''
       wrap(`${glyph} ${head}${meta}`, w, '', '  ', lines)
-      const detail = item.detail?.split('\n')[0]?.trim() ?? ''
+      const detail = stripControls(item.detail ?? '', '\n\t').split('\n')[0]?.trim() ?? ''
       if (detail !== '') wrap(detail, w, '  └─ ', '     ', lines)
       trimTail(lines)
       return lines.join('\n')

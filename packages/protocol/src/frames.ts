@@ -14,13 +14,17 @@ export const MAX_FRAME = 64 * 1024
 /** The only protocol version either side speaks. */
 export const PROTO = 2
 
-// Caps a mirror frame's strings so one assistant block still encodes. The
-// codec never truncates: only a whole frame over `MAX_FRAME` throws, so staying
-// under these per-item caps is the caller's duty, not the wire's.
+// Caps a mirror frame's strings so one assistant block still encodes. Each is a
+// UTF-8 byte budget, not a character count: JSON escaping and multibyte text
+// both grow on the wire, so `.length` would not bound the frame. The codec never
+// truncates — only a whole frame over `MAX_FRAME` throws — so staying under these
+// is the caller's duty, and `MAX_FRAME` is the hard limit on the wire.
 export const MAX_ITEM_TEXT = 16 * 1024
 export const MAX_ITEM_REASONING = 1024
 export const MAX_ITEM_ARGS = 512
 export const MAX_ITEM_DETAIL = 2048
+export const MAX_ITEM_NAME = 64
+export const MAX_ITEM_CALL_ID = 96
 
 export type ErrorCode =
   | 'busy'

@@ -89,6 +89,13 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
   let title = '';
 
   return new Promise((resolve) => {
+    // The human sink is stdout, so a terminal that vanishes mid-attach would
+    // otherwise raise an unhandled `error` and kill the forwarder. It settles
+    // instead: no retry, no buffering, just one lost sink. The handler stays
+    // for the process's life — a write already in flight may raise after this
+    // bridge settled, and removing it would only re-expose the stream.
+    process.stdout.on('error', () => { settle(EXIT.backendLost); });
+
     const settle = (code: number): void => {
       if (settled) return;
       settled = true;

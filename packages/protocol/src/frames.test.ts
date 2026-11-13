@@ -9,7 +9,9 @@ import { test } from 'node:test';
 import {
   MAX_FRAME,
   MAX_ITEM_ARGS,
+  MAX_ITEM_CALL_ID,
   MAX_ITEM_DETAIL,
+  MAX_ITEM_NAME,
   MAX_ITEM_REASONING,
   MAX_ITEM_TEXT,
   PROTO,
@@ -100,7 +102,10 @@ test('sessions frames validate every item or reject the frame', () => {
 });
 
 test('the mirror caps are the ones the plugin must respect', () => {
-  assert.deepEqual([MAX_ITEM_TEXT, MAX_ITEM_REASONING, MAX_ITEM_ARGS, MAX_ITEM_DETAIL], [16 * 1024, 1024, 512, 2048]);
+  assert.deepEqual(
+    [MAX_ITEM_TEXT, MAX_ITEM_REASONING, MAX_ITEM_ARGS, MAX_ITEM_DETAIL, MAX_ITEM_NAME, MAX_ITEM_CALL_ID],
+    [16 * 1024, 1024, 512, 2048, 64, 96],
+  );
 });
 
 test('every mirror item kind survives the wire', () => {
