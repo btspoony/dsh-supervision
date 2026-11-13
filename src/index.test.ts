@@ -376,7 +376,6 @@ test('enabled: false registers nothing at all', async () => {
 /** A terminal the plugin reports on, with no real tty anywhere. */
 class FakeTty implements TtyIO {
   readonly out: string[] = []
-  readonly raw: boolean[] = []
   closes = 0
   #wake: (() => void) | undefined
   #ended = false
@@ -384,10 +383,6 @@ class FakeTty implements TtyIO {
   write(text: string): boolean {
     this.out.push(text)
     return true
-  }
-
-  setRaw(raw: boolean): void {
-    this.raw.push(raw)
   }
 
   close(): void {
@@ -436,7 +431,7 @@ test('a herdr-core terminal id mounts the tty and the socket surface together', 
   await withTerminal({ hc: 'hc-tty' }, async () => {
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
     // The synthesized first hello creates a session and binds it to the tty.
-    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    await until(() => host.created.length === 1, 'the tty bridge to attach')
     // Both surfaces: the tty renders, and the socket answers discovery.
     assert.ok(existsSync(await listening(dir)))
     assert.equal(host.created.length, 1)
@@ -455,7 +450,11 @@ test('a herdr-core terminal id mounts the tty and the socket surface together', 
 
     host.dispose()
     // Disposal releases the terminal and closes it.
-    assert.equal(tty.raw.at(-1), false)
+    assert.deepEqual(
+      sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json),
+      {},
+      'the tty bridge was released',
+    )
     assert.equal(tty.closes, 1)
   })
 })
@@ -467,7 +466,7 @@ test('DSH_SUP_TERMINAL_ID mounts the tty and keeps the socket surface', async ()
   await withTerminal({ dshSup: 'sup-tty' }, async () => {
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
     // The synthesized first hello creates a session and binds it to the tty.
-    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    await until(() => host.created.length === 1, 'the tty bridge to attach')
     assert.ok(existsSync(await listening(dir)))
     host.dispose()
   })
@@ -480,7 +479,7 @@ test('the plugin terminal id outranks the fallback, and an empty value falls thr
     const host = new FakeHost()
     const tty = new FakeTty()
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
-    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    await until(() => host.created.length === 1, 'the tty bridge to attach')
     assert.ok(existsSync(await listening(dir)))
     host.dispose()
   })
@@ -490,7 +489,7 @@ test('the plugin terminal id outranks the fallback, and an empty value falls thr
     const host = new FakeHost()
     const tty = new FakeTty()
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
-    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    await until(() => host.created.length === 1, 'the tty bridge to attach')
     assert.ok(existsSync(await listening(dir)))
     host.dispose()
   })
@@ -537,7 +536,7 @@ test('a socket attach to the session the tty already holds is refused as busy', 
   const tty = new FakeTty()
   await withTerminal({ hc: 'hc-tty' }, async () => {
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
-    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    await until(() => host.created.length === 1, 'the tty bridge to attach')
     const client = new Client(await listening(dir))
     await client.ready()
     client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: host.created[0] ?? '' })
@@ -545,7 +544,11 @@ test('a socket attach to the session the tty already holds is refused as busy', 
     assert.equal(refusal?.t, 'error')
     assert.equal(refusal?.t === 'error' ? refusal.code : '', 'busy')
     // The refusal never overwrote the tty's bridge: the session is still held.
-    assert.equal(tty.raw.at(-1), true)
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      [host.created[0] ?? ''],
+      'the tty bridge survived',
+    )
     host.dispose()
   })
 })
@@ -562,7 +565,7 @@ test('the tty first session retries while the agent factory is still missing', a
       await new Promise<void>(resolve => { setTimeout(resolve, 25) })
     }
     assert.equal(host.created.length, 1)
-    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    await until(() => host.created.length === 1, 'the tty bridge to attach')
     host.dispose()
   })
 })
@@ -596,7 +599,11 @@ test('the tty boot create waits for a late preset registry and mounts it', async
       await new Promise<void>(resolve => { setTimeout(resolve, 25) })
     }
     assert.deepEqual(host.mountedPresets, ['ptc'], 'the boot session mounts its tools')
-    assert.equal(tty.raw.at(-1), true)
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      [host.created[0] ?? ''],
+      'the tty bridge is bound',
+    )
     host.dispose()
   })
 })
@@ -1508,7 +1515,7 @@ test('/attach to a session the other surface holds is refused and keeps the sock
   host.add('session-b', '/repo/b')
   await withTerminal({ hc: 'hc-tty' }, async () => {
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
-    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    await until(() => host.created.length === 1, 'the tty bridge to attach')
     const held = host.created[0] ?? ''
     const client = await attached(host, dir, 'session-b')
 
@@ -1523,7 +1530,11 @@ test('/attach to a session the other surface holds is refused and keeps the sock
     client.write({ t: 'line', text: 'still session-b' })
     await until(() => host.steered.length === 1, 'the steer')
     assert.equal(host.steered[0]?.session, 'session-b')
-    assert.equal(tty.raw.at(-1), true)
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)).sort(),
+      [host.created[0] ?? '', 'session-b'].sort(),
+      'the tty bridge survived',
+    )
     host.dispose()
   })
 })
@@ -1553,7 +1564,7 @@ test('reclaiming a tty-held session leaves the socket bridge untouched', async (
   host.add('session-b', '/repo/b')
   await withTerminal({ hc: 'hc-tty' }, async () => {
     apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
-    await until(() => tty.raw.at(-1) === true, 'the tty bridge to attach')
+    await until(() => host.created.length === 1, 'the tty bridge to attach')
     const held = host.created[0] ?? ''
     await attached(host, dir, 'session-b')
 
@@ -1564,7 +1575,11 @@ test('reclaiming a tty-held session leaves the socket bridge untouched', async (
       JSON.stringify({ session: held }),
     )
     assert.equal(reclaim.statusCode, 200)
-    assert.equal(tty.raw.at(-1), false, 'the tty bridge was released')
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      ['session-b'],
+      'the tty bridge was released',
+    )
     const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
     assert.deepEqual(Object.keys(sessions), ['session-b'], 'the socket bridge survived')
     host.dispose()

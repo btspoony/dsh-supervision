@@ -21,9 +21,7 @@ export interface TtyIO {
   write(text: string): boolean
   /** Complete input lines from the owning keyboard, already split. */
   lines(): AsyncIterable<string>
-  /** Raw mode while a bridge is bound; the previous mode otherwise. */
-  setRaw(raw: boolean): void
-  /** Release the terminal and restore its prior state; idempotent. */
+  /** Release the terminal; idempotent. */
   close(): void
 }
 
@@ -124,7 +122,6 @@ export class TtyTransport implements Transport {
     if (this.#closed || this.#dead) return false
     const previous = this.#session
     this.#session = session
-    this.#io.setRaw(true)
     // A switch releases the old session, exactly as the socket transport does.
     if (previous !== undefined && previous !== session) this.#teardown(previous)
     return true
@@ -143,10 +140,9 @@ export class TtyTransport implements Transport {
     }
   }
 
-  /** Holds no session from now on: the terminal goes back to cooked mode. */
+  /** Holds no session from now on. */
   #release(): void {
     this.#session = undefined
-    this.#io.setRaw(false)
   }
 
   /** Renders one frame to the terminal; frames with no tty rendering are dropped. */
@@ -177,7 +173,7 @@ export class TtyTransport implements Transport {
     const session = this.#session
     if (this.#closed || session === undefined) return
     // The surface this bridge reported through is gone, so the bridge is
-    // finished: release (raw mode back), then run the same `bye` a socket drop
+    // finished: release the binding, then run the same `bye` a socket drop
     // does — it drops the session's listeners and fails its parked asks closed.
     // The transport stays mounted, not the bridge.
     this.#release()

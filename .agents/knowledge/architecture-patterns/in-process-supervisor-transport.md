@@ -81,9 +81,10 @@ different session, while the terminal renders the one it holds.
 - The in-process write stays synchronous, with exception containment and a
   labelled shortcut for the blocking half. A bounded asynchronous sink would be
   the fix; unbounded buffering would trade a stall for unbounded memory.
-- Real-terminal behaviour (record interleaving with host logs, raw-mode restore
-  on a real pty, a stopped terminal) is stated as unverified in the delivery
-  plan rather than claimed.
+- Real-terminal behaviour (record interleaving with host logs, a stopped
+  terminal) is stated as unverified in the delivery plan rather than claimed.
+- The bridge reads only complete lines, so it never needs raw mode; stealing
+  ISIG, ECHO or IXON from the operator would be a regression, not a feature.
 
 ## Related decisions
 

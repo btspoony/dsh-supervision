@@ -106,8 +106,8 @@ The tty path needs no forwarder: the process renders its `OutFrame`s through
 protocol rule exists twice. It claims its first session through a synthesized
 `hello` carrying a create arm in `process.cwd()`, and a refusal or a `reclaim`
 ends the bridge, not the transport: the owner re-enters with `/new` or
-`/attach` from the same keyboard, and raw mode holds only while a session is
-bound. A terminal that cannot be opened — including a stdin that is not a
+`/attach` from the same keyboard. The terminal never leaves the driver's line
+mode, so the operator keeps Ctrl+C, Ctrl+Z, Ctrl+\, Ctrl+S/Q, echo and editing. A terminal that cannot be opened — including a stdin that is not a
 terminal, since a pipe any writer can feed must never become the owner's
 command channel — writes the reason to stderr and mounts nothing, so the host
 keeps its sessions.
@@ -369,7 +369,7 @@ behaviour; a process inside an hc terminal exposes no such surface at all.
 | plugin refuses a client frame: `proto` not 1, malformed or oversized frame, `line` before `hello` | `error:code=protocol` carrying the reason, exit 6. The frame bound no bridge and the backend is alive, so this is never `backend offline` either |
 | usage/no candidate/multiple `dsh web` processes | print candidates, exit 2 |
 | `hc kill w1` | kills the forwarder only. The agent, session and browser GUI keep running; approvals return to the GUI answerer |
-| browser `reclaim` | host sends `bye/reclaimed` and drops that bridge only. Forwarder path: the socket closes, the forwarder writes `clear` and exits 0. tty path: the process writes `clear`, restores cooked mode and stays mounted for `/new` or `/attach` — it must not exit, because exiting would drop every session the host is running. Approvals return to the GUI immediately in both cases; the UI banner disappears on the next poll |
+| browser `reclaim` | host sends `bye/reclaimed` and drops that bridge only. Forwarder path: the socket closes, the forwarder writes `clear` and exits 0. tty path: the process writes `clear` and stays mounted for `/new` or `/attach` — it must not exit, because exiting would drop every session the host is running. Approvals return to the GUI immediately in both cases; the UI banner disappears on the next poll |
 
 No automatic reconnect: a restarted `dsh web` is a new process with a new
 socket; the supervisor starts a new forwarder. Reconnecting would silently
@@ -414,7 +414,7 @@ back to the person already looking at the session.
 1. Host sends `{"t":"bye","reason":"reclaimed"}` and drops that bridge — closing
    its socket on the forwarder path, and releasing it while the transport stays
    mounted on the tty path.
-2. The tty path writes `state=clear` and restores cooked mode in place; the
+2. The tty path writes `state=clear` in place; the
    forwarder writes `state=clear` and exits 0, so hc records a finished terminal
    with exit 0. Only the forwarder exits: the host process keeps every session
    it hosts.
