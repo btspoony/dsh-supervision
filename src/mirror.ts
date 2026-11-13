@@ -61,7 +61,8 @@ export interface SessionEvent {
 export interface CallRecord {
   readonly name: string
   readonly args: string
-  readonly time: number
+  /** The call's own stamp, absent when the host stamped no time on it. */
+  readonly time?: number
 }
 
 /**
@@ -80,7 +81,6 @@ export const MAX_CALLS = 64
 export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): MirrorItem | undefined {
   const data = event.data
   if (data === undefined) return undefined
-  const turn = data.turn ?? 0
   switch (event.type) {
     case 'user/message': {
       // Synthetic injections (system-reminder, time-context, mstar-engine, …)
@@ -90,6 +90,10 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
       return text === '' ? undefined : { k: 'user', text }
     }
     case 'assistant/message': {
+      const { turn } = data
+      // A step with no turn cannot be placed in the transcript; inventing one
+      // would report a turn the event never claimed.
+      if (turn === undefined) return undefined
       // Tool-call blocks are ignored: their own `tool/call` carries them.
       const text = head(blockText(data.message?.content, 'text'), MAX_ITEM_TEXT)
       const reasoning = head(blockText(data.message?.content, 'reasoning').split('\n')[0]?.trim() ?? '', MAX_ITEM_REASONING)
@@ -107,14 +111,17 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
       }
     }
     case 'tool/call': {
-      const { callId, name } = data
+      const { callId, name, turn } = data
+      if (turn === undefined) return undefined
       if (callId === undefined || callId === '' || name === undefined || name === '') return undefined
       const args = head(data.arguments ?? '', MAX_ITEM_ARGS)
-      remember(calls, callId, { time: event.time ?? Date.now(), name, args })
+      remember(calls, callId, { time: event.time, name, args })
       return { k: 'tool', callId, name, args, state: 'start', turn }
     }
     case 'tool/result': {
+      const { turn } = data
       const callId = data.message?.toolCallId
+      if (turn === undefined) return undefined
       if (callId === undefined || callId === '') return undefined
       const record = calls.get(callId)
       calls.delete(callId)
@@ -125,6 +132,9 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
       const blocks = data.message?.content ?? []
       const last = blocks.filter(block => block.type === 'text' && (block.text ?? '').trim() !== '').at(-1)?.text
       const detail = tail(last ?? data.error?.reason ?? '', MAX_ITEM_DETAIL)
+      // Both stamps come from the host: a missing one leaves the duration
+      // unknown, never a wall-clock guess.
+      const ms = event.time === undefined || record.time === undefined ? undefined : Math.max(0, event.time - record.time)
       return {
         k: 'tool',
         callId,
@@ -132,7 +142,7 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
         args: record.args,
         state: data.message?.isError === true ? 'error' : 'ok',
         ...(detail === '' ? {} : { detail }),
-        ms: Math.max(0, (event.time ?? Date.now()) - record.time),
+        ...(ms === undefined ? {} : { ms }),
         turn,
       }
     }

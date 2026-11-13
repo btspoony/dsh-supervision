@@ -121,13 +121,14 @@ test('a tool call starts, remembers its time, and its result reports ms and deta
 
 test('a failed tool result reads error, and its detail is the last non-empty block tail', () => {
   const calls = table()
-  mirrorOf({ type: 'tool/call', time: 0, data: { callId: 'c2', name: 'grep', arguments: '{}' } }, calls)
+  mirrorOf({ type: 'tool/call', time: 0, data: { turn: 1, callId: 'c2', name: 'grep', arguments: '{}' } }, calls)
   const text = `${'z'.repeat(MAX_ITEM_DETAIL * 2)}tail`
   const item = mirrorOf(
     {
       type: 'tool/result',
       time: 3,
       data: {
+        turn: 1,
         message: { toolCallId: 'c2', isError: true, content: [{ type: 'text', text }, { type: 'text', text: '  ' }] },
         error: { name: 'GrepError', code: 'ENOENT' },
       },
@@ -143,12 +144,12 @@ test('a failed tool result reads error, and its detail is the last non-empty blo
 
 test('a tool result with no text block falls back to the error reason', () => {
   const calls = table()
-  mirrorOf({ type: 'tool/call', time: 0, data: { callId: 'c3', name: 'read', arguments: '{}' } }, calls)
+  mirrorOf({ type: 'tool/call', time: 0, data: { turn: 1, callId: 'c3', name: 'read', arguments: '{}' } }, calls)
   const item = mirrorOf(
     {
       type: 'tool/result',
       time: 1,
-      data: { message: { toolCallId: 'c3', isError: true, content: [] }, error: { name: 'X', code: 'Y', reason: 'no such file' } },
+      data: { turn: 1, message: { toolCallId: 'c3', isError: true, content: [] }, error: { name: 'X', code: 'Y', reason: 'no such file' } },
     },
     calls,
   )
@@ -157,14 +158,34 @@ test('a tool result with no text block falls back to the error reason', () => {
 })
 
 test('a tool result for a call this bridge never saw maps to nothing', () => {
-  const result: SessionEvent = { type: 'tool/result', time: 5, data: { message: { toolCallId: 'gone', content: [] } } }
+  const result: SessionEvent = { type: 'tool/result', time: 5, data: { turn: 1, message: { toolCallId: 'gone', content: [] } } }
   assert.equal(mirrorOf(result, table()), undefined)
+})
+
+test('an item whose event carries no turn maps to nothing', () => {
+  const calls = table()
+  assert.equal(
+    mirrorOf({ type: 'assistant/message', time: 1, data: { message: { content: [{ type: 'text', text: 'hi' }] } } }, calls),
+    undefined,
+  )
+  assert.equal(mirrorOf({ type: 'tool/call', time: 1, data: { callId: 'c0', name: 'bash', arguments: '{}' } }, calls), undefined)
+  mirrorOf({ type: 'tool/call', time: 1, data: { turn: 1, callId: 'c1', name: 'bash', arguments: '{}' } }, calls)
+  const result: SessionEvent = { type: 'tool/result', time: 2, data: { message: { toolCallId: 'c1', content: [] } } }
+  assert.equal(mirrorOf(result, calls), undefined)
+})
+
+test('a tool pair whose events carry no time reports no ms', () => {
+  const calls = table()
+  mirrorOf({ type: 'tool/call', data: { turn: 1, callId: 'c1', name: 'bash', arguments: '{}' } }, calls)
+  const item = mirrorOf({ type: 'tool/result', time: 2, data: { turn: 1, message: { toolCallId: 'c1', content: [] } } }, calls)
+  assert.ok(item !== undefined && item.k === 'tool')
+  assert.equal(item.ms, undefined, 'an unstamped call has no duration to report')
 })
 
 test('the call table is bounded and drops the oldest entry', () => {
   const calls = table()
   for (let index = 0; index < MAX_CALLS + 4; index += 1) {
-    mirrorOf({ type: 'tool/call', time: index, data: { callId: `c${String(index)}`, name: 'bash', arguments: '{}' } }, calls)
+    mirrorOf({ type: 'tool/call', time: index, data: { turn: 1, callId: `c${String(index)}`, name: 'bash', arguments: '{}' } }, calls)
   }
   assert.equal(calls.size, MAX_CALLS)
   assert.equal(calls.has('c0'), false, 'the oldest calls are gone')
@@ -174,11 +195,11 @@ test('the call table is bounded and drops the oldest entry', () => {
 test('the args cap holds on a tool call and on its result', () => {
   const calls = table()
   const args = 'a'.repeat(MAX_ITEM_ARGS * 2)
-  const item = mirrorOf({ type: 'tool/call', time: 0, data: { callId: 'c9', name: 'bash', arguments: args } }, calls)
+  const item = mirrorOf({ type: 'tool/call', time: 0, data: { turn: 1, callId: 'c9', name: 'bash', arguments: args } }, calls)
   assert.ok(item !== undefined && item.k === 'tool')
   assert.equal(item.args.length, MAX_ITEM_ARGS)
 
-  const result = mirrorOf({ type: 'tool/result', time: 1, data: { message: { toolCallId: 'c9', content: [] } } }, calls)
+  const result = mirrorOf({ type: 'tool/result', time: 1, data: { turn: 1, message: { toolCallId: 'c9', content: [] } } }, calls)
   assert.ok(result !== undefined && result.k === 'tool')
   assert.equal(result.args, item.args, 'the result echoes the call it remembers')
 })
