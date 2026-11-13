@@ -1054,6 +1054,77 @@ test('a bridge that disconnects releases its listeners', async () => {
   host.dispose()
 })
 
+test('the attached session mirrors its conversation; a child session emits none', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-child', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  host.emit('session-1', {
+    type: 'user/message',
+    time: 100,
+    data: { turn: 1, content: [{ type: 'text', text: 'implement the mirror' }], source: { kind: 'user' } },
+  })
+  host.emit('session-1', {
+    type: 'assistant/message',
+    time: 200,
+    data: {
+      turn: 1,
+      message: { content: [{ type: 'reasoning', text: 'one step per block' }, { type: 'text', text: 'On it.' }] },
+      usage: { inputTokens: 12, outputTokens: 3 },
+    },
+  })
+  host.emit('session-1', {
+    type: 'tool/call',
+    time: 300,
+    data: { turn: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' },
+  })
+  host.emit('session-1', {
+    type: 'tool/result',
+    time: 312,
+    data: { turn: 1, message: { toolCallId: 'c1', content: [{ type: 'text', text: 'a.txt' }] } },
+  })
+  // A synthetic injection and a child's conversation must not reach this wire.
+  host.emit('session-1', {
+    type: 'user/message',
+    data: { turn: 1, content: [{ type: 'text', text: 'clock tick' }], source: { kind: 'time-context' } },
+  })
+  host.emit('session-child', {
+    type: 'user/message',
+    data: { turn: 1, content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } },
+  })
+
+  try {
+    await until(() => client.frames.filter(frame => frame.t === 'mirror').length === 4, 'the four mirror frames')
+    assert.deepEqual(client.frames.filter(frame => frame.t === 'mirror'), [
+      { t: 'mirror', item: { k: 'user', text: 'implement the mirror' } },
+      {
+        t: 'mirror',
+        item: {
+          k: 'assistant',
+          text: 'On it.',
+          reasoning: 'one step per block',
+          usage: { inputTokens: 12, outputTokens: 3 },
+          turn: 1,
+        },
+      },
+      { t: 'mirror', item: { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'start', turn: 1 } },
+      {
+        t: 'mirror',
+        item: { k: 'tool', callId: 'c1', name: 'bash', args: '', state: 'ok', detail: 'a.txt', ms: 12, turn: 1 },
+      },
+    ])
+    // Nothing else reaches the wire: not the synthetic message, not the child.
+    const settled = client.frames.length
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(client.frames.length, settled, 'a synthetic message and a child session emit no mirror')
+  } finally {
+    host.dispose()
+  }
+})
+
 test('list reports live and bridged state without binding anything', async () => {
   const dir = tempDir()
   const host = new FakeHost()
