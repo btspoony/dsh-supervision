@@ -12,6 +12,7 @@ import {
   ProcessTerminal,
   TuiAltScreen,
   getKeybindings,
+  isKeyRelease,
   matchesKey,
   truncateToWidth,
   wrapTextWithAnsi,
@@ -157,6 +158,10 @@ export type KeyAction =
  *   the cursor instead, so they are left to the editor.
  */
 export function keyAction(data: string, editorEmpty: boolean): KeyAction | undefined {
+  // A Kitty terminal reports press, repeat and release for the same key, and
+  // `matchesKey` cannot tell them apart. Acting on a release would scroll a
+  // second time on PageUp/PageDown and send a second `/cancel` on Ctrl+C.
+  if (isKeyRelease(data)) return undefined;
   // Ctrl+C cancels the running turn instead of leaving the attach; Ctrl+D is
   // the way out. Both are editor bindings by default, so they land here first.
   if (matchesKey(data, 'ctrl+c')) return { kind: 'cancel' };

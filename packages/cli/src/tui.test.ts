@@ -106,6 +106,33 @@ test('keys map to surface actions, arrows only with an empty editor', () => {
   assert.deepEqual(keyAction('\x1b[F', true), { kind: 'bottom' });
   // Text in the editor owns the arrows, Home and End.
   assert.equal(keyAction('\x1b[A', false), undefined);
+
+test('a key release never acts: no second scroll, no second /cancel, no exit', () => {
+  // Kitty encodes the event type after the modifier: \x1b[<code>;<mods>:3u for
+  // printable keys, \x1b[<num>;<mods>:3~ for functional keys. `:3` is release.
+  const releases = {
+    pageUp: '\x1b[5;1:3~',
+    pageDown: '\x1b[6;1:3~',
+    ctrlC: '\x1b[99;5:3u',
+    ctrlD: '\x1b[100;5:3u',
+    up: '\x1b[1;1:3A',
+    down: '\x1b[1;1:3B',
+    home: '\x1b[1;1:3H',
+    end: '\x1b[1;1:3F',
+  };
+  for (const [name, data] of Object.entries(releases)) {
+    assert.equal(keyAction(data, true), undefined, `${name} release must not act`);
+    assert.equal(keyAction(data, false), undefined, `${name} release must not act with text in the editor`);
+  }
+
+  // The matching press sequences still do.
+  assert.deepEqual(keyAction('\x1b[5;1~', true), { kind: 'page', delta: -1 });
+  assert.deepEqual(keyAction('\x1b[6;1~', true), { kind: 'page', delta: 1 });
+  assert.deepEqual(keyAction('\x03', true), { kind: 'cancel' });
+  assert.deepEqual(keyAction('\x04', true), { kind: 'exit' });
+  assert.deepEqual(keyAction('\x1b[5~', true), { kind: 'page', delta: -1 });
+  assert.deepEqual(keyAction('\x1b[6~', true), { kind: 'page', delta: 1 });
+});
   assert.equal(keyAction('\x1b[H', false), undefined);
   assert.equal(keyAction('x', true), undefined);
 });
