@@ -1,15 +1,8 @@
-/**
- * The banner's pure half: what counts as a readable payload, which session gets
- * a banner, and the sentence it shows.
- */
-
-import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { bannerText, isBridgePayload, supervisedEntry } from './banner.js'
-import type { BridgeEntry } from './banner.js'
+import assert from 'node:assert/strict'
+import { isBridgePayload } from './banner.js'
 
-/** One well-formed entry, as the state route writes it. */
-const entry: BridgeEntry = { bridged: true, terminal: 'w1', pid: 51234, since: 1762, asks: ['a1b2c3'] }
+const entry = { bridged: true, terminal: 'dsh-sup', pid: 81773, since: 2, asks: [] }
 
 test('a proto-1 payload with readable entries is accepted', () => {
   assert.equal(isBridgePayload({ proto: 1, sessions: {} }), true)
@@ -35,22 +28,4 @@ test('anything this client cannot read is not a payload', () => {
     { proto: 1, sessions: { 'session-a': { ...entry, asks: 'a1b2c3' } } },
   ]
   for (const value of rejected) assert.equal(isBridgePayload(value), false, JSON.stringify(value))
-})
-
-test('only the bridged current session gets an entry', () => {
-  const state = { proto: 1, sessions: { 'session-a': entry } }
-  assert.deepEqual(supervisedEntry(state, 'session-a'), entry)
-  assert.equal(supervisedEntry(state, 'session-b'), undefined)
-  assert.equal(supervisedEntry(undefined, 'session-a'), undefined)
-})
-
-test('a session name that collides with an object member is not a bridge', () => {
-  assert.equal(supervisedEntry({ proto: 1, sessions: {} }, 'toString'), undefined)
-})
-
-test('the sentence names the terminal, the pid and where approvals are answered', () => {
-  assert.equal(
-    bannerText(entry),
-    'Supervised from w1 (pid 51234) · approvals are answered there',
-  )
 })

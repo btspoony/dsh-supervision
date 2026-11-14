@@ -1,17 +1,27 @@
 /**
- * The composer guard: while a session is supervised from a terminal its editor
- * is covered and made `inert`, so neither a pointer nor an already-focused
- * caret can type into it. The guard itself sits beside the editor, because an
- * `inert` subtree cannot host the button that takes the session back.
+ * The composer guard: while a session is supervised from a terminal its input
+ * area — editor and toolbar — is covered and the editor is made `inert`, so
+ * neither a pointer nor an already-focused caret can type into it. On a card
+ * the card's subtree (editor and toolbar) is inert; a card-less composer covers
+ * only the editor, because its placement may be a page container.
+ * The guard
+ * itself sits beside the inert subtree, because an `inert` subtree cannot host
+ * the button that takes the session back.
  *
  * Both mechanisms are re-asserted on every paint: the host may swap the editor
  * node while keeping its container, and a guard that trusted its own earlier
  * DOM writes would then show "covered" over a typeable editor.
  */
 
+import type { Translate } from './locale.js'
+
 /** The composer guard node id. */
 export const GUARD_ID = 'dsh-sup-guard'
-/** Marks the editor this module made inert. */
+/** The caption span's class; also keys the stylesheet. */
+export const COPY_CLASS = 'dsh-sup-copy'
+/** The corner badge's class; also keys the stylesheet. */
+export const BADGE_CLASS = 'dsh-sup-badge'
+/** Marks every node this module made inert; `1` when it was already inert. */
 export const HOST_ATTR = 'data-dsh-sup-composer'
 /** Records the holder's original inline `position` while the guard is mounted. */
 const HOLDER_ATTR = 'data-dsh-sup-holder'
@@ -34,15 +44,89 @@ function guardNode(doc: Document): HTMLElement | null {
 }
 
 /**
- * Re-assert the covered state on one editor and its container.
- * @param host - the editor's parent.
+ * Seat the guard's border on the holder's own rounding, so the cover hugs the
+ * input card instead of guessing a token.
+ * @param guard - the mounted guard.
  * @param holder - the container the guard overlays.
  */
-function cover(host: HTMLElement, holder: HTMLElement): void {
-  host.setAttribute(HOST_ATTR, '')
-  host.setAttribute('inert', '')
+function seatGuard(guard: HTMLElement, holder: HTMLElement): void {
+  const radius = getComputedStyle(holder).borderRadius
+  guard.style.borderRadius = radius === '' ? '16px' : radius
+  // The bottom-left badge reads the same rounding, so its corner follows the
+  // card instead of keeping a fixed radius that may not match.
+  guard.style.setProperty('--dsh-sup-radius', radius === '' ? '16px' : radius)
+}
+
+/**
+ * Where the guard may mount for one editor. The composer card wins when it is
+ * a strict ancestor of `host` (the cover then spans editor and toolbar); when
+ * the card IS the editor's own parent, the nearest strict ancestor outside the
+ * inert subtree takes over, so Unlock stays clickable and the composer is
+ * still covered — that fallback is a placement only, not a composer boundary.
+ * Null only when `host` has no ancestor at all.
+ * @param host - the editor's parent, the subtree made inert.
+ * @param card - the composer card when it wraps the editor.
+ * @returns the placement, or null when nothing usable exists.
+ */
+function placementFor(host: HTMLElement, card: HTMLElement | null): HTMLElement | null {
+  if (card !== null && card !== host && card.contains(host)) return card
+  let cur: HTMLElement | null = host.parentElement
+  while (cur !== null) {
+    if (cur !== host && cur.contains(host)) return cur
+    cur = cur.parentElement
+  }
+  return null
+}
+
+/**
+ * Re-assert the covered state on one editor and its container. The composer
+ * card's element children are made inert except the guard itself, so toolbar
+ * siblings (send, stop, attach) cannot be focused or Enter-activated either.
+ * Without a card only `host` is made inert: the placement may be a page
+ * container, and sweeping its children would disable unrelated UI.
+ * @param host - the editor's parent; always covered.
+ * @param holder - the placement the guard overlays.
+ * @param card - the composer card when it is a strict ancestor of `host`.
+ */
+function cover(host: HTMLElement, holder: HTMLElement, card: HTMLElement | null): void {
+  /** `1` records that the node was already inert, so release leaves it inert. */
+  const mark = (el: Element): void => {
+    if (el.id === GUARD_ID || el.hasAttribute(HOST_ATTR)) return
+    el.setAttribute(HOST_ATTR, el.hasAttribute('inert') ? '1' : '')
+    if (!el.hasAttribute('inert')) el.setAttribute('inert', '')
+  }
+  mark(host)
+  // Only the composer card's own subtree is swept. Without a card the
+  // placement may be a page container, so only the editor host is covered:
+  // sweeping its siblings would freeze session rows, navigation and any
+  // nested list wrapper around them. Card-less toolbars are therefore not
+  // inert (a documented limit, mirrored in the README).
+  if (card !== null) {
+    for (const child of Array.from(card.children)) mark(child)
+  }
+  // Positionability comes from the cascade, not the inline style: a composer
+  // card laid out by CSS (`position: sticky`, the usual bottom-anchored input)
+  // must keep its own layout. Only a static box is lifted to relative.
   if (!holder.hasAttribute(HOLDER_ATTR)) holder.setAttribute(HOLDER_ATTR, holder.style.position)
-  if (holder.style.position !== 'relative') holder.style.position = 'relative'
+  if (getComputedStyle(holder).position === 'static') holder.style.position = 'relative'
+}
+
+/**
+ * Undo every marker this module wrote, leaving the guard node itself in place.
+ * @param doc - the page document.
+ */
+function unmark(doc: Document): void {
+  // Every marked node, not the first: a host that replaced the editor can leave
+  // the old node behind, and a leftover `inert` would freeze typing for good.
+  for (const host of doc.querySelectorAll<HTMLElement>(`[${HOST_ATTR}]`)) {
+    // Nodes that were already inert before the cover keep their inert state.
+    if (host.getAttribute(HOST_ATTR) !== '1') host.removeAttribute('inert')
+    host.removeAttribute(HOST_ATTR)
+  }
+  for (const holder of doc.querySelectorAll<HTMLElement>(`[${HOLDER_ATTR}]`)) {
+    holder.style.position = holder.getAttribute(HOLDER_ATTR) ?? ''
+    holder.removeAttribute(HOLDER_ATTR)
+  }
 }
 
 /**
@@ -50,16 +134,7 @@ function cover(host: HTMLElement, holder: HTMLElement): void {
  * @param doc - the page document.
  */
 export function releaseGuard(doc: Document): void {
-  // Every marked node, not the first: a host that replaced the editor can leave
-  // the old node behind, and a leftover `inert` would freeze typing for good.
-  for (const host of doc.querySelectorAll<HTMLElement>(`[${HOST_ATTR}]`)) {
-    host.removeAttribute(HOST_ATTR)
-    host.removeAttribute('inert')
-  }
-  for (const holder of doc.querySelectorAll<HTMLElement>(`[${HOLDER_ATTR}]`)) {
-    holder.style.position = holder.getAttribute(HOLDER_ATTR) ?? ''
-    holder.removeAttribute(HOLDER_ATTR)
-  }
+  unmark(doc)
   guardNode(doc)?.remove()
 }
 
@@ -68,12 +143,14 @@ export function releaseGuard(doc: Document): void {
  * @param doc - the page document.
  * @param selected - the session the composer belongs to.
  * @param ids - the bridged sessions.
+ * @param t - the translator for the guard's strings.
  * @param reclaim - takes one session back; resolves true when the bridge is gone.
  */
 export function syncGuard(
   doc: Document,
   selected: string | undefined,
   ids: ReadonlySet<string>,
+  t: Translate,
   reclaim: (session: string) => Promise<boolean>,
 ): void {
   if (!guardFor(ids, selected)) {
@@ -86,26 +163,43 @@ export function syncGuard(
     releaseGuard(doc)
     return
   }
-  const holder = host.parentElement ?? host
+  const card = (composer?.closest('[data-composer-card]') ?? null) as HTMLElement | null
+  const placement = placementFor(host, card)
+  if (placement === null) {
+    releaseGuard(doc)
+    return
+  }
   const existing = guardNode(doc)
-  if (existing !== null && existing.parentElement === holder) {
+  if (existing !== null && existing.parentElement === placement) {
     // The guard outlives a session switch in the same composer: retarget it, so
     // Unlock never reclaims the session selected before this one, and re-assert
     // the covered state in case the host swapped the editor under the guard.
+    // The strings are re-read too, so a locale change lands on the next poll.
     existing.setAttribute(SESSION_ATTR, selected ?? '')
-    cover(host, holder)
+    existing.querySelector(':scope > span.' + COPY_CLASS)?.replaceChildren(doc.createTextNode(t('caption')))
+    existing.querySelector(':scope > span.' + BADGE_CLASS)?.replaceChildren(doc.createTextNode(t('badge')))
+    existing.querySelector(':scope > button')?.replaceChildren(doc.createTextNode(t('unlock')))
+    // A host may have swapped the editor under the guard: clear the stale
+    // markers (the old host would otherwise stay inert) but keep the guard.
+    unmark(doc)
+    cover(host, placement, card)
+    seatGuard(existing, placement)
     return
   }
   releaseGuard(doc)
-  cover(host, holder)
+  cover(host, placement, card)
   const guard = doc.createElement('div')
   guard.id = GUARD_ID
   guard.setAttribute(SESSION_ATTR, selected ?? '')
-  const label = doc.createElement('span')
-  label.textContent = 'Supervised from dsh-sup — this composer is covered.'
+  const copy = doc.createElement('span')
+  copy.className = COPY_CLASS
+  copy.textContent = t('caption')
+  const badge = doc.createElement('span')
+  badge.className = BADGE_CLASS
+  badge.textContent = t('badge')
   const button = doc.createElement('button')
   button.type = 'button'
-  button.textContent = 'Unlock'
+  button.textContent = t('unlock')
   button.addEventListener('click', () => {
     const target = guard.getAttribute(SESSION_ATTR) ?? ''
     void reclaim(target).then(taken => {
@@ -113,6 +207,7 @@ export function syncGuard(
       if (taken) releaseGuard(doc)
     })
   })
-  guard.append(label, button)
-  holder.append(guard)
+  guard.append(copy, badge, button)
+  seatGuard(guard, placement)
+  placement.append(guard)
 }

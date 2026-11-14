@@ -13,5 +13,5 @@ const shared = {
 export default [
   { ...shared, entry: ['src/index.ts'], dts: true, clean: true, inlineDynamicImports: true },
   { ...shared, entry: ['src/*.test.ts'], dts: false },
-  { ...shared, entry: ['src/client/banner.test.ts'], outDir: 'lib/client', dts: false },
+  { ...shared, entry: ['src/client/banner.test.ts', 'src/client/dom.test.ts'], outDir: 'lib/client', dts: false },
 ]
