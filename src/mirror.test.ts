@@ -166,6 +166,30 @@ test('a tool result with no text block falls back to the error reason', () => {
   assert.equal(item.detail, 'no such file')
 })
 
+test('a failure carried only by the error field still reads error', () => {
+  // The same arm reads `error.reason` as its detail, so a result without the
+  // message flag must not print a tick beside that reason.
+  const calls = table()
+  mirrorOf({ type: 'tool/call', time: 0, data: { turn: 1, callId: 'c4', name: 'read', arguments: '{}' } }, calls)
+  const failed = mirrorOf(
+    { type: 'tool/result', time: 1, data: { turn: 1, message: { toolCallId: 'c4', content: [] }, error: { name: 'X', reason: 'denied' } } },
+    calls,
+  )
+  assert.ok(failed !== undefined && failed.k === 'tool')
+  assert.equal(failed.state, 'error')
+  assert.equal(failed.detail, 'denied')
+
+  mirrorOf({ type: 'tool/call', time: 0, data: { turn: 1, callId: 'c5', name: 'read', arguments: '{}' } }, calls)
+  const plain = mirrorOf({ type: 'tool/result', time: 1, data: { turn: 1, message: { toolCallId: 'c5', content: [] } } }, calls)
+  assert.ok(plain !== undefined && plain.k === 'tool')
+  assert.equal(plain.state, 'ok')
+
+  mirrorOf({ type: 'tool/call', time: 0, data: { turn: 1, callId: 'c6', name: 'read', arguments: '{}' } }, calls)
+  const flagged = mirrorOf({ type: 'tool/result', time: 1, data: { turn: 1, message: { toolCallId: 'c6', isError: true, content: [] } } }, calls)
+  assert.ok(flagged !== undefined && flagged.k === 'tool')
+  assert.equal(flagged.state, 'error')
+})
+
 test('a tool result for a call this bridge never saw maps to nothing', () => {
   const result: SessionEvent = { type: 'tool/result', time: 5, data: { turn: 1, message: { toolCallId: 'gone', content: [] } } }
   assert.equal(mirrorOf(result, table()), undefined)

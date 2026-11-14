@@ -6,7 +6,7 @@
  * makes one frame mean one thing.
  */
 
-import { isProgramState } from './osc.js'
+import { isProgramState, stripControls } from './osc.js'
 import type { ProgramState } from './osc.js'
 
 /** One frame, newline included, never larger than this. */
@@ -208,7 +208,9 @@ export function decodeChunk(rest: string, chunk: string): Decoded {
     const frame = parseOutFrame(line)
     if (frame === undefined) {
       const shown = line.length > 60 ? `${line.slice(0, 60)}…` : line
-      return { ok: false, reason: `invalid frame: ${shown}` }
+      // The excerpt is peer bytes on their way to the operator's stderr, so it
+      // is stripped like any other rendered text first.
+      return { ok: false, reason: `invalid frame: ${stripControls(shown)}` }
     }
     frames.push(frame)
   }

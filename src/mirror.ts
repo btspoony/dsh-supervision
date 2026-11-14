@@ -143,6 +143,9 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
       if (record === undefined) return undefined
       const blocks = data.message?.content ?? []
       const last = blocks.filter(block => block.type === 'text' && (block.text ?? '').trim() !== '').at(-1)?.text
+      // A result can carry its failure in `error` without the message flag, so
+      // one flag drives both the detail fallback and the printed state.
+      const failed = data.message?.isError === true || data.error !== undefined
       const detail = tail(last ?? data.error?.reason ?? '', MAX_ITEM_DETAIL)
       // Both stamps come from the host: a missing one leaves the duration
       // unknown, never a wall-clock guess.
@@ -152,7 +155,7 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
         callId,
         name: record.name,
         args: record.args,
-        state: data.message?.isError === true ? 'error' : 'ok',
+        state: failed ? 'error' : 'ok',
         ...(detail === '' ? {} : { detail }),
         ...(ms === undefined ? {} : { ms }),
         turn,

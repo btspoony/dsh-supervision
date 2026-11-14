@@ -91,6 +91,22 @@ function base64(text: string): string {
   return Buffer.from(text, 'utf8').toString('base64')
 }
 
+/**
+ * The head of `text` within `limit` UTF-8 bytes. The caps are byte budgets, so
+ * a code point is never split and `base64(clip(text, MAX_*))` always fits the
+ * matching `MAX_*_B64`.
+ */
+function clip(text: string, limit: number): string {
+  let bytes = 0
+  let end = 0
+  for (const char of text) {
+    bytes += Buffer.byteLength(char, 'utf8')
+    if (bytes > limit) return text.slice(0, end)
+    end += char.length
+  }
+  return text
+}
+
 function legalId(id: string): boolean {
   if (Buffer.byteLength(id, 'utf8') > MAX_ID) return false
   const segments = id.split('/')
@@ -171,19 +187,30 @@ export function clearProgramStatus(id?: string): string {
  *
  * Every field is flattened the same way, so no value can open, split or
  * terminate the record: control bytes and the `:`/`=` separators are removed,
- * then each field is capped.
+ * then each field is capped. The caps are UTF-8 byte budgets, never character
+ * counts, so multibyte text cannot outgrow its base64 cap and take the record
+ * with it.
  * @param fields - the record; `state` is not restricted to {@link ProgramState}.
  * @returns the complete `ESC ] 7501 ; … ST` sequence.
  */
 export function encodeReport(fields: ReportFields): string {
   // An unencodable state must not read as success; `error` is the one word that
   // says the report itself is the problem.
-  const parts = [`state=${fieldWord(fields.state, 'error')}`]
+  const words = [`state=${fieldWord(fields.state, 'error')}`]
   if (fields.app !== undefined) {
     const app = fieldWord(fields.app, '')
-    if (app !== '') parts.push(`app=${app}`)
+    if (app !== '') words.push(`app=${app}`)
   }
-  if (fields.title !== undefined) parts.push(`title=${base64(clean(fields.title).slice(0, MAX_TITLE))}`)
-  if (fields.msg !== undefined) parts.push(`msg=${base64(clean(fields.msg).slice(0, MAX_MSG))}`)
-  return `${ESC}]7501;${parts.join(':')}${ST}`
+  // The byte clip is what keeps each encoded field inside its base64 cap: 192
+  // bytes encode to 256 characters, 2048 bytes to 2732.
+  const title = fields.title === undefined ? undefined : `title=${base64(clip(clean(fields.title), MAX_TITLE))}`
+  const msg = fields.msg === undefined ? undefined : `msg=${base64(clip(clean(fields.msg), MAX_MSG))}`
+  // A record that overruns herdr-core's frame is dropped whole, so the widest
+  // field goes first and the report still lands.
+  for (const keep of [[title, msg], [title], []]) {
+    const parts = [...words, ...keep.filter((part): part is string => part !== undefined)]
+    const sequence = `${ESC}]7501;${parts.join(':')}${ST}`
+    if (Buffer.byteLength(sequence, 'utf8') < MAX_SEQUENCE) return sequence
+  }
+  return `${ESC}]7501;${words.join(':')}${ST}`
 }

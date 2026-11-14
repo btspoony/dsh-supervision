@@ -67,6 +67,23 @@ test('invalid JSON and unknown frame types stop the stream', () => {
   assert.equal(decodeChunk('', `{"t":"welcome","proto":${String(PROTO + 1)}}\n`).ok, false);
 });
 
+test('a rejected frame reaches stderr stripped of the bytes a terminal executes', () => {
+  // This reason is printed on the same terminal carrying the machine records, so
+  // an OSC title set or an erase in the peer's bytes must not act there.
+  const hostile = 'x\u001b]0;owned\u0007\u001b[2J\u009b2Jy\u202eevil';
+  const decoded = decodeChunk('', `${hostile}\n`);
+  assert.equal(decoded.ok, false);
+  const reason = decoded.ok ? '' : decoded.reason;
+  assert.doesNotMatch(reason, /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+  assert.equal(reason, 'invalid frame: x ]0;owned  [2J 2Jy evil');
+});
+
+test('a rejected frame excerpt still stops at 60 characters plus the ellipsis', () => {
+  const decoded = decodeChunk('', `${'z'.repeat(200)}\n`);
+  assert.equal(decoded.ok, false);
+  assert.equal(decoded.ok ? '' : decoded.reason, `invalid frame: ${'z'.repeat(60)}…`);
+});
+
 test('a welcome must name a known state and a whole turn count', () => {
   const good = { t: 'welcome', proto: PROTO, session: 'session-1', title: 'repo', state: 'working', turn: 3 };
   assert.deepEqual(frames(decodeChunk('', `${JSON.stringify(good)}\n`)), [good]);
