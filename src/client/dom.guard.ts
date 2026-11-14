@@ -75,22 +75,32 @@ function placementFor(host: HTMLElement, card: HTMLElement | null): HTMLElement 
 }
 
 /**
- * Re-assert the covered state on one editor and its container.
- * @param host - the editor's parent.
- * @param holder - the container the guard overlays.
+ * Re-assert the covered state on one editor and its container. Every element
+ * child of the placement except the guard itself is made inert, so toolbar
+ * siblings (send, stop, attach) cannot be focused or Enter-activated either.
+ * @param host - the editor's parent; covered even when nested below placement.
+ * @param holder - the container the guard overlays; its children are swept.
  */
 function cover(host: HTMLElement, holder: HTMLElement): void {
-  host.setAttribute(HOST_ATTR, '')
-  host.setAttribute('inert', '')
+  const mark = (el: Element): void => {
+    if (el.id === GUARD_ID || el.hasAttribute(HOST_ATTR)) return
+    el.setAttribute(HOST_ATTR, '')
+    el.setAttribute('inert', '')
+  }
+  mark(host)
+  for (const child of Array.from(holder.children)) mark(child)
+  // Positionability comes from the cascade, not the inline style: a composer
+  // card laid out by CSS (`position: sticky`, the usual bottom-anchored input)
+  // must keep its own layout. Only a static box is lifted to relative.
   if (!holder.hasAttribute(HOLDER_ATTR)) holder.setAttribute(HOLDER_ATTR, holder.style.position)
-  if (holder.style.position !== 'relative') holder.style.position = 'relative'
+  if (getComputedStyle(holder).position === 'static') holder.style.position = 'relative'
 }
 
 /**
- * Remove the guard and put every editor and container back as it was.
+ * Undo every marker this module wrote, leaving the guard node itself in place.
  * @param doc - the page document.
  */
-export function releaseGuard(doc: Document): void {
+function unmark(doc: Document): void {
   // Every marked node, not the first: a host that replaced the editor can leave
   // the old node behind, and a leftover `inert` would freeze typing for good.
   for (const host of doc.querySelectorAll<HTMLElement>(`[${HOST_ATTR}]`)) {
@@ -101,6 +111,14 @@ export function releaseGuard(doc: Document): void {
     holder.style.position = holder.getAttribute(HOLDER_ATTR) ?? ''
     holder.removeAttribute(HOLDER_ATTR)
   }
+}
+
+/**
+ * Remove the guard and put every editor and container back as it was.
+ * @param doc - the page document.
+ */
+export function releaseGuard(doc: Document): void {
+  unmark(doc)
   guardNode(doc)?.remove()
 }
 
@@ -145,6 +163,9 @@ export function syncGuard(
     existing.querySelector(':scope > span.' + COPY_CLASS)?.replaceChildren(doc.createTextNode(t('caption')))
     existing.querySelector(':scope > span.' + BADGE_CLASS)?.replaceChildren(doc.createTextNode(t('badge')))
     existing.querySelector(':scope > button')?.replaceChildren(doc.createTextNode(t('unlock')))
+    // A host may have swapped the editor under the guard: clear the stale
+    // markers (the old host would otherwise stay inert) but keep the guard.
+    unmark(doc)
     cover(host, placement)
     seatGuard(existing, placement)
     return

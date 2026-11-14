@@ -309,11 +309,8 @@ export function watch(doc: Document, t: Translate, draw: typeof paint = paint): 
   // forever. Only mutations outside the guard count as churn.
   const churnObserver = new MutationObserver((records) => {
     const guard = doc.getElementById(GUARD_ID)
-    const insideGuard = (target: EventTarget | null): boolean => {
-      if (guard === null || target === null) return false
-      if (target === guard) return true
-      return typeof guard.contains === 'function' && guard.contains(target as Node)
-    }
+    const insideGuard = (target: Node): boolean =>
+      guard !== null && (target === guard || guard.contains(target))
     if (records.some(record => !insideGuard(record.target))) churn.schedule()
   })
   if (doc.body !== null) {

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BRIDGED_ATTR, bridgedIds, coalescer, paint, rowSessionId, STYLE, watch } from './dom.js'
 import { apply } from './index.js'
-import { BADGE_CLASS, COPY_CLASS, GUARD_ID, guardFor } from './dom.guard.js'
+import { BADGE_CLASS, COPY_CLASS, GUARD_ID, guardFor, releaseGuard } from './dom.guard.js'
 import { en, zh } from './locale.js'
 
 test('a sidebar row key yields its session id', () => {
@@ -179,13 +179,16 @@ class FakeEl {
 
   constructor(tagName: string) {
     this.tagName = tagName
-    const style = {} as Record<string, string> & { setProperty: (name: string, value: string) => void }
+    // Inline position starts empty: release() restores the recorded value.
+    const style = { position: '' } as unknown as Record<string, string> & { setProperty: (name: string, value: string) => void }
     style.setProperty = (name: string, value: string): void => {
       style[name] = value
     }
     this.style = style
   }
   private listeners = new Map<string, Array<() => void>>()
+  /** What a stylesheet (as opposed to the inline style) would compute. */
+  computedPosition = 'static'
 
   get parentElement(): FakeEl | null {
     return this.parentEl
@@ -359,7 +362,8 @@ function withFakeDom(run: () => void): void {
     observe(): void {}
     disconnect(): void {}
   }
-  g.getComputedStyle = (): { borderRadius: string } => ({ borderRadius: '16px' })
+  g.getComputedStyle = (el: FakeEl): { borderRadius: string; position: string } =>
+    ({ borderRadius: '16px', position: el.computedPosition })
   try {
     run()
   } finally {
@@ -370,9 +374,11 @@ function withFakeDom(run: () => void): void {
   }
 }
 
-test('a bridged composer is covered by one guard under the card, and Unlock reclaims it', () => {
+test('a bridged composer is covered with every sibling inert, and Unlock reclaims it', () => {
   withFakeDom(() => {
     const { doc, card, host, composer } = bridgedScene()
+    const toolbar = new FakeEl('div')
+    card.append(toolbar)
     const reclaimed: string[] = []
     const take = (session: string): Promise<boolean> => {
       reclaimed.push(session)
@@ -384,8 +390,10 @@ test('a bridged composer is covered by one guard under the card, and Unlock recl
     assert.equal(guard.parentEl, card, 'the guard sits under the composer card')
     assert.equal(guard.style['--dsh-sup-radius'], '16px', 'seatGuard publishes the card radius for the badge')
     assert.ok(host.hasAttribute('inert'), 'the editor subtree is inert')
+    assert.ok(toolbar.hasAttribute('inert'), 'toolbar siblings are inert, not just the editor')
     const buttons = guard.querySelectorAll('button')
     assert.equal(buttons.length, 1, 'exactly one reclaim control')
+    assert.ok(buttons[0]?.hasAttribute('inert') === false, 'the reclaim control stays activatable')
     assert.equal(buttons[0]?.textContent, en.unlock)
     buttons[0]?.dispatch('click')
     assert.deepEqual(reclaimed, ['session-a'], 'the click reclaims the covered session')
@@ -431,7 +439,8 @@ async function withFakeDomAsync(run: () => Promise<void>): Promise<void> {
     observe(): void {}
     disconnect(): void {}
   }
-  g.getComputedStyle = (): { borderRadius: string } => ({ borderRadius: '16px' })
+  g.getComputedStyle = (el: FakeEl): { borderRadius: string; position: string } =>
+    ({ borderRadius: '16px', position: el.computedPosition })
   try {
     await run()
   } finally {
@@ -519,6 +528,48 @@ test('the churn observer ignores guard-internal mutations and schedules outside 
     } finally {
       stop()
     }
+  })
+})
+
+test('a CSS-positioned card keeps its own layout, a static one is lifted to relative', () => {
+  withFakeDom(() => {
+    const sticky = bridgedScene()
+    sticky.card.computedPosition = 'sticky'
+    paint(sticky.doc as unknown as Document, new Set(['session-a']), t, () => new Promise(() => {}))
+    assert.equal(sticky.card.style.position, '', 'a sticky card is never forced inline')
+    assert.ok(sticky.card.getAttribute('data-dsh-sup-holder') !== null, 'the touch is still recorded')
+    releaseGuard(sticky.doc as unknown as Document)
+    assert.equal(sticky.card.style.position, '', 'release leaves the card as the cascade laid it out')
+
+    const plain = bridgedScene()
+    paint(plain.doc as unknown as Document, new Set(['session-a']), t, () => new Promise(() => {}))
+    assert.equal(plain.card.style.position, 'relative', 'a static card is made positionable')
+    releaseGuard(plain.doc as unknown as Document)
+    assert.equal(plain.card.style.position, '', 'release restores the original inline position')
+  })
+})
+
+test('a swapped editor on retarget does not leave the old host inert', () => {
+  withFakeDom(() => {
+    const { doc, card, host } = bridgedScene()
+    const take = (): Promise<boolean> => new Promise(() => {})
+    paint(doc as unknown as Document, new Set(['session-a']), t, take)
+    assert.ok(host.hasAttribute('inert'), 'the first editor host is covered')
+    // The old host leaves the card but stays in the document, as a real swap can:
+    // retarget must unmark it even though it is no longer under the placement.
+    host.remove()
+    const outside = new FakeEl('div')
+    doc.root.append(outside)
+    outside.append(host)
+    const nextComposer = new FakeEl('div')
+    nextComposer.setAttribute('contenteditable', 'true')
+    const nextHost = new FakeEl('div')
+    nextHost.append(nextComposer)
+    card.append(nextHost)
+    paint(doc as unknown as Document, new Set(['session-a']), t, take)
+    assert.ok(!host.hasAttribute('inert'), 'the stale host is unmarked on retarget')
+    assert.ok(nextHost.hasAttribute('inert'), 'the swapped-in host is covered')
+    assert.equal(doc.querySelectorAll('#dsh-sup-guard').length, 1, 'still exactly one guard')
   })
 })
 
