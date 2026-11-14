@@ -159,6 +159,13 @@ test('an attach through a pty submits a typed line and restores the screen', asy
     `sleep 0.4`,
     `printf '\\025'`,
     `sleep 0.2`,
+    // '/skill:' filters the menu to skills; Enter accepts, Enter submits.
+    `printf '/skill:'`,
+    `sleep 0.6`,
+    `printf '\\r'`,
+    `sleep 0.3`,
+    `printf '\\r'`,
+    `sleep 0.3`,
     `printf '%s\\r' ${shellQuote(TYPED)}`,
     `while [ ! -f ${shellQuote(go)} ]; do sleep 0.05; done`,
     `printf '\\004'`,
@@ -188,12 +195,18 @@ test('an attach through a pty submits a typed line and restores the screen', asy
     writeFileSync(ready, '');
     await waitFor('the catalog menu to list the skill', () => out.includes('demo-skill'));
     writeFileSync(menu, '');
+    // The accepted completion is the filtered skill, submitted as one line.
+    await waitFor('the accepted /skill: completion at the backend', () =>
+      backend.received.some((frame) => frame.t === 'line' && frame.text === '/skill:demo-skill'));
     await waitFor(`the backend to receive line ${JSON.stringify(TYPED)}`, () =>
       backend.received.some((frame) => frame.t === 'line' && frame.text === TYPED));
     assert.deepEqual(
       backend.received.filter((frame) => frame.t === 'line'),
-      [{ t: 'line', text: TYPED }],
-      `the pty line reached the socket exactly once; stderr: ${err}`,
+      [
+        { t: 'line', text: '/skill:demo-skill' },
+        { t: 'line', text: TYPED },
+      ],
+      `the menu completion and the typed line reached the socket in order; stderr: ${err}`,
     );
     // Esc closed the menu instead of cancelling the turn.
     assert.deepEqual(

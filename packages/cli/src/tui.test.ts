@@ -885,6 +885,26 @@ test('Esc cancels once with the menu closed and never with it open', () => {
   assert.deepEqual(open.log, [], 'no turn interaction while the menu is open');
 });
 
+test('Esc disarms the Ctrl+C window: Ctrl+C, Esc, Ctrl+C neither hints twice nor exits', () => {
+  const harness = keyHarness();
+  let memory: KeyMemory = { lastCtrlC: undefined, exited: false };
+  const press = (action: Parameters<typeof surfaceKey>[0], now: number): void => {
+    memory = surfaceKey(
+      action,
+      memory,
+      { editorEmpty: true, menuOpen: false, now },
+      harness.effects,
+    ).memory;
+  };
+  press({ kind: 'ctrl-c' }, 1000);
+  assert.equal(memory.lastCtrlC, 1000, 'the first press arms the window');
+  press({ kind: 'escape' }, 1200);
+  assert.equal(memory.lastCtrlC, undefined, 'Esc disarms it');
+  press({ kind: 'ctrl-c' }, 1400);
+  assert.equal(harness.log.filter((entry) => entry === 'exit').length, 0, 'Esc cancelled the prompt, not the turn');
+  assert.equal(memory.lastCtrlC, 1400, 'the second Ctrl+C starts a new window');
+});
+
 test('Ctrl+C clears typed text instead of touching the turn', () => {
   const harness = keyHarness();
   const outcome = surfaceKey(

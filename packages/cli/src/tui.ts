@@ -267,10 +267,13 @@ export function surfaceKey(
   context: { readonly editorEmpty: boolean; readonly menuOpen: boolean; readonly now: number },
   effects: KeyEffects,
 ): KeyOutcome {
+  // Any key other than Ctrl+C disarms the double-press window: Ctrl+C → Esc →
+  // Ctrl+C must not exit, because Esc already dismissed the prompt.
+  const idle: KeyMemory = { lastCtrlC: undefined, exited: memory.exited };
   if (action.kind === 'escape') {
-    if (escAction({ menuOpen: context.menuOpen }) === 'pass') return { memory, consumed: false };
+    if (escAction({ menuOpen: context.menuOpen }) === 'pass') return { memory: idle, consumed: false };
     effects.sendLine('/cancel');
-    return { memory, consumed: true };
+    return { memory: idle, consumed: true };
   }
   if (action.kind === 'ctrl-c') {
     const next = ctrlCAction({ editorEmpty: context.editorEmpty, now: context.now, last: memory.lastCtrlC });
@@ -291,7 +294,7 @@ export function surfaceKey(
     return { memory: { lastCtrlC: undefined, exited: true }, consumed: true };
   }
   effects.scroll(action);
-  return { memory: { lastCtrlC: undefined, exited: memory.exited }, consumed: true };
+  return { memory: idle, consumed: true };
 }
 
 /** One attach surface: `tui` owns stdout, `line` is today's append-only path. */
