@@ -35,6 +35,8 @@ interface EventUsage {
  */
 export interface SessionEvent {
   readonly type: string
+  /** Monotonic position in the session log; the host stamps every event. */
+  readonly seq?: number
   /** Unix epoch milliseconds; the host stamps every event it appends. */
   readonly time?: number
   readonly data?: {
