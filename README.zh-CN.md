@@ -15,7 +15,7 @@
 
 - **每个会话一条状态记录。**被桥接的会话是**根记录**，同一进程里其他存活会话作为带 `id=` 的**子记录**随它上报；状态取 `idle` / `working` / `done` / `blocked` / `error`，每次变化整条替换，不会留下增量补丁。
 - **操作者输入被送回会话。**中途 steer 一轮、取消本轮、`/status`、`/new`、`/attach`，以及 `/approve` / `/reject` 应答挂起的工具审批——都在终端里完成。
-- **审批不再只活在另一个界面里。**挂起的提问变成根记录上的 `blocked · kind=permission`，在终端里结掉；GUI 会显示监督横幅和「Take back control」。
+- **审批不再只活在另一个界面里。**挂起的提问变成根记录上的 `blocked · kind=permission`，在终端里结掉；GUI 一目了然——侧边栏条目带环、输入区被盖住——唯一的「Unlock」按钮负责把会话拿回来。
 
 ## 能搭配哪些 supervisor
 
@@ -80,9 +80,7 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 ### 把会话拿回来
 
-只要会话处于桥接状态，GUI 输入框上方就会出现监督横幅——`Supervised from <terminal> (pid <n>) · approvals are answered there`——旁边是「Take back control」按钮。它请求回收路由；桥接被丢弃，监督方收到清除记录，`dsh-sup` 转发器以 `0` 退出。
-
-不用打开会话也能看出来：侧边栏里被接管的会话行带一圈醒目的蓝色描边和鲸鱼尾巴徽标，不会被误当成可以随手输入自己的会话。点进去后输入框会被一层遮罩盖住（`Supervised from dsh-sup — this composer is covered.`），编辑器被置为 `inert`，鼠标点不进去、已经聚焦的光标也打不了字。「Unlock」按钮发起回收；只有确认释放成功才会撤掉遮罩，被拒绝的解锁会保留遮罩。
+只要会话处于桥接状态，GUI 会在侧边栏和输入区两处标明。侧边栏里该会话的条目带上贴合自身圆角的 3px 蓝色描边和浅蓝色半透明填充（rgba(127, 174, 255, 0.30)），右缘是一枚更宽、贯穿行高、内含鲸尾动画的蓝色胶囊，不会被误当成可以随手输入的会话。点进去后整个输入区（编辑器和工具栏）会被蓝边、浅蓝半透明（rgba(127, 174, 255, 0.30)）的面板盖住：编辑器被置为 `inert`，鼠标点不进去、已经聚焦的光标也打不了字。框顶边沿上方挂着一枚蓝色文案 tab，引用发货的英文文案——"This chat is supervised from elsewhere — the input box is locked"（「此会话已被接管，输入框已锁定」，经宿主语言服务提供中英双语）；左下角融着一枚带白色鲸尾的「已接管」徽标；唯一的「Unlock（解锁）」按钮发起回收，只有确认释放成功才会撤掉遮罩，被拒绝的解锁会保留遮罩。桥接被丢弃，监督方收到清除记录，`dsh-sup` 转发器以 `0` 退出。
 
 ### 给 agent 的技能
 
@@ -123,7 +121,7 @@ mirror 打印的是写好的整块，一次一行。
 
 | 路径 | 内容 |
 |---|---|
-| `src/` | 插件本体，以及注入 GUI 的客户端横幅 |
+| `src/` | 插件本体，以及注入 GUI 的浏览器监督装饰（`src/client/`） |
 | `packages/protocol` | OSC 7501 编码器与 NDJSON 帧 |
 | `packages/cli` | `dsh-sup` 转发器 |
 | `lib/` | 构建产物 |
@@ -170,7 +168,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 
 | 键 | 默认值 | 作用 |
 |---|---|---|
-| `enabled` | `true` | 是否挂载任何东西。`false` 是硬开关：没有套接口、没有路由、没有横幅。 |
+| `enabled` | `true` | 是否挂载任何东西。`false` 是硬开关：没有套接口、没有路由、没有客户端装饰。 |
 | `programStatus` | `true` | 是否发出 OSC 7501 上报。关掉后套接口只回答 `list`。 |
 | `echo` | `true` | 是否把状态变化与审批决定镜像成 supervisor 读的 `echo` 行。 |
 | `app` | `"dsh"` | 每条上报都要重述的程序名。 |

@@ -15,7 +15,7 @@
 
 - **One status record per session.** The bridged session is the root record — `idle`, `working`, `done`, `blocked` or `error`; other sessions in the same process are child records carrying `id=`.
 - **Operator input goes back in.** Bare text steers a running turn, `/cancel` ends it, `/status`, `/new` and `/attach` inspect and switch sessions, and `/approve` or `/reject` settle parked asks — all from the terminal.
-- **Approvals stop living in another surface.** A parked ask turns the root record into `blocked · kind=permission`, is settled from the terminal, and the GUI shows a supervision banner with **Take back control** — so the person in the browser always sees who holds the session and has a way to take it back.
+- **Approvals stop living in another surface.** A parked ask turns the root record into `blocked · kind=permission`, is settled from the terminal, and the GUI shows it at a glance — ringed sidebar row, covered input area — and one **Unlock** button takes the session back — so the person in the browser always sees who holds the session and has a way to take it back.
 
 ## Works with
 
@@ -80,9 +80,7 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 ### Take back control
 
-While a session is bridged the GUI shows a supervision banner above the composer — `Supervised from <terminal> (pid <n>) · approvals are answered there` — with a **Take back control** button. It posts to the reclaim route; the bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
-
-The same state is visible before opening the session: its sidebar row gets a heavy blue outline and a whale-tail badge, so a supervised session cannot be mistaken for one that is yours to type into. Opening it puts a guard over the composer (`Supervised from dsh-sup — this composer is covered.`) and makes the editor `inert`, so neither the pointer nor an already-focused caret can type into it. The **Unlock** button posts the reclaim; only a confirmed release removes the guard, so a refused unlock leaves it in place.
+While a session is bridged the GUI marks it in the sidebar and over the input area. The session's sidebar row wears a 3px blue ring on its own rounding, a light-blue translucent fill (`rgba(127, 174, 255, 0.30)`), and a wider blue capsule that fills the row height with an animated whale tail at its right edge, so a supervised session cannot be mistaken for one that is yours to type into. Opening it covers the whole input area — editor and toolbar — with a blue-bordered, light-blue translucent panel (`rgba(127, 174, 255, 0.30)`): the editor is made `inert`, so neither the pointer nor an already-focused caret can type into it. A blue caption tab sits on the panel's top edge, above the frame, quoting the shipped English string — "This chat is supervised from elsewhere — the input box is locked" (localized English/Chinese via the host locale service); a **Bridged** badge with a small white whale tail is fused into the overlay's bottom-left corner; and the panel's single **Unlock** button posts the reclaim — only a confirmed release removes the guard, so a refused unlock leaves it in place. The bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
 
 ### Agent skill
 
@@ -123,7 +121,7 @@ This half is reference material for implementers and coding agents; if you only 
 
 | Path | What lives there |
 |---|---|
-| `src/` | the host plugin and the browser supervision banner (`src/client/`) |
+| `src/` | the host plugin and the browser supervision decoration (`src/client/`) |
 | `packages/protocol` | the OSC 7501 encoder and the NDJSON frame codec |
 | `packages/cli` | the `dsh-sup` forwarder |
 | `lib/` | build output |
@@ -170,7 +168,7 @@ Six keys, all of them read by `src/index.ts`; an unknown shape is refused with a
 
 | Key | Default | What it does |
 |---|---|---|
-| `enabled` | `true` | Mount anything at all. `false` is a hard off switch: no socket, no routes, no banner. |
+| `enabled` | `true` | Mount anything at all. `false` is a hard off switch: no socket, no routes, no client decoration. |
 | `programStatus` | `true` | Emit OSC 7501 reports. Off leaves the socket answering `list` only. |
 | `echo` | `true` | Mirror state changes and approval decisions as `echo` lines for the supervisor. |
 | `app` | `"dsh"` | The program word every report restates. |
