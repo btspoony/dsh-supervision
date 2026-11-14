@@ -79,7 +79,7 @@ on the normal screen when the attach ends.
 |---|---|
 | `Enter` | send the editor's text as one operator line |
 | `Shift+Enter` | start a new line in the editor, when the terminal reports the modifier (modifyOtherKeys or the Kitty keyboard protocol); otherwise it submits like `Enter` |
-| `Ctrl+C` | clear what you typed; on an empty editor it hints, and a second press within 1.5 s leaves the attach |
+| `Ctrl+C` | clear what you typed; on an empty editor it hints, and a second press within 1.5 s leaves the attach (any other key resets that window) |
 | `Esc` | close the completion menu if one is open; otherwise send `/cancel`, which ends the running turn and keeps the attach |
 | `Ctrl+D` | leave the attach; the terminal is restored first |
 | `PageUp` / `PageDown` | scroll the transcript one page |

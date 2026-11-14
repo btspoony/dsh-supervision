@@ -885,7 +885,7 @@ test('Esc cancels once with the menu closed and never with it open', () => {
   assert.deepEqual(open.log, [], 'no turn interaction while the menu is open');
 });
 
-test('Esc disarms the Ctrl+C window: Ctrl+C, Esc, Ctrl+C neither hints twice nor exits', () => {
+test('Esc disarms the Ctrl+C window: Ctrl+C, Esc, Ctrl+C neither keeps the first window nor exits', () => {
   const harness = keyHarness();
   let memory: KeyMemory = { lastCtrlC: undefined, exited: false };
   const press = (action: Parameters<typeof surfaceKey>[0], now: number): void => {

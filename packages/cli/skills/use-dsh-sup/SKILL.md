@@ -89,7 +89,7 @@ session's directory when `fd` is installed.
 forwarder sends `bye`, restores the screen and exits 0, and the line never reaches
 the session. In the TUI, `Ctrl+D` also leaves, `Esc` closes an open completion
 menu first and otherwise sends `/cancel`, and Ctrl+C clears the editor (twice on
-an empty editor within 1.5 s leaves).
+an empty editor within 1.5 s leaves; any other key resets that window).
 
 Scrolled back, the last row shows `↓ N new` for entries that arrived meanwhile;
 reaching the bottom resumes following. `--no-tui`, or a redirected stdout, keeps
