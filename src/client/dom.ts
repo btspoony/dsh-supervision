@@ -106,7 +106,7 @@ export const STYLE = `
 #${GUARD_ID} > .dsh-sup-copy {
   position: absolute;
   left: 50%;
-  top: 1px;
+  top: 0;
   transform: translate(-50%, -100%);
   background: #3b6cf5;
   color: #fff;
@@ -127,7 +127,7 @@ export const STYLE = `
   font-size: 11px;
   font-weight: 500;
   line-height: 14px;
-  border-radius: 0 8px 0 8px;
+  border-radius: 0 8px 0 calc(var(--dsh-sup-radius, 16px) - 3px);
   z-index: 1;
   pointer-events: none;
 }

@@ -112,7 +112,7 @@ test('the guard covers the input card and the page has one reclaim control', () 
   const copy = ruleBlock('#' + GUARD_ID + ' > .' + COPY_CLASS)
   assert.match(copy, /position:\s*absolute/, 'the caption hangs on the frame')
   assert.match(copy, /left:\s*50%/)
-  assert.match(copy, /top:\s*1px/)
+  assert.match(copy, /top:\s*0/)
   assert.match(copy, /transform:\s*translate\(-50%, -100%\)/, 'the tab sits fully above the top edge')
   assert.match(copy, /background:\s*#3b6cf5/)
   assert.match(copy, /color:\s*#fff/)
@@ -128,7 +128,7 @@ test('the guard covers the input card and the page has one reclaim control', () 
   assert.match(badge, /bottom:\s*0/, 'the badge hugs the overlay bottom-left corner')
   assert.match(badge, /background:\s*#3b6cf5/)
   assert.match(badge, /color:\s*#fff/)
-  assert.match(badge, /border-radius:\s*0 8px 0 8px/, 'top-left/bottom-right square, the others rounded')
+  assert.match(badge, /border-radius:\s*0 8px 0 calc\(var\(--dsh-sup-radius, 16px\) - 3px\)/, 'bottom-left follows the card inner radius')
   assert.match(badge, /z-index:\s*1/)
   assert.match(badge, /pointer-events:\s*none/)
   assert.match(badge, /padding:\s*3px 10px 3px 24px/, 'room on the left for the tail')
@@ -175,12 +175,17 @@ class FakeEl {
   children: FakeEl[] = []
   parentEl: FakeEl | null = null
   attrs = new Map<string, string>()
-  style: Record<string, string> = {}
-  private listeners = new Map<string, Array<() => void>>()
+  style: Record<string, string> & { setProperty?: (name: string, value: string) => void } = {}
 
   constructor(tagName: string) {
     this.tagName = tagName
+    const style = {} as Record<string, string> & { setProperty: (name: string, value: string) => void }
+    style.setProperty = (name: string, value: string): void => {
+      style[name] = value
+    }
+    this.style = style
   }
+  private listeners = new Map<string, Array<() => void>>()
 
   get parentElement(): FakeEl | null {
     return this.parentEl
@@ -369,6 +374,7 @@ test('a bridged composer is covered by one guard under the card, and Unlock recl
     const guard = doc.getElementById(GUARD_ID)
     assert.ok(guard !== null, 'the guard mounts')
     assert.equal(guard.parentEl, card, 'the guard sits under the composer card')
+    assert.equal(guard.style['--dsh-sup-radius'], '16px', 'seatGuard publishes the card radius for the badge')
     assert.ok(host.hasAttribute('inert'), 'the editor subtree is inert')
     const buttons = guard.querySelectorAll('button')
     assert.equal(buttons.length, 1, 'exactly one reclaim control')

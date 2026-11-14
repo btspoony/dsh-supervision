@@ -49,6 +49,9 @@ function guardNode(doc: Document): HTMLElement | null {
 function seatGuard(guard: HTMLElement, holder: HTMLElement): void {
   const radius = getComputedStyle(holder).borderRadius
   guard.style.borderRadius = radius === '' ? '16px' : radius
+  // The bottom-left badge reads the same rounding, so its corner follows the
+  // card instead of keeping a fixed radius that may not match.
+  guard.style.setProperty('--dsh-sup-radius', radius === '' ? '16px' : radius)
 }
 
 /**
