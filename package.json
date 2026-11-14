@@ -1,6 +1,6 @@
 {
   "name": "dsh-supervision",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Cordis plugin: bridge a running DeepSeek Harness web session to any terminal supervisor that reads OSC 7501",
   "keywords": [
     "dsh",

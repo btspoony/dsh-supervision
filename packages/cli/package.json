@@ -1,6 +1,6 @@
 {
   "name": "dsh-sup",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Forwarder: reports a supervised DSH web session to herdr-core and relays stdin",
   "type": "module",
   "license": "MIT",
