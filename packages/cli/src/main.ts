@@ -6,7 +6,7 @@ import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { routeFrame } from './route.js';
 import { skillText, version } from './skill.js';
-import { chooseSurface, echoStatus, startTui, type Surface } from './tui.js';
+import { chooseSurface, echoStatus, oscStatus, startTui, type Surface } from './tui.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
@@ -158,6 +158,11 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
           else if (frame.t === 'echo') {
             surface.push(frame.text);
             const next = echoStatus(frame.text);
+            if (next !== undefined) surface.setStatus(next);
+          } else if (frame.t === 'osc') {
+            // The machine surface is not configurable, so it keeps the status
+            // live when the plugin writes no echo lines.
+            const next = oscStatus(frame.data);
             if (next !== undefined) surface.setStatus(next);
           }
         } else if (routed.out !== undefined) {

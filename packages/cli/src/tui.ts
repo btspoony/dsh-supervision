@@ -101,6 +101,29 @@ export function fitLines(block: string, width: number): string[] {
   return lines;
 }
 
+/**
+ * The root state an OSC 7501 record reports, or nothing when it is a child
+ * record (it carries an `id`), a clear, or another OSC entirely. These records
+ * are the machine surface, so they keep the status live even when the plugin's
+ * `echo` config is off.
+ */
+export function oscStatus(data: string): Status | undefined {
+  const head = '\x1b]7501;';
+  const tail = '\x1b\\';
+  if (!data.startsWith(head) || !data.endsWith(tail)) return undefined;
+  let state: string | undefined;
+  for (const field of data.slice(head.length, -tail.length).split(':')) {
+    const at = field.indexOf('=');
+    if (at === -1) continue;
+    const key = field.slice(0, at);
+    const value = field.slice(at + 1);
+    // A child record describes a parked ask, not the session.
+    if (key === 'id' && value !== '') return undefined;
+    if (key === 'state') state = value;
+  }
+  return state !== undefined && isProgramState(state) ? { state } : undefined;
+}
+
 /** The state an echo line reports, e.g. `[turn 3] working`; anything else is prose. */
 export function echoStatus(text: string): Status | undefined {
   const match = /^\[turn (\d+)\] (\w+)$/.exec(text);
@@ -148,7 +171,7 @@ export function keyAction(data: string, editorEmpty: boolean): KeyAction | undef
   return undefined;
 }
 
-const THEME: EditorTheme = {
+export const THEME: EditorTheme = {
   borderColor: (text: string): string => text,
   selectList: {
     selectedPrefix: (text: string): string => text,
@@ -160,7 +183,7 @@ const THEME: EditorTheme = {
 };
 
 /** Session, state and turn, on one line above the editor. */
-class StatusLine {
+export class StatusLine {
   private status: Status = {};
 
   set(next: Status): void {
@@ -273,7 +296,7 @@ function append(into: string[], lines: readonly string[]): void {
 }
 
 /** Transcript, editor and status stacked into exactly the terminal's rows. */
-class Shell implements Component {
+export class Shell implements Component {
   private readonly terminal: Terminal;
   private readonly transcript: TranscriptView;
   private readonly editor: Editor;
@@ -295,7 +318,9 @@ class Shell implements Component {
   }
 
   render(width: number): string[] {
-    const w = Math.max(20, Math.floor(width) || this.fallbackWidth || 80);
+    // A narrow terminal must render narrow: widening here would put lines wider
+    // than the viewport on screen. Every component truncates to what it gets.
+    const w = Math.max(1, Math.floor(width) || this.fallbackWidth || 80);
     const editorLines = this.editor.render(w);
     const rows = Math.max(3, this.terminal.rows || 24);
     this.transcript.height = Math.max(0, rows - editorLines.length - 1);

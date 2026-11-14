@@ -5,11 +5,15 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { visibleWidth } from '@earendil-works/pi-tui';
+import { Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { renderMirror } from 'dsh-supervision-protocol';
 import {
   FOLLOWING,
+  Shell,
+  StatusLine,
+  THEME,
   TranscriptView,
+  oscStatus,
   afterAppend,
   chooseSurface,
   echoStatus,
@@ -307,4 +311,51 @@ test('SIGTERM restores the surface before the process exits', () => {
   }
   assert.equal(stopped, 1, 'the restore ran before the exit');
   assert.deepEqual(exited, [143], 'a killed attach keeps its signal status');
+});
+test('a narrow terminal never renders a line wider than its width', () => {
+  const terminal = { columns: 20, rows: 24, write: () => {} } as unknown as Terminal;
+  const tui = new TuiAltScreen(terminal);
+  const transcript = new TranscriptView();
+  for (let i = 0; i < 5; i++) transcript.push('alpha beta gamma delta epsilon zeta eta theta');
+  transcript.push({ k: 'user', text: '中文内容 '.repeat(10) });
+  const status = new StatusLine();
+  status.set({ session: 'session-narrow', state: 'working', turn: 3 });
+  const shell = new Shell(terminal, transcript, new Editor(tui, THEME), status, 80);
+  for (const width of [1, 10, 19]) {
+    const lines = shell.render(width);
+    assert.ok(lines.length > 0, `width ${String(width)} rendered nothing`);
+    for (const line of lines) {
+      assert.ok(
+        visibleWidth(line) <= width,
+        `width ${String(width)}: ${JSON.stringify(line)} is ${String(visibleWidth(line))} columns wide`,
+      );
+    }
+  }
+});
+
+test('an OSC 7501 root record advances the status; a child record does not', () => {
+  const status = new StatusLine();
+  status.set({ session: 'session-1', state: 'idle', turn: 1 });
+
+  const root = oscStatus('\x1b]7501;state=working:app=dsh\x1b\\');
+  assert.deepEqual(root, { state: 'working' }, 'the root record carries the session state');
+  if (root !== undefined) status.set(root);
+  assert.match(status.render(80), /working/);
+  assert.match(status.render(80), /session-1/);
+  assert.match(status.render(80), /turn 1/, 'an OSC record never invents a turn');
+
+  // A parked ask is a child record, so it must not overwrite the session state.
+  assert.equal(oscStatus('\x1b]7501;state=blocked:id=ask-7:kind=permission\x1b\\'), undefined);
+  assert.match(status.render(80), /working/);
+
+  // Clears, other OSC families and unknown states are not session states.
+  assert.equal(oscStatus('\x1b]7501;state=clear\x1b\\'), undefined);
+  assert.equal(oscStatus('\x1b]0;a window title\x07'), undefined);
+  assert.equal(oscStatus('\x1b]7501;state=frobnicating\x1b\\'), undefined);
+
+  // The echo path still works beside it.
+  const echoed = echoStatus('[turn 4] idle');
+  if (echoed !== undefined) status.set(echoed);
+  assert.match(status.render(80), /idle/);
+  assert.match(status.render(80), /turn 4/);
 });
