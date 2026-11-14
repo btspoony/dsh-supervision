@@ -80,7 +80,7 @@ on the normal screen when the attach ends.
 | `Enter` | send the editor's text as one operator line |
 | `Shift+Enter` | start a new line in the editor, when the terminal reports the modifier (modifyOtherKeys or the Kitty keyboard protocol); otherwise it submits like `Enter` |
 | `Ctrl+C` | clear what you typed; on an empty editor it hints, and a second press within 1.5 s leaves the attach |
-| `Esc` | send `/cancel` — ends the running turn and keeps the attach |
+| `Esc` | close the completion menu if one is open; otherwise send `/cancel`, which ends the running turn and keeps the attach |
 | `Ctrl+D` | leave the attach; the terminal is restored first |
 | `PageUp` / `PageDown` | scroll the transcript one page |
 | `↑` / `↓` | scroll one line, while the editor is empty |
@@ -107,9 +107,10 @@ machine-clean.
 **Suggestions.** The plugin sends a `catalog` frame with the session's skills and
 host slash commands once the attach is up, and the editor turns it into a menu:
 typing `/` lists every entry, typing `/skill:` narrows to the session's skills as
-`/skill:<name>` (fuzzy-matching the bare name works too), and tab/enter accepts
-the highlighted one into the editor. The catalog frame is surface input only — it
-never reaches stdout or `/dev/tty`, and line mode ignores it. `@file` completion
+`/skill:<name>` (fuzzy-matching the bare name works too); Tab inserts the
+highlighted completion, while Enter accepts and sends it immediately. The
+catalog frame is surface input only — it never reaches stdout or `/dev/tty`, and
+line mode ignores it. `@file` completion
 resolves against the session's directory when the `fd` binary is installed. The
 names are the host's own: `/skill:<name>` is forwarded like any other line, so the
 plugin turns it into the skill's body.
@@ -118,9 +119,10 @@ plugin turns it into the skill's body.
 lowercase, nothing after them — leave the attach from either surface (TUI or
 `--no-tui`): the forwarder sends `bye`, restores the terminal and exits 0. They are
 never forwarded to the session, so nothing is left waiting on the model. In the
-TUI, `Ctrl+D` still leaves outright, `Esc` cancels the running turn, and
-`Ctrl+C` clears the editor; on an empty editor it shows `Ctrl+C again to exit`
-and a second press within 1.5 s leaves. `/q now` or `/quiet` are ordinary input.
+TUI, `Ctrl+D` still leaves outright, `Esc` closes an open completion menu first
+and otherwise cancels the running turn, and `Ctrl+C` clears the editor; on an
+empty editor it shows `Ctrl+C again to exit` and a second press within 1.5 s
+leaves. `/q now` or `/quiet` are ordinary input.
 
 ### Answer an approval
 

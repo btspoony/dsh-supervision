@@ -73,7 +73,7 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 | `Enter` | 把编辑器内容作为一行操作者输入发出 |
 | `Shift+Enter` | 在编辑器中换行，前提是终端能上报该修饰键（modifyOtherKeys 或 Kitty 键盘协议）；否则它和 `Enter` 一样提交 |
 | `Ctrl+C` | 清空已输入内容；编辑器为空时给出提示，1.5 秒内再按一次退出 attach |
-| `Esc` | 发送 `/cancel`，结束当前 turn，不退出 attach |
+| `Esc` | 有补全菜单打开时先关闭菜单；没有菜单时发送 `/cancel`，结束当前 turn 但不退出 attach |
 | `Ctrl+D` | 退出 attach，先恢复终端 |
 | `PageUp` / `PageDown` | transcript 上下翻一页 |
 | `↑` / `↓` | 编辑器为空时上下滚一行 |
@@ -85,9 +85,9 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 
 `--no-tui` 在终端上也保留只追加的行模式表面；stdout 被重定向时永远走行模式，所以 `dsh-sup … | tee log` 写出的文件依然干净。
 
-**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与宿主斜杠命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），Tab/回车把选中项补进编辑器。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。名字来自宿主本身：`/skill:<name>` 与普通输入一样转发，由插件注入该 skill 的正文。
+**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与宿主斜杠命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。名字来自宿主本身：`/skill:<name>` 与普通输入一样转发，由插件注入该 skill 的正文。
 
-**退出。** `/q`、`/quit`、`/exit`、`/bye`——单独一行、全小写、后面不带参数——在两种界面（TUI 与 `--no-tui`）都能退出 attach：转发器发出 `bye`、恢复终端并以 0 退出，且它们不会被转发给会话，不会留下挂起的模型请求。TUI 里 `Ctrl+D` 仍然直接退出，`Esc` 取消当前 turn，`Ctrl+C` 清空编辑器；编辑器为空时显示 `Ctrl+C again to exit`，1.5 秒内再按一次即退出。`/q now`、`/quiet` 属于普通输入。
+**退出。** `/q`、`/quit`、`/exit`、`/bye`——单独一行、全小写、后面不带参数——在两种界面（TUI 与 `--no-tui`）都能退出 attach：转发器发出 `bye`、恢复终端并以 0 退出，且它们不会被转发给会话，不会留下挂起的模型请求。TUI 里 `Ctrl+D` 仍然直接退出，`Esc` 先关闭已打开的补全菜单、没有菜单时才取消当前 turn，`Ctrl+C` 清空编辑器；编辑器为空时显示 `Ctrl+C again to exit`，1.5 秒内再按一次即退出。`/q now`、`/quiet` 属于普通输入。
 
 ### 应答审批
 
