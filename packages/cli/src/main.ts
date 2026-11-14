@@ -108,7 +108,11 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
 
     /** Restores the terminal before any exit path writes to it. */
     const closeSurface = (): void => {
-      surface?.stop();
+      try {
+        surface?.stop();
+      } catch {
+        // The screen already went away; restoring it must not swallow the exit.
+      }
       surface = undefined;
     };
 
