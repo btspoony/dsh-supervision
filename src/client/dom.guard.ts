@@ -81,14 +81,20 @@ function placementFor(host: HTMLElement, card: HTMLElement | null): HTMLElement 
  * @param host - the editor's parent; covered even when nested below placement.
  * @param holder - the container the guard overlays; its children are swept.
  */
-function cover(host: HTMLElement, holder: HTMLElement): void {
+function cover(host: HTMLElement, holder: HTMLElement, card: HTMLElement | null): void {
+  /** `1` records that the node was already inert, so release leaves it inert. */
   const mark = (el: Element): void => {
     if (el.id === GUARD_ID || el.hasAttribute(HOST_ATTR)) return
-    el.setAttribute(HOST_ATTR, '')
-    el.setAttribute('inert', '')
+    el.setAttribute(HOST_ATTR, el.hasAttribute('inert') ? '1' : '')
+    if (!el.hasAttribute('inert')) el.setAttribute('inert', '')
   }
   mark(host)
-  for (const child of Array.from(holder.children)) mark(child)
+  // Only the composer card's own subtree is inert. The placement can be a page
+  // container (the fallback when the card is the editor's parent); its other
+  // children — session rows, navigation — must keep working. Without a card,
+  // only the editor host is covered.
+  const sweepRoot = card ?? host
+  for (const child of Array.from(sweepRoot.children)) mark(child)
   // Positionability comes from the cascade, not the inline style: a composer
   // card laid out by CSS (`position: sticky`, the usual bottom-anchored input)
   // must keep its own layout. Only a static box is lifted to relative.
@@ -104,8 +110,9 @@ function unmark(doc: Document): void {
   // Every marked node, not the first: a host that replaced the editor can leave
   // the old node behind, and a leftover `inert` would freeze typing for good.
   for (const host of doc.querySelectorAll<HTMLElement>(`[${HOST_ATTR}]`)) {
+    // Nodes that were already inert before the cover keep their inert state.
+    if (host.getAttribute(HOST_ATTR) !== '1') host.removeAttribute('inert')
     host.removeAttribute(HOST_ATTR)
-    host.removeAttribute('inert')
   }
   for (const holder of doc.querySelectorAll<HTMLElement>(`[${HOLDER_ATTR}]`)) {
     holder.style.position = holder.getAttribute(HOLDER_ATTR) ?? ''
@@ -166,12 +173,12 @@ export function syncGuard(
     // A host may have swapped the editor under the guard: clear the stale
     // markers (the old host would otherwise stay inert) but keep the guard.
     unmark(doc)
-    cover(host, placement)
+    cover(host, placement, card)
     seatGuard(existing, placement)
     return
   }
   releaseGuard(doc)
-  cover(host, placement)
+  cover(host, placement, card)
   const guard = doc.createElement('div')
   guard.id = GUARD_ID
   guard.setAttribute(SESSION_ATTR, selected ?? '')

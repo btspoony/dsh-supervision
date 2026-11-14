@@ -423,11 +423,28 @@ test('a card that is the editor parent still covers it, with the guard outside t
     assert.equal(guard.parentEl, doc.root, 'the guard mounts on the nearest strict ancestor, not the inert card')
     assert.ok(!card.contains(guard), 'the guard stays outside the inert subtree')
     assert.ok(card.hasAttribute('inert'), 'the editor subtree is inert')
+    assert.ok(!row.hasAttribute('inert'), 'a sibling session row in the placement stays operable')
+    assert.ok(!row.hasAttribute('data-dsh-sup-composer'), 'no cover marker leaks onto unrelated UI')
     assert.equal(guard.querySelector('span.' + COPY_CLASS)?.textContent, en.caption)
     assert.equal(guard.querySelector('span.' + BADGE_CLASS)?.textContent, en.badge)
     assert.equal(guard.querySelectorAll('button').length, 1, 'exactly one reclaim control')
     guard.querySelector('button')?.dispatch('click')
     assert.deepEqual(reclaimed, ['session-a'], 'Unlock stays clickable outside the inert subtree')
+  })
+})
+
+test('the inert sweep preserves a child that was already inert', () => {
+  withFakeDom(() => {
+    const { doc, card } = bridgedScene()
+    const toolbar = new FakeEl('div')
+    toolbar.setAttribute('inert', '')
+    card.append(toolbar)
+    paint(doc as unknown as Document, new Set(['session-a']), t, () => new Promise(() => {}))
+    assert.ok(toolbar.hasAttribute('inert'), 'the host-disabled group stays inert while covered')
+    assert.equal(toolbar.getAttribute('data-dsh-sup-composer'), '1', 'the marker records the pre-existing state')
+    releaseGuard(doc as unknown as Document)
+    assert.ok(toolbar.hasAttribute('inert'), 'release leaves the host-disabled group inert')
+    assert.ok(!toolbar.hasAttribute('data-dsh-sup-composer'), 'the marker is cleared')
   })
 })
 
