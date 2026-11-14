@@ -433,6 +433,35 @@ test('a card that is the editor parent still covers it, with the guard outside t
   })
 })
 
+test('without a composer card the toolbar beside the editor host is covered', () => {
+  withFakeDom(() => {
+    const doc = new FakeDoc()
+    const composer = new FakeEl('div')
+    composer.setAttribute('contenteditable', 'true')
+    const host = new FakeEl('div')
+    host.append(composer)
+    const placement = new FakeEl('div')
+    const toolbar = new FakeEl('div')
+    placement.append(host, toolbar)
+    const row = new FakeEl('div')
+    row.setAttribute('data-row-key', 'session:session-a')
+    row.setAttribute('aria-selected', 'true')
+    const sibling = new FakeEl('div')
+    doc.root.append(placement, row, sibling)
+    paint(doc as unknown as Document, new Set(['session-a']), t, () => new Promise(() => {}))
+    const guard = doc.getElementById(GUARD_ID)
+    assert.ok(guard !== null, 'the guard mounts on the placement')
+    assert.equal(guard.parentEl, placement, 'the placement is the editor grandparent')
+    assert.ok(host.hasAttribute('inert'), 'the editor host is covered')
+    assert.ok(toolbar.hasAttribute('inert'), 'the toolbar under the placement is covered')
+    assert.equal(toolbar.getAttribute('data-dsh-sup-composer'), '', 'the toolbar carries the cover marker')
+    assert.ok(!sibling.hasAttribute('inert'), 'unrelated siblings around the placement stay operable')
+    releaseGuard(doc as unknown as Document)
+    assert.ok(!host.hasAttribute('inert'), 'release clears the editor marker')
+    assert.ok(!toolbar.hasAttribute('inert'), 'release clears the toolbar marker')
+  })
+})
+
 test('the inert sweep preserves a child that was already inert', () => {
   withFakeDom(() => {
     const { doc, card } = bridgedScene()

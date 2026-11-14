@@ -75,11 +75,14 @@ function placementFor(host: HTMLElement, card: HTMLElement | null): HTMLElement 
 }
 
 /**
- * Re-assert the covered state on one editor and its container. Every element
- * child of the placement except the guard itself is made inert, so toolbar
- * siblings (send, stop, attach) cannot be focused or Enter-activated either.
- * @param host - the editor's parent; covered even when nested below placement.
- * @param holder - the container the guard overlays; its children are swept.
+ * Re-assert the covered state on one editor and its container. The composer
+ * card's element children (or, without a card, the placement's) are made inert
+ * except the guard itself, so toolbar siblings (send, stop, attach) cannot be
+ * focused or Enter-activated either; a page-container placement keeps its
+ * unrelated children operable.
+ * @param host - the editor's parent; always covered.
+ * @param holder - the placement the guard overlays.
+ * @param card - the composer card when it is a strict ancestor of `host`.
  */
 function cover(host: HTMLElement, holder: HTMLElement, card: HTMLElement | null): void {
   /** `1` records that the node was already inert, so release leaves it inert. */
@@ -89,11 +92,11 @@ function cover(host: HTMLElement, holder: HTMLElement, card: HTMLElement | null)
     if (!el.hasAttribute('inert')) el.setAttribute('inert', '')
   }
   mark(host)
-  // Only the composer card's own subtree is inert. The placement can be a page
-  // container (the fallback when the card is the editor's parent); its other
-  // children — session rows, navigation — must keep working. Without a card,
-  // only the editor host is covered.
-  const sweepRoot = card ?? host
+  // Sweep the composer card's own subtree when one exists: a page-container
+  // placement then keeps its other children (session rows, navigation)
+  // operable. Without a card the placement itself is the composer container,
+  // so its children (editor host plus toolbar) are covered as before.
+  const sweepRoot = card ?? holder
   for (const child of Array.from(sweepRoot.children)) mark(child)
   // Positionability comes from the cascade, not the inline style: a composer
   // card laid out by CSS (`position: sticky`, the usual bottom-anchored input)
