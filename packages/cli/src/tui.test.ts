@@ -202,38 +202,87 @@ function withGuard(stop: () => void, body: () => void): void {
   }
 }
 
-test('restoreOnExit wires every exit path, SIGINT included', () => {
-  withGuard(() => {}, () => {
-    for (const event of GUARDED) {
-      assert.ok(listenersOf(event).length > 0, `${event} is guarded`);
-    }
-  });
+/** The exit status and side effects one owned exit path produces. */
+interface PathRun {
+  stopped: number;
+  readonly exited: number[];
+  readonly killed: [number, string][];
+  stderr: string;
+}
+
+/**
+ * Delivers one owned exit event and records what the guard did.
+ * `process.exit` and `process.kill` are stubbed to unwind, so the runner and the
+ * host survive a path that really means to end the process.
+ */
+function runExitPath(event: (typeof GUARDED)[number]): PathRun {
+  const saved = { exit: process.exit, kill: process.kill, stderr: process.stderr.write };
+  const run: PathRun = { stopped: 0, exited: [], killed: [], stderr: '' };
+  process.exit = ((code?: number) => {
+    run.exited.push(code ?? 0);
+    throw new Error('process.exit');
+  }) as typeof process.exit;
+  process.kill = ((pid: number, signal?: string | number) => {
+    run.killed.push([pid, String(signal)]);
+    return true;
+  }) as typeof process.kill;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    run.stderr += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    withGuard(() => {
+      run.stopped += 1;
+    }, () => {
+      try {
+        if (event === 'uncaughtException') {
+          // `emit` would hand the error to the test runner's own uncaught
+          // handler, so the registered listener is called the way Node would
+          // call it for a real throw.
+          const handler = listenersOf('uncaughtException').at(-1) as ((error: Error) => void) | undefined;
+          assert.ok(handler !== undefined, 'uncaughtException is guarded');
+          handler(new Error('boom'));
+        } else {
+          // A real signal runs the registered `once` wrapper, and so does `emit`.
+          // The union of owned events is not one overload of `process.emit`.
+          (process.emit as (name: string) => boolean)(event);
+        }
+      } catch (error) {
+        // The stubbed process.exit unwinds through here; the record is the assertion.
+        if (!(error instanceof Error) || error.message !== 'process.exit') throw error;
+      }
+    });
+  } finally {
+    process.exit = saved.exit;
+    process.kill = saved.kill;
+    process.stderr.write = saved.stderr;
+  }
+  return run;
+}
+
+test('an uncaught exception restores the screen, prints the cause and exits 1', () => {
+  const run = runExitPath('uncaughtException');
+  assert.equal(run.stopped, 1, 'the restore ran before the exit');
+  assert.match(run.stderr, /boom/, 'the cause is reported on the restored screen');
+  assert.deepEqual(run.exited, [1]);
 });
 
 test('an external SIGINT restores once, then re-raises the default signal', () => {
-  const savedKill = process.kill;
-  const killed: [number, string][] = [];
-  let stopped = 0;
-  // The re-raise is recorded rather than delivered, so the runner survives it.
-  process.kill = ((pid: number, signal?: string | number) => {
-    killed.push([pid, String(signal)]);
-    return true;
-  }) as typeof process.kill;
-  try {
-    withGuard(() => {
-      stopped += 1;
-    }, () => {
-      assert.ok(listenersOf('SIGINT').length > 0, 'SIGINT is guarded');
-      // `emit` runs the registered `once` wrapper, exactly as the signal would,
-      // so the self-removal before the re-raise is part of what is observed.
-      process.emit('SIGINT');
-      assert.equal(listenersOf('SIGINT').length, 0, 'the handler removes itself before re-raising');
-    });
-  } finally {
-    process.kill = savedKill;
-  }
-  assert.equal(stopped, 1, 'the restore ran exactly once');
-  assert.deepEqual(killed, [[process.pid, 'SIGINT']], 'the default signal is re-raised, so the status stays 130');
+  const run = runExitPath('SIGINT');
+  assert.equal(run.stopped, 1, 'the restore ran exactly once');
+  assert.deepEqual(run.killed, [[process.pid, 'SIGINT']], 'the default signal is re-raised, so the status stays 130');
+  assert.deepEqual(run.exited, [], 'no exit status is invented for a signal');
+});
+
+test('SIGTERM and SIGHUP restore and keep their signal statuses', () => {
+  assert.deepEqual(runExitPath('SIGTERM').exited, [143]);
+  assert.deepEqual(runExitPath('SIGHUP').exited, [129]);
+});
+
+test('the last-resort exit path restores without choosing a status', () => {
+  const run = runExitPath('exit');
+  assert.equal(run.stopped, 1, 'a plain exit still runs the restore');
+  assert.deepEqual(run.exited, [], 'the exit status belongs to whoever called process.exit');
 });
 
 test('SIGTERM restores the surface before the process exits', () => {
