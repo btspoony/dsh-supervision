@@ -38,6 +38,9 @@ export function renderFrame(frame: OutFrame): string | undefined {
       // following OSC record never glues onto the transcript's last line.
       return `${renderMirror(frame.item)}\n`
     case 'sessions':
+    case 'catalog':
+      // Machine surfaces: a listing belongs to the socket's list command and a
+      // catalog to the interactive menu, never to the tty report stream.
       return undefined
     case 'error':
       return `${encodeReport({ state: 'error', app: APP_NAME, msg: `${frame.code}: ${frame.message}` })}\n`

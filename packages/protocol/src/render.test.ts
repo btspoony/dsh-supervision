@@ -38,6 +38,11 @@ const CASES: readonly { readonly name: string; readonly frame: OutFrame; readonl
     bytes: undefined,
   },
   {
+    name: 'a catalog is a menu for the interactive surface, not a tty line',
+    frame: { t: 'catalog', skills: [{ name: 'compact', description: 'shrink' }], commands: [] },
+    bytes: undefined,
+  },
+  {
     name: 'error renders the root error record naming the code',
     frame: { t: 'error', code: 'busy', message: 'already bridged' },
     bytes: report('state=error:app=dsh:msg=YnVzeTogYWxyZWFkeSBicmlkZ2Vk'),

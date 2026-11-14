@@ -162,6 +162,16 @@ class FakeHost {
   controllerItems: { sessionId: string; cwd?: string; blank: boolean; agentAvailable: boolean }[] | undefined = undefined
   /** Workspace memberships the registry reports, when it can list them. */
   workspaceRecords: { path: string; sessionIds: string[] }[] | undefined = undefined
+  /** Rows `ctx.skills.list` answers; `undefined` hides the skill service. */
+  catalogSkills: { name: string; description: string }[] | undefined = undefined
+  /** Bodies `ctx.skills.get` answers, keyed by the skill name. */
+  readonly skillBodies = new Map<string, { description: string; content: string }>()
+  /** When set, `ctx.skills.list` rejects with this message. */
+  skillsListError: string | undefined = undefined
+  /** When set, `ctx.skills.list` holds its answer until this resolves. */
+  catalogWait: Promise<void> | undefined = undefined
+  /** Rows `ctx.commands.list` answers; `undefined` hides the command service. */
+  catalogCommands: { name: string; description: string; input?: unknown }[] | undefined = undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -173,6 +183,7 @@ class FakeHost {
   readonly #statusListeners = new Set<(payload: { agent: FakeAgent; status: 'idle' | 'running' }) => void>()
   /** DSH's answerer chain for `approval/request`, in dispatch order. */
   readonly #approvalListeners: ApprovalListener[] = []
+  /** The last effect registered; the fake models the host's disposal like the old one. */
   #disposer: (() => void) | undefined
 
   /** The context `apply` receives; a CLI-only host mounts no webserver. */
@@ -239,6 +250,28 @@ class FakeHost {
             ...(listSessions === undefined ? {} : { listSessions }),
             ...(readSession === undefined ? {} : { readSession }),
           }
+        }
+        if (name === 'skills') {
+          if (this.catalogSkills === undefined && this.skillBodies.size === 0) return undefined
+          return {
+            registerProvider: () => () => {},
+            list: async () => {
+              if (this.catalogWait !== undefined) await this.catalogWait
+              if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
+              return this.catalogSkills ?? []
+            },
+            get: async (skill: string) => {
+              const body = this.skillBodies.get(skill)
+              return body === undefined
+                ? undefined
+                : { name: skill, description: body.description, content: body.content }
+            },
+          }
+        }
+        if (name === 'commands') {
+          return this.catalogCommands === undefined
+            ? undefined
+            : { list: (_agent: unknown) => this.catalogCommands ?? [] }
         }
         if (name === 'sessionProjections') return { summaryKeys: () => ['sessionListMetadata'] }
         if (name === 'sessionProjectionCache') {
@@ -365,8 +398,8 @@ class Client {
   }
 
   async take(count: number): Promise<readonly OutFrame[]> {
-    while (this.#frames.length < count) await new Promise<void>(resolve => { this.#wake = resolve })
-    return this.#frames.slice(0, count)
+    while (this.conversation.length < count) await new Promise<void>(resolve => { this.#wake = resolve })
+    return this.conversation.slice(0, count)
   }
 
   /** Resolve once the peer closed the connection. */
@@ -377,8 +410,21 @@ class Client {
     })
   }
 
-  /** Frames received so far, for assertions that expect no more. */
+  /**
+   * The conversation frames received so far. The catalog menu is a separate
+   * channel with its own assertions, so transcript tests never count it.
+   */
   get frames(): readonly OutFrame[] {
+    return this.conversation
+  }
+
+  /** The conversation: every frame except the catalog menu. */
+  get conversation(): readonly OutFrame[] {
+    return this.#frames.filter(frame => frame.t !== 'catalog')
+  }
+
+  /** Every frame exactly as received, catalog included. */
+  get allFrames(): readonly OutFrame[] {
     return this.#frames
   }
 }
@@ -1438,6 +1484,191 @@ test('a tool result produced during the read pairs with the snapshot call', asyn
       { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'start', turn: 1 },
       { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'a.txt', ms: 12, turn: 1 },
     ])
+  } finally {
+    host.dispose()
+  }
+})
+type CatalogFrame = Extract<OutFrame, { t: 'catalog' }>
+
+/** The catalog frames a client received, in arrival order. */
+function catalogs(client: Client): readonly CatalogFrame[] {
+  return client.allFrames.filter((frame): frame is CatalogFrame => frame.t === 'catalog')
+}
+
+/** The one text block a steered user message carries. */
+function steeredText(message: UserMessage): string {
+  return message.content.map(block => block.text).join('\n')
+}
+
+test('a catalog frame follows welcome once and precedes the replayed history', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  host.catalogCommands = [
+    { name: 'compact', description: 'shrink the context', input: { hint: '<focus>' } },
+    { name: 'status', description: 'show usage' },
+  ]
+  host.history = [
+    { type: 'user/message', seq: 1, time: 1, data: { turn: 1, content: [{ type: 'text', text: 'earlier' }], source: { kind: 'user' } } },
+  ]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+
+  try {
+    await until(() => client.allFrames.length >= 3, 'the catalog and the replay')
+    assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog', 'mirror'])
+    const [catalog] = catalogs(client)
+    assert.deepEqual(catalog, {
+      t: 'catalog',
+      skills: [{ name: 'use-dsh-sup', description: 'drive the terminal' }],
+      commands: [
+        { name: 'compact', description: 'shrink the context', argumentHint: '<focus>' },
+        { name: 'status', description: 'show usage' },
+      ],
+    })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(catalogs(client).length, 1, 'one catalog per bind')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a session switch resends the catalog once', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => catalogs(client).length === 1, 'the first catalog')
+    client.write({ t: 'line', text: '/attach session-2' })
+    await until(() => catalogs(client).length === 2, 'the catalog after the switch')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(catalogs(client).length, 2, 'exactly one per switch')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a throwing skill service empties its section and still attaches', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = []
+  host.skillsListError = 'skills down'
+  host.catalogCommands = [{ name: 'compact', description: 'shrink the context' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => catalogs(client).length === 1, 'the degraded catalog')
+    const [catalog] = catalogs(client)
+    assert.deepEqual(catalog?.skills, [], 'a throwing service is an empty section')
+    assert.deepEqual(catalog?.commands, [{ name: 'compact', description: 'shrink the context' }])
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the failure')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a hanging catalog service cannot hold the attach', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'slow', description: 'never listed' }]
+  host.catalogWait = new Promise<void>(() => {})
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  // The catalog's 2 s deadline is created inside the hello handler, so the
+  // simulated clock has to be on before the hello is written.
+  mock.timers.enable({ apis: ['setTimeout'] })
+
+  try {
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+    await client.take(1)
+    mock.timers.tick(2_000)
+    await until(() => catalogs(client).length === 1, 'the empty catalog after the deadline')
+    assert.deepEqual(catalogs(client)[0], { t: 'catalog', skills: [], commands: [] })
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the timeout')
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+test('/skill: injects the named skill body as a user message', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.skillBodies.set('use-dsh-sup', { description: 'drive the terminal', content: 'Full manual body\n' })
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/skill:use-dsh-sup' })
+    await until(() => host.steered.length === 1, 'the injected body')
+    const [steer] = host.steered
+    assert.equal(steer?.session, 'session-1')
+    assert.equal(steer?.message.role, 'user')
+    assert.deepEqual(steer?.message.source, { kind: 'user' })
+    assert.equal(
+      steer === undefined ? '' : steeredText(steer.message),
+      '# Skill: use-dsh-sup\n\ndrive the terminal\n\nFull manual body\n',
+    )
+    // The space spelling resolves the same skill.
+    client.write({ t: 'line', text: '/skill use-dsh-sup' })
+    await until(() => host.steered.length === 2, 'the second injection')
+    assert.equal(
+      host.steered[1] === undefined ? '' : steeredText(host.steered[1].message),
+      steeredText(steer.message),
+    )
+  } finally {
+    host.dispose()
+  }
+})
+
+test('/skill echoes an unknown name and a skill with no body, and steers neither', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.skillBodies.set('blank', { description: 'nothing to say', content: '   \n' })
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/skill:nope' })
+    await until(() => client.frames.length >= 2, 'the unknown-skill echo')
+    assert.deepEqual(client.frames[1], { t: 'echo', text: 'skill not found: nope' })
+    client.write({ t: 'line', text: '/skill:blank' })
+    await until(() => client.frames.length >= 3, 'the empty-body echo')
+    assert.deepEqual(client.frames[2], { t: 'echo', text: 'skill blank has no content' })
+    assert.equal(host.steered.length, 0, 'a failed skill never reaches the agent')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('/skill says the service is unavailable when the host mounts none', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/skill:use-dsh-sup' })
+    await until(() => client.frames.length >= 2, 'the unavailable echo')
+    assert.deepEqual(client.frames[1], { t: 'echo', text: 'skill service unavailable' })
+    assert.equal(host.steered.length, 0)
   } finally {
     host.dispose()
   }

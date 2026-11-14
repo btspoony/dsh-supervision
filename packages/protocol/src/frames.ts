@@ -12,7 +12,18 @@ import type { ProgramState } from './osc.js'
 /** One frame, newline included, never larger than this. */
 export const MAX_FRAME = 64 * 1024
 /** The only protocol version either side speaks. */
-export const PROTO = 2
+export const PROTO = 3
+
+// The catalog frame is one menu, so its sections are bounded rather than
+// streamed: a host with hundreds of skills must not push a menu (or a frame)
+// past what a terminal or a decoder can carry. Caps are UTF-16 units because the
+// menu is measured in columns, not bytes; the frame itself is still capped by
+// `MAX_FRAME` on the wire.
+export const MAX_CATALOG_SKILLS = 200
+export const MAX_CATALOG_COMMANDS = 50
+export const MAX_CATALOG_NAME = 64
+export const MAX_CATALOG_DESCRIPTION = 160
+export const MAX_CATALOG_ARGUMENT_HINT = 64
 
 // Caps a mirror frame's strings so one assistant block still encodes. Each is a
 // UTF-8 byte budget, not a character count: JSON escaping and multibyte text
@@ -89,6 +100,18 @@ export type MirrorItem =
       readonly turn: number
     }
 
+/** One catalog row: a name and the one-line description a menu shows. */
+export interface CatalogEntry {
+  readonly name: string
+  readonly description: string
+}
+
+/** One skill the session can invoke: the menu row only, never its body. */
+export type CatalogSkill = CatalogEntry
+
+/** One host slash command the menu can offer, with its optional input hint. */
+export type CatalogCommand = CatalogEntry & { readonly argumentHint?: string }
+
 /** Everything the plugin may write: the server half of the protocol. */
 export type OutFrame =
   | Welcome
@@ -96,6 +119,11 @@ export type OutFrame =
   | { readonly t: 'echo'; readonly text: string }
   | { readonly t: 'mirror'; readonly item: MirrorItem }
   | { readonly t: 'sessions'; readonly items: readonly SessionItem[] }
+  | {
+      readonly t: 'catalog'
+      readonly skills: readonly CatalogSkill[]
+      readonly commands: readonly CatalogCommand[]
+    }
   | { readonly t: 'error'; readonly code: ErrorCode; readonly message: string }
   | { readonly t: 'bye'; readonly reason: string }
 
@@ -247,6 +275,8 @@ function parseOutFrame(line: string): OutFrame | undefined {
     }
     case 'sessions':
       return parseSessions(parsed['items'])
+    case 'catalog':
+      return parseCatalog(parsed)
     case 'mirror':
       return parseMirror(parsed['item'])
     case 'error': {
@@ -333,6 +363,56 @@ function parseMirror(value: unknown): OutFrame | undefined {
     default:
       return undefined
   }
+}
+
+/**
+ * The catalog frame: both sections must be arrays of well-formed rows. Caps are
+ * applied by trimming — an over-long section or field is shortened, not a reason
+ * to close the bridge — while a wrong type, a missing string field, or a bad
+ * `argumentHint` is a malformed frame.
+ */
+function parseCatalog(frame: Record<string, unknown>): OutFrame | undefined {
+  const skills = parseCatalogSkills(frame['skills'])
+  const commands = parseCatalogCommands(frame['commands'])
+  if (skills === undefined || commands === undefined) return undefined
+  return { t: 'catalog', skills, commands }
+}
+
+function parseCatalogSkills(value: unknown): readonly CatalogSkill[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const skills: CatalogSkill[] = []
+  for (const entry of value.slice(0, MAX_CATALOG_SKILLS)) {
+    if (!isRecord(entry)) return undefined
+    const name = entry['name']
+    const description = entry['description']
+    if (typeof name !== 'string' || typeof description !== 'string') return undefined
+    skills.push({ name: cap(name, MAX_CATALOG_NAME), description: cap(description, MAX_CATALOG_DESCRIPTION) })
+  }
+  return skills
+}
+
+function parseCatalogCommands(value: unknown): readonly CatalogCommand[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const commands: CatalogCommand[] = []
+  for (const entry of value.slice(0, MAX_CATALOG_COMMANDS)) {
+    if (!isRecord(entry)) return undefined
+    const name = entry['name']
+    const description = entry['description']
+    const argumentHint = entry['argumentHint']
+    if (typeof name !== 'string' || typeof description !== 'string') return undefined
+    if (argumentHint !== undefined && typeof argumentHint !== 'string') return undefined
+    commands.push({
+      name: cap(name, MAX_CATALOG_NAME),
+      description: cap(description, MAX_CATALOG_DESCRIPTION),
+      ...(argumentHint === undefined ? {} : { argumentHint: cap(argumentHint, MAX_CATALOG_ARGUMENT_HINT) }),
+    })
+  }
+  return commands
+}
+
+/** Trim one string field to its column cap; a field already inside it is kept. */
+function cap(text: string, limit: number): string {
+  return text.length > limit ? text.slice(0, limit) : text
 }
 
 function parseSessions(items: unknown): OutFrame | undefined {
