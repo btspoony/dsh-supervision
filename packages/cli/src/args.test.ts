@@ -73,6 +73,18 @@ test('the usage text names both informational flags', () => {
   assert.match(usageText, /dsh-sup --skill/);
 });
 
+test('--no-tui is a global opt-out that leaves the rest of the parse untouched', () => {
+  assert.deepEqual(parseArgs(['--no-tui'], base), { kind: 'new', cwd: base, noTui: true });
+  assert.deepEqual(parseArgs(['new', '--no-tui'], base), { kind: 'new', cwd: base, noTui: true });
+  assert.deepEqual(parseArgs(['attach', 'session-x', '--no-tui'], base), {
+    kind: 'attach',
+    session: 'session-x',
+    noTui: true,
+  });
+  assert.deepEqual(parseArgs(['list', '--no-tui'], base), { kind: 'list', noTui: true });
+  assert.match(usageText, /--no-tui/);
+});
+
 test('a usage result always names a reason', () => {
   const parsed = parseArgs(['--pid', '0'], base);
   assert.equal(parsed.kind, 'usage');

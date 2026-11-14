@@ -1,6 +1,9 @@
 packages:
   - "packages/*"
 
+allowBuilds:
+  koffi: false
+
 includeWorkspaceRoot: true
 
 permissions:
