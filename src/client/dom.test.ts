@@ -194,20 +194,6 @@ class FakeEl {
     return this.parentEl
   }
 
-  get previousElementSibling(): FakeEl | null {
-    const parent = this.parentEl
-    if (parent === null) return null
-    const index = parent.children.indexOf(this)
-    return index > 0 ? parent.children[index - 1] ?? null : null
-  }
-
-  get nextElementSibling(): FakeEl | null {
-    const parent = this.parentEl
-    if (parent === null) return null
-    const index = parent.children.indexOf(this)
-    return index >= 0 && index + 1 < parent.children.length ? parent.children[index + 1] ?? null : null
-  }
-
   setAttribute(name: string, value: string): void {
     this.attrs.set(name, value)
   }
@@ -447,7 +433,7 @@ test('a card that is the editor parent still covers it, with the guard outside t
   })
 })
 
-test('without a composer card the placement controls are covered but page rows are not', () => {
+test('without a composer card only the editor host is covered, never the page container', () => {
   withFakeDom(() => {
     const doc = new FakeDoc()
     const composer = new FakeEl('div')
@@ -469,15 +455,14 @@ test('without a composer card the placement controls are covered but page rows a
     assert.ok(guard !== null, 'the guard mounts on the placement')
     assert.equal(guard.parentEl, placement, 'the placement is the editor grandparent')
     assert.ok(host.hasAttribute('inert'), 'the editor host is covered')
-    assert.ok(toolbar.hasAttribute('inert'), 'the toolbar beside the host is covered without a card')
-    assert.equal(toolbar.getAttribute('data-dsh-sup-composer'), '', 'the toolbar carries the cover marker')
+    // Documented limit: the placement may be a page container, so a card-less
+    // composer keeps its toolbar operable rather than freezing every sibling.
+    assert.ok(!toolbar.hasAttribute('inert'), 'the card-less toolbar is left operable')
     assert.ok(!pageRow.hasAttribute('inert'), 'a page-level row under the placement stays operable')
     assert.ok(!sibling.hasAttribute('inert'), 'unrelated siblings around the placement stay operable')
     releaseGuard(doc as unknown as Document)
     assert.ok(!host.hasAttribute('inert'), 'release clears the editor inert')
-    assert.ok(!toolbar.hasAttribute('inert'), 'release clears the toolbar inert')
     assert.ok(!host.hasAttribute('data-dsh-sup-composer'), 'release clears the editor marker')
-    assert.ok(!toolbar.hasAttribute('data-dsh-sup-composer'), 'release clears the toolbar marker')
   })
 })
 
