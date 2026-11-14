@@ -180,51 +180,69 @@ class StatusLine {
  * decides how many rows are left.
  */
 export class TranscriptView implements Component {
-  private entries: (MirrorItem | string)[] = [];
-  private cache: { width: number; lines: string[] } | undefined;
+  private readonly entries: (MirrorItem | string)[] = [];
+  /** Every entry's wrapped lines, flattened: a slice per frame, no re-wrap. */
+  private flat: string[] = [];
   private scrollState: Scroll = FOLLOWING;
   /** Viewport rows the shell grants this frame. */
   height = 0;
-  private width = 80;
+  /** Width the flattened lines are wrapped at; a different render rewraps all. */
+  private width: number;
+  private readonly wrapEntry: (entry: MirrorItem | string, width: number) => string[];
+
+  /**
+   * @param wrapEntry - one entry's lines; injectable so a test can count calls.
+   * @param width - the width to wrap at until a render names the real one.
+   */
+  constructor(
+    wrapEntry: (entry: MirrorItem | string, width: number) => string[] = renderEntry,
+    width = 80,
+  ) {
+    this.wrapEntry = wrapEntry;
+    this.width = Math.max(1, Math.floor(width));
+  }
 
   push(entry: MirrorItem | string): void {
     this.entries.push(entry);
-    this.cache = undefined;
-    this.scrollState = afterAppend(this.scrollState, 1, this.lines().length, this.height);
+    // Only the new entry is wrapped; the history stays as the last frame left it.
+    append(this.flat, this.wrapEntry(entry, this.width));
+    this.scrollState = afterAppend(this.scrollState, 1, this.flat.length, this.height);
   }
 
   page(delta: number): boolean {
-    return this.commit(scrollBy(this.scrollState, delta * Math.max(1, this.height - 1), this.lines().length, this.height));
+    return this.commit(scrollBy(this.scrollState, delta * Math.max(1, this.height - 1), this.flat.length, this.height));
   }
 
   line(delta: number): boolean {
-    return this.commit(scrollBy(this.scrollState, delta, this.lines().length, this.height));
+    return this.commit(scrollBy(this.scrollState, delta, this.flat.length, this.height));
   }
 
   toTop(): boolean {
-    return this.commit(scrollToTop(this.scrollState, this.lines().length, this.height));
+    return this.commit(scrollToTop(this.scrollState, this.flat.length, this.height));
   }
 
   toBottom(): boolean {
-    return this.commit(scrollToBottom(this.scrollState, this.lines().length, this.height));
+    return this.commit(scrollToBottom(this.scrollState, this.flat.length, this.height));
   }
 
-  invalidate(): void {
-    this.cache = undefined;
-  }
+  /** Nothing here is theme-dependent, so a theme change invalidates nothing. */
+  invalidate(): void {}
 
   render(width: number): string[] {
-    this.width = Math.max(1, Math.floor(width));
-    const lines = this.lines();
+    const w = Math.max(1, Math.floor(width));
+    if (w !== this.width) this.rewrap(w);
     if (this.height <= 0) return [];
-    const max = maxTop(lines.length, this.height);
+    // A resize can leave the stored offset past the new bottom; clamping through
+    // the same arithmetic also clears the marker once the bottom is in view.
+    this.scrollState = scrollBy(this.scrollState, 0, this.flat.length, this.height);
+    const max = maxTop(this.flat.length, this.height);
     const top = this.scrollState.follow ? max : Math.min(this.scrollState.top, max);
     const marker = newMarker(this.scrollState);
     // The marker takes the last row, so one fewer line of transcript shows.
     const rows = marker === undefined ? this.height : this.height - 1;
-    const visible = lines.slice(top, top + rows);
+    const visible = this.flat.slice(top, top + rows);
     while (visible.length < rows) visible.unshift('');
-    if (marker !== undefined) visible.push(truncateToWidth(marker, this.width));
+    if (marker !== undefined) visible.push(truncateToWidth(marker, w));
     return visible;
   }
 
@@ -235,20 +253,22 @@ export class TranscriptView implements Component {
     return changed;
   }
 
-  /**
-   * Every entry as lines at the current width. Re-wrapping the whole transcript
-   * on append keeps one code path; shortcut: append-heavy sessions re-wrap the
-   * history, upgrade to an incremental line cache if that ever shows.
-   */
-  private lines(): string[] {
-    if (this.cache !== undefined && this.cache.width === this.width) return this.cache.lines;
-    const lines: string[] = [];
-    for (const entry of this.entries) {
-      lines.push(...fitLines(typeof entry === 'string' ? entry : renderMirror(entry, this.width), this.width));
-    }
-    this.cache = { width: this.width, lines };
-    return lines;
+  /** The one full pass: only a width change needs every entry wrapped again. */
+  private rewrap(width: number): void {
+    this.width = width;
+    this.flat = [];
+    for (const entry of this.entries) append(this.flat, this.wrapEntry(entry, width));
   }
+}
+
+/** One entry's lines at a width; the only place an entry is rendered. */
+function renderEntry(entry: MirrorItem | string, width: number): string[] {
+  return fitLines(typeof entry === 'string' ? entry : renderMirror(entry, width), width);
+}
+
+/** Appends in place; a spread would give a huge block one call frame per line. */
+function append(into: string[], lines: readonly string[]): void {
+  for (const line of lines) into.push(line);
 }
 
 /** Transcript, editor and status stacked into exactly the terminal's rows. */
@@ -285,6 +305,40 @@ class Shell implements Component {
     this.transcript.invalidate();
     this.editor.invalidate();
   }
+}
+
+/**
+ * Registers the surface's synchronous restore on the exit paths the CLI does
+ * not own. Without it a signal or a throw leaves the tty in raw mode, the
+ * cursor hidden and bracketed paste on. SIGINT is deliberately left alone: in
+ * raw mode Ctrl+C is a byte, and the Editor owns it. `stop` is idempotent, so
+ * a double restore is harmless.
+ * @param stop - the surface's own restore, already guarded against a dead screen.
+ */
+export function restoreOnExit(stop: () => void): void {
+  const restore = (): void => {
+    try {
+      stop();
+    } catch {
+      // A screen that is already gone must not block the exit itself.
+    }
+  };
+  process.once('exit', restore);
+  // SIGTERM and SIGHUP terminate by default without running `exit`, so each
+  // restores first and then keeps its own status.
+  process.once('SIGTERM', () => {
+    restore();
+    process.exit(143);
+  });
+  process.once('SIGHUP', () => {
+    restore();
+    process.exit(129);
+  });
+  process.once('uncaughtException', (error: Error) => {
+    restore();
+    process.stderr.write(`${error.stack ?? error.message}\n`);
+    process.exit(1);
+  });
 }
 
 /** The running surface: feed it frames, update the status, stop on exit. */

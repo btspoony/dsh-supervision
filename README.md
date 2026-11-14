@@ -75,7 +75,7 @@ in the transcript, so scrolling back reaches the whole attach.
 | Key | Effect |
 |---|---|
 | `Enter` | send the editor's text as one operator line |
-| `Shift+Enter` | start a new line in the editor |
+| `Shift+Enter` | start a new line in the editor, when the terminal reports the modifier (modifyOtherKeys or the Kitty keyboard protocol); otherwise it submits like `Enter` |
 | `Ctrl+C` | send `/cancel` — ends the running turn and keeps the attach |
 | `Ctrl+D` | leave the attach; the terminal is restored first |
 | `PageUp` / `PageDown` | scroll the transcript one page |

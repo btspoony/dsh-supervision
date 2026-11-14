@@ -71,7 +71,7 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 | 按键 | 作用 |
 |---|---|
 | `Enter` | 把编辑器内容作为一行操作者输入发出 |
-| `Shift+Enter` | 在编辑器中换行 |
+| `Shift+Enter` | 在编辑器中换行，前提是终端能上报该修饰键（modifyOtherKeys 或 Kitty 键盘协议）；否则它和 `Enter` 一样提交 |
 | `Ctrl+C` | 发送 `/cancel`，结束当前 turn，不退出 attach |
 | `Ctrl+D` | 退出 attach，先恢复终端 |
 | `PageUp` / `PageDown` | transcript 上下翻一页 |

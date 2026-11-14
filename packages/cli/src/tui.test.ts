@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { visibleWidth } from '@mariozechner/pi-tui';
+import { renderMirror } from 'dsh-supervision-protocol';
 import {
   FOLLOWING,
   TranscriptView,
@@ -15,6 +16,7 @@ import {
   fitLines,
   keyAction,
   maxTop,
+  restoreOnExit,
   newMarker,
   scrollBy,
   scrollToBottom,
@@ -141,4 +143,87 @@ test('a rendered mirror item never exceeds the viewport width', () => {
   for (const line of view.render(20)) {
     assert.ok(visibleWidth(line) <= 20, `${JSON.stringify(line)} is wider than 20`);
   }
+});
+test('an append wraps only the new entry; a width change rebuilds all', () => {
+  const calls: string[] = [];
+  const view = new TranscriptView((entry, width) => {
+    calls.push(typeof entry === 'string' ? entry : 'item');
+    return fitLines(typeof entry === 'string' ? entry : renderMirror(entry, width), width);
+  });
+  view.height = 4;
+  view.push('alpha');
+  view.push('beta');
+  // Nothing rendered yet, so both entries took the constructor's default width.
+  assert.deepEqual(calls, ['alpha', 'beta']);
+  view.render(20);
+  assert.deepEqual(calls, ['alpha', 'beta', 'alpha', 'beta'], 'the first real width rewraps everything');
+  calls.length = 0;
+  view.push('gamma');
+  assert.deepEqual(calls, ['gamma'], 'only the appended entry is wrapped');
+  view.render(20);
+  assert.deepEqual(calls, ['gamma'], 'rendering reuses the cached lines');
+  view.render(30);
+  assert.deepEqual(calls, ['gamma', 'alpha', 'beta', 'gamma'], 'a width change rebuilds every entry');
+});
+
+test('a resize that brings the bottom back in view clears the marker', () => {
+  const view = new TranscriptView();
+  view.height = 4;
+  for (let i = 0; i < 10; i++) view.push(`line ${String(i)}`);
+  view.render(40);
+  view.page(-1);
+  view.render(40);
+  view.push('line 10');
+  assert.match(view.render(40).join('\n'), /\u2193 1 new/);
+  view.height = 12;
+  assert.doesNotMatch(view.render(40).join('\n'), /\u2193/);
+});
+
+test('restoreOnExit leaves SIGINT to the editor and wires the other exits', () => {
+  // One event name at a time: `process.listeners` is overloaded per event.
+  const listenersOf = (event: string): ((...args: unknown[]) => void)[] =>
+    process.listeners(event as 'exit') as ((...args: unknown[]) => void)[];
+  const events = ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP', 'uncaughtException'];
+  const before = new Map(events.map((event) => [event, listenersOf(event)]));
+  restoreOnExit(() => {});
+  try {
+    assert.deepEqual(listenersOf('SIGINT'), before.get('SIGINT'), 'Ctrl+C is a byte, not a signal');
+    for (const event of ['exit', 'SIGTERM', 'SIGHUP', 'uncaughtException']) {
+      assert.ok(listenersOf(event).length > (before.get(event)?.length ?? 0), `${event} is guarded`);
+    }
+  } finally {
+    // Hand the runner back its own processes: only remove what this test added.
+    for (const event of events) {
+      for (const listener of listenersOf(event)) {
+        if (!(before.get(event) ?? []).includes(listener)) process.removeListener(event, listener);
+      }
+    }
+  }
+});
+
+test('SIGTERM restores the surface before the process exits', () => {
+  const savedExit = process.exit;
+  const savedSigterm = process.listeners('SIGTERM');
+  const exited: number[] = [];
+  let stopped = 0;
+  // The stub records the status and unwinds instead of killing the runner.
+  process.exit = ((code?: number) => {
+    exited.push(code ?? 0);
+    throw new Error('process.exit');
+  }) as typeof process.exit;
+  try {
+    restoreOnExit(() => {
+      stopped += 1;
+    });
+    const handler = process.listeners('SIGTERM').at(-1) as (() => void) | undefined;
+    assert.ok(handler !== undefined, 'SIGTERM is guarded');
+    assert.throws(() => { handler(); }, /process\.exit/);
+  } finally {
+    process.exit = savedExit;
+    for (const listener of process.listeners('SIGTERM')) {
+      if (!savedSigterm.includes(listener)) process.removeListener('SIGTERM', listener);
+    }
+  }
+  assert.equal(stopped, 1, 'the restore ran before the exit');
+  assert.deepEqual(exited, [143], 'a killed attach keeps its signal status');
 });
