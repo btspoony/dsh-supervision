@@ -83,7 +83,7 @@ on the normal screen when the attach ends.
 | `Ctrl+D` | leave the attach; the terminal is restored first |
 | `PageUp` / `PageDown` | scroll the transcript one page |
 | `↑` / `↓` | scroll one line, while the editor is empty |
-| `Home` / `End` | oldest line / back to the newest |
+| `Home` / `End` | oldest line / back to the newest (when the editor is empty) |
 
 Scrolled back, the last row shows `↓ N new` for the entries that arrived
 meanwhile, and scrolling to the bottom resumes following the live transcript.

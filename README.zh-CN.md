@@ -76,7 +76,7 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 | `Ctrl+D` | 退出 attach，先恢复终端 |
 | `PageUp` / `PageDown` | transcript 上下翻一页 |
 | `↑` / `↓` | 编辑器为空时上下滚一行 |
-| `Home` / `End` | 跳到最早一行 / 回到最新 |
+| `Home` / `End` | 跳到最早一行 / 回到最新（编辑器为空时） |
 
 向上滚动后，最后一行会显示 `↓ N new`，统计期间新到的条目；滚回底部就恢复跟随。界面的绘制使用 [`@earendil-works/pi-tui`](https://github.com/earendil-works/pi)。
 
