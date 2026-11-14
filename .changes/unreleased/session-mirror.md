@@ -5,3 +5,4 @@ category: Added
 - OSC 7501 records keep going to `/dev/tty`, so the machine surface is unchanged; `echo` lines now reach exactly one sink — stdout when the operator has a TTY, `/dev/tty` otherwise — so status and approval lines appear in an interactive attach without a real supervisor losing them.
 - `PROTO` is now `2`. The plugin and `dsh-sup` ship as one version pair, so an old forwarder and a new plugin refuse each other instead of half-working.
 - Input handling is untouched: line mode, no raw mode, no alternate screen.
+- Supervision records are now capped the same way the rest of the encoder already was: a multi-byte session title or message is shortened to the documented byte budget instead of producing an over-cap record that the supervisor drops, so a supervised session can no longer report a stale state. ASCII records are byte-identical.
