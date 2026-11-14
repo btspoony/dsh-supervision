@@ -55,6 +55,26 @@ function seatGuard(guard: HTMLElement, holder: HTMLElement): void {
 }
 
 /**
+ * Where the guard may mount for one editor. The composer card wins when it is
+ * a strict ancestor of `host` (the cover then spans editor and toolbar); when
+ * the card IS the editor's own parent, the nearest strict ancestor outside the
+ * inert subtree takes over, so Unlock stays clickable and the composer is
+ * still covered. Null only when `host` has no ancestor at all.
+ * @param host - the editor's parent, the subtree made inert.
+ * @param card - the composer card when one wraps the editor.
+ * @returns the placement, or null when nothing usable exists.
+ */
+function placementFor(host: HTMLElement, card: HTMLElement | null): HTMLElement | null {
+  if (card !== null && card !== host && card.contains(host)) return card
+  let cur: HTMLElement | null = host.parentElement
+  while (cur !== null) {
+    if (cur !== host && cur.contains(host)) return cur
+    cur = cur.parentElement
+  }
+  return null
+}
+
+/**
  * Re-assert the covered state on one editor and its container.
  * @param host - the editor's parent.
  * @param holder - the container the guard overlays.
@@ -109,20 +129,14 @@ export function syncGuard(
     releaseGuard(doc)
     return
   }
-  // The whole input area (editor + toolbar) is the host's composer card; when
-  // present it is the holder, so the cover spans both like the host's own
-  // overlay slot would. The holder must be a strict ancestor of `host`: an
-  // `inert` subtree cannot host the guard's button, so a card that IS the
-  // editor's own parent would leave the only reclaim control dead.
   const card = (composer?.closest('[data-composer-card]') ?? null) as HTMLElement | null
-  const candidate = card ?? host.parentElement ?? null
-  const holder = candidate !== null && candidate !== host && candidate.contains(host) ? candidate : null
-  if (holder === null) {
+  const placement = placementFor(host, card)
+  if (placement === null) {
     releaseGuard(doc)
     return
   }
   const existing = guardNode(doc)
-  if (existing !== null && existing.parentElement === holder) {
+  if (existing !== null && existing.parentElement === placement) {
     // The guard outlives a session switch in the same composer: retarget it, so
     // Unlock never reclaims the session selected before this one, and re-assert
     // the covered state in case the host swapped the editor under the guard.
@@ -131,12 +145,12 @@ export function syncGuard(
     existing.querySelector(':scope > span.' + COPY_CLASS)?.replaceChildren(doc.createTextNode(t('caption')))
     existing.querySelector(':scope > span.' + BADGE_CLASS)?.replaceChildren(doc.createTextNode(t('badge')))
     existing.querySelector(':scope > button')?.replaceChildren(doc.createTextNode(t('unlock')))
-    cover(host, holder)
-    seatGuard(existing, holder)
+    cover(host, placement)
+    seatGuard(existing, placement)
     return
   }
   releaseGuard(doc)
-  cover(host, holder)
+  cover(host, placement)
   const guard = doc.createElement('div')
   guard.id = GUARD_ID
   guard.setAttribute(SESSION_ATTR, selected ?? '')
@@ -157,6 +171,6 @@ export function syncGuard(
     })
   })
   guard.append(copy, badge, button)
-  seatGuard(guard, holder)
-  holder.append(guard)
+  seatGuard(guard, placement)
+  placement.append(guard)
 }

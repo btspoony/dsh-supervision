@@ -226,7 +226,9 @@ export async function reclaim(session: string): Promise<boolean> {
 }
 
 /**
- * Coalesce a burst of signals into at most one run per window. Extracted pure
+ * Leading-edge throttle: the first signal in a quiet period schedules one run
+ * after `windowMs`, and further signals inside the window are ignored (not
+ * deferred — nothing runs when the window closes on silence). Extracted pure
  * of the DOM so the throttling contract stays unit-testable.
  * @param run - the work to run at most once per window.
  * @param windowMs - the quiet period that separates two runs.
@@ -263,7 +265,21 @@ export function watch(doc: Document, t: Translate, draw: typeof paint = paint): 
   let stopped = false
   let cache: SupervisionState | undefined
   const repaint = (): void => {
-    if (!stopped) draw(doc, bridgedIds(cache), t, reclaim)
+    if (!stopped) draw(doc, bridgedIds(cache), t, take)
+  }
+  // A reclaim that lands drops the session from the cache before repainting:
+  // otherwise the next click or churn repaint would re-read the stale bridge
+  // and re-cover the composer right after Unlock. The 2s poll still restores
+  // the truth when the bridge is really still there.
+  const take = async (session: string): Promise<boolean> => {
+    const taken = await reclaim(session)
+    if (taken && cache !== undefined && Object.hasOwn(cache.sessions, session)) {
+      const sessions = { ...cache.sessions }
+      delete sessions[session]
+      cache = { ...cache, sessions }
+      repaint()
+    }
+    return taken
   }
   const churn = coalescer(repaint, 100)
   const tick = async (): Promise<void> => {
@@ -288,7 +304,18 @@ export function watch(doc: Document, t: Translate, draw: typeof paint = paint): 
   const timer = setInterval(() => { void tick() }, POLL_MS)
   // Selection changes are rare: repaint from the cache immediately.
   const selectionObserver = new MutationObserver(repaint)
-  const churnObserver = new MutationObserver(() => { churn.schedule() })
+  // Guard-internal writes (the retarget replacing caption/badge text) are
+  // childList mutations too: painting them would schedule another paint
+  // forever. Only mutations outside the guard count as churn.
+  const churnObserver = new MutationObserver((records) => {
+    const guard = doc.getElementById(GUARD_ID)
+    const insideGuard = (target: EventTarget | null): boolean => {
+      if (guard === null || target === null) return false
+      if (target === guard) return true
+      return typeof guard.contains === 'function' && guard.contains(target as Node)
+    }
+    if (records.some(record => !insideGuard(record.target))) churn.schedule()
+  })
   if (doc.body !== null) {
     selectionObserver.observe(doc.body, { subtree: true, attributes: true, attributeFilter: ['aria-selected'] })
     churnObserver.observe(doc.body, { subtree: true, childList: true })

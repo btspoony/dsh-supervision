@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { BRIDGED_ATTR, bridgedIds, coalescer, paint, rowSessionId, STYLE } from './dom.js'
+import { BRIDGED_ATTR, bridgedIds, coalescer, paint, rowSessionId, STYLE, watch } from './dom.js'
 import { apply } from './index.js'
 import { BADGE_CLASS, COPY_CLASS, GUARD_ID, guardFor } from './dom.guard.js'
 import { en, zh } from './locale.js'
@@ -227,6 +227,14 @@ class FakeEl {
     this.append(...els)
   }
 
+  remove(): void {
+    if (this.parentEl !== null) {
+      const index = this.parentEl.children.indexOf(this)
+      if (index >= 0) this.parentEl.children.splice(index, 1)
+      this.parentEl = null
+    }
+  }
+
   contains(other: FakeEl): boolean {
     let cur: FakeEl | null = other
     while (cur !== null) {
@@ -384,7 +392,7 @@ test('a bridged composer is covered by one guard under the card, and Unlock recl
   })
 })
 
-test('a card that is the editor parent never hosts the guard inside the inert subtree', () => {
+test('a card that is the editor parent still covers it, with the guard outside the inert subtree', () => {
   withFakeDom(() => {
     const doc = new FakeDoc()
     const composer = new FakeEl('div')
@@ -396,10 +404,121 @@ test('a card that is the editor parent never hosts the guard inside the inert su
     row.setAttribute('data-row-key', 'session:session-a')
     row.setAttribute('aria-selected', 'true')
     doc.root.append(card, row)
-    paint(doc as unknown as Document, new Set(['session-a']), t, () => new Promise(() => {}))
-    assert.equal(doc.getElementById(GUARD_ID), null, 'no guard mounts inside the inert host')
-    assert.ok(!composer.hasAttribute('inert'), 'the editor is not frozen by a guard that cannot reclaim')
-    assert.equal(card.querySelectorAll('button').length, 0, 'no dead reclaim button')
+    const reclaimed: string[] = []
+    const take = (session: string): Promise<boolean> => {
+      reclaimed.push(session)
+      return new Promise(() => {})
+    }
+    paint(doc as unknown as Document, new Set(['session-a']), t, take)
+    const guard = doc.getElementById(GUARD_ID)
+    assert.ok(guard !== null, 'the composer is always covered when bridged')
+    assert.equal(guard.parentEl, doc.root, 'the guard mounts on the nearest strict ancestor, not the inert card')
+    assert.ok(!card.contains(guard), 'the guard stays outside the inert subtree')
+    assert.ok(card.hasAttribute('inert'), 'the editor subtree is inert')
+    assert.equal(guard.querySelector('span.' + COPY_CLASS)?.textContent, en.caption)
+    assert.equal(guard.querySelector('span.' + BADGE_CLASS)?.textContent, en.badge)
+    assert.equal(guard.querySelectorAll('button').length, 1, 'exactly one reclaim control')
+    guard.querySelector('button')?.dispatch('click')
+    assert.deepEqual(reclaimed, ['session-a'], 'Unlock stays clickable outside the inert subtree')
+  })
+})
+
+/** Run a test body with the fake DOM globals installed, awaiting it first. */
+async function withFakeDomAsync(run: () => Promise<void>): Promise<void> {
+  const g = globalThis as Record<string, unknown>
+  const prev = { document: g.document, MutationObserver: g.MutationObserver, getComputedStyle: g.getComputedStyle, fetch: g.fetch }
+  g.MutationObserver = class {
+    observe(): void {}
+    disconnect(): void {}
+  }
+  g.getComputedStyle = (): { borderRadius: string } => ({ borderRadius: '16px' })
+  try {
+    await run()
+  } finally {
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete g[key]
+      else g[key] = value
+    }
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+test('a successful Unlock drops the session from the cache so a later repaint stays uncovered', async () => {
+  await withFakeDomAsync(async () => {
+    const g = globalThis as Record<string, unknown>
+    const observers: Array<(records: Array<{ target: unknown }>) => void> = []
+    g.MutationObserver = class {
+      constructor(cb: (records: Array<{ target: unknown }>) => void) {
+        observers.push(cb)
+      }
+      observe(): void {}
+      disconnect(): void {}
+    }
+    g.fetch = async (url: string | URL): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> => {
+      if (String(url).includes('reclaim')) return { ok: true, status: 200, json: async () => ({}) }
+      return { ok: true, status: 200, json: async () => ({ proto: 1, sessions: { 'session-a': { bridged: true, terminal: 'dsh-sup', pid: 81773, since: 2, asks: [] } } }) }
+    }
+    const scene = bridgedScene()
+    const doc = scene.doc
+    g.document = doc
+    const stop = watch(doc as unknown as Document, t)
+    try {
+      await sleep(20)
+      const guard = doc.getElementById(GUARD_ID)
+      assert.ok(guard !== null, 'the guard mounts from the poll')
+      guard.querySelector('button')?.dispatch('click')
+      await sleep(20)
+      assert.equal(doc.getElementById(GUARD_ID), null, 'a confirmed reclaim removes the guard')
+      observers[0]?.([{ target: scene.rowA }])
+      await sleep(20)
+      assert.equal(doc.getElementById(GUARD_ID), null, 'the stale cache does not re-cover the composer')
+    } finally {
+      stop()
+    }
+  })
+})
+
+test('the churn observer ignores guard-internal mutations and schedules outside ones', async () => {
+  await withFakeDomAsync(async () => {
+    const g = globalThis as Record<string, unknown>
+    const observers: Array<(records: Array<{ target: unknown }>) => void> = []
+    g.MutationObserver = class {
+      constructor(cb: (records: Array<{ target: unknown }>) => void) {
+        observers.push(cb)
+      }
+      observe(): void {}
+      disconnect(): void {}
+    }
+    g.fetch = async (): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> =>
+      ({ ok: true, status: 200, json: async () => ({ proto: 1, sessions: { 'session-a': { bridged: true, terminal: 'dsh-sup', pid: 81773, since: 2, asks: [] } } }) })
+    const scene = bridgedScene()
+    const doc = scene.doc
+    g.document = doc
+    let draws = 0
+    const draw = (...args: Parameters<typeof paint>): void => {
+      draws += 1
+      paint(...args)
+    }
+    const stop = watch(doc as unknown as Document, t, draw)
+    try {
+      await sleep(20)
+      const guard = doc.getElementById(GUARD_ID)
+      assert.ok(guard !== null && draws >= 1)
+      const rowA = scene.rowA
+      const churnCallback = observers[1]
+      assert.ok(typeof churnCallback === 'function', 'the second observer watches churn')
+      const before = draws
+      churnCallback([{ target: guard }])
+      churnCallback([{ target: guard.querySelector('span.' + COPY_CLASS) }])
+      await sleep(150)
+      assert.equal(draws, before, 'guard-internal mutations repaint nothing')
+      churnCallback([{ target: rowA }])
+      await sleep(150)
+      assert.equal(draws, before + 1, 'an outside mutation schedules exactly one repaint')
+    } finally {
+      stop()
+    }
   })
 })
 
