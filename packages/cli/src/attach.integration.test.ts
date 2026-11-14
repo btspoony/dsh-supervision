@@ -33,6 +33,19 @@ async function waitFor(what: string, check: () => boolean, timeoutMs: number = P
   }
 }
 
+/** Bounds a promise, so a child that never exits fails instead of hanging the runner. */
+async function within<T>(what: string, promise: Promise<T>, timeoutMs: number = PATIENCE_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { reject(new Error(`timed out waiting for ${what}`)); }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** A backend that speaks the plugin's half of the protocol and records what it hears. */
 interface FakeBackend {
   readonly received: InFrame[];
@@ -64,6 +77,12 @@ function startBackend(socketPath: string): Promise<FakeBackend> {
         // is the replay the viewport must show.
         if (frame.t === 'hello') {
           send(socket, { t: 'welcome', proto: PROTO, session: SESSION, title: 'fake session', state: 'idle', turn: 0 });
+          // The catalog feeds the slash menu; the test types '/' and expects a row.
+          send(socket, {
+            t: 'catalog',
+            skills: [{ name: 'demo-skill', description: 'a demo skill from the catalog' }],
+            commands: [{ name: 'status', description: 'show session state' }],
+          });
           send(socket, { t: 'mirror', item: { k: 'user', text: 'replayed line' } });
         }
       }
@@ -126,9 +145,27 @@ test('an attach through a pty submits a typed line and restores the screen', asy
   // Two files gate the keystrokes: one says the surface is up, the other that
   // the backend saw the line. Neither side has to guess a delay.
   const ready = join(home, 'ready');
+  const menu = join(home, 'menu');
   const go = join(home, 'go');
   const keys = [
     `while [ ! -f ${shellQuote(ready)} ]; do sleep 0.05; done`,
+    // '/' opens the catalog menu; Esc must close it without cancelling the turn.
+    `printf '/'`,
+    `while [ ! -f ${shellQuote(menu)} ]; do sleep 0.05; done`,
+    `printf '\\033'`,
+    // Esc closes the menu but keeps the typed '/', so clear that line first.
+    // A pause lets the terminal parser settle the lone ESC before the next byte,
+    // otherwise ESC+Ctrl+U would read as one Alt sequence.
+    `sleep 0.4`,
+    `printf '\\025'`,
+    `sleep 0.2`,
+    // '/skill:' filters the menu to skills; Enter accepts, Enter submits.
+    `printf '/skill:'`,
+    `sleep 0.6`,
+    `printf '\\r'`,
+    `sleep 0.3`,
+    `printf '\\r'`,
+    `sleep 0.3`,
     `printf '%s\\r' ${shellQuote(TYPED)}`,
     `while [ ! -f ${shellQuote(go)} ]; do sleep 0.05; done`,
     `printf '\\004'`,
@@ -137,6 +174,9 @@ test('an attach through a pty submits a typed line and restores the screen', asy
   const child: ChildProcessByStdio<null, Readable, Readable> = spawn('/bin/sh', ['-c', pipeline], {
     env: { ...process.env, DSH_HOME: home, TERM: 'xterm-256color' },
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Its own process group, so a failed assertion can kill the pty's children
+    // too instead of leaving an orphan that keeps the test runner alive.
+    detached: true,
   });
   let out = '';
   let err = '';
@@ -153,16 +193,30 @@ test('an attach through a pty submits a typed line and restores the screen', asy
       );
     }
     writeFileSync(ready, '');
+    await waitFor('the catalog menu to list the skill', () => out.includes('demo-skill'));
+    writeFileSync(menu, '');
+    // The accepted completion is the filtered skill, submitted as one line.
+    await waitFor('the accepted /skill: completion at the backend', () =>
+      backend.received.some((frame) => frame.t === 'line' && frame.text === '/skill:demo-skill'));
     await waitFor(`the backend to receive line ${JSON.stringify(TYPED)}`, () =>
       backend.received.some((frame) => frame.t === 'line' && frame.text === TYPED));
     assert.deepEqual(
       backend.received.filter((frame) => frame.t === 'line'),
-      [{ t: 'line', text: TYPED }],
-      `the pty line reached the socket exactly once; stderr: ${err}`,
+      [
+        { t: 'line', text: '/skill:demo-skill' },
+        { t: 'line', text: TYPED },
+      ],
+      `the menu completion and the typed line reached the socket in order; stderr: ${err}`,
+    );
+    // Esc closed the menu instead of cancelling the turn.
+    assert.deepEqual(
+      backend.received.filter((frame) => frame.t === 'line' && frame.text === '/cancel'),
+      [],
+      'Esc with the menu open must not send /cancel',
     );
 
     writeFileSync(go, '');
-    const code = await exited;
+    const code = await within('the attach to exit after Ctrl+D', exited);
 
     const enter = out.split('\x1b[?1049h').length - 1;
     const leave = out.split('\x1b[?1049l').length - 1;
@@ -186,7 +240,13 @@ test('an attach through a pty submits a typed line and restores the screen', asy
       `the cursor is shown after leaving the alternate screen; stderr: ${err}`,
     );
   } finally {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // The group is already gone.
+      }
+    }
     await backend.close();
     rmSync(home, { recursive: true, force: true });
   }

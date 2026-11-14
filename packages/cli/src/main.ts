@@ -6,7 +6,7 @@ import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { routeFrame } from './route.js';
 import { skillText, version } from './skill.js';
-import { chooseSurface, echoStatus, oscStatus, startTui, type Surface } from './tui.js';
+import { catalogOf, chooseSurface, echoStatus, oscStatus, routeLine, startTui, type Surface } from './tui.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
@@ -132,10 +132,24 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
      */
     let sending = 0;
 
+    /**
+     * Leaves the forwarder locally: the backend hears `bye` (so it can drop the
+     * bridge), the surface restores the screen, and the process exits 0.
+     */
+    const localExit = (): void => {
+      connection.send({ t: 'bye' });
+      settle(EXIT.ok);
+    };
+
     /** Sends one line; a frame this process refused ends the bridge without blaming the backend. */
     const sendLine = (text: string): void => {
-      sending = Buffer.byteLength(text, 'utf8');
-      connection.send({ t: 'line', text });
+      routeLine(text, {
+        send: (line: string): void => {
+          sending = Buffer.byteLength(line, 'utf8');
+          connection.send({ t: 'line', text: line });
+        },
+        exit: localExit,
+      });
     };
 
     const connection: Connection = connect(socket, hello, {
@@ -146,6 +160,13 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
           closeSurface();
           process.stderr.write(`${frame.code}: ${frame.message}\n`);
           settle(exitCodeFor(frame.code));
+          return;
+        }
+        // The catalog is surface input only: it feeds the slash menu and must
+        // never reach stdout or /dev/tty, in either mode.
+        const catalog = catalogOf(frame);
+        if (catalog !== undefined) {
+          surface?.setCatalog(catalog);
           return;
         }
         const routed = routeFrame(frame, process.stdout.isTTY === true);
@@ -173,7 +194,15 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
         if (frame.t === 'welcome') {
           title = frame.title;
           if (useTui) {
-            surface = startTui({ title, sendLine, width: process.stdout.columns, onExit: () => { settle(EXIT.ok); } });
+            surface = startTui({
+              title,
+              sendLine,
+              width: process.stdout.columns,
+              // A new session's hello carries its directory; an attach has no
+              // cwd on the wire, so @file falls back to this process's directory.
+              basePath: 'new' in hello ? hello.new.cwd : process.cwd(),
+              onExit: localExit,
+            });
             surface.setStatus({ session: frame.session, state: frame.state, turn: frame.turn });
           } else {
             pump(sendLine);

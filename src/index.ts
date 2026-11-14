@@ -10,10 +10,21 @@
 
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
-import { MAX_FRAME, PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
-import type { ErrorCode, HelloFrame, MirrorItem, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
+import { MAX_FRAME, PROTO, clearProgramStatus, encodeFrame, programStatus } from 'dsh-supervision-protocol'
+import type {
+  ErrorCode,
+  HelloFrame,
+  MirrorItem,
+  OutFrame,
+  ProgramKind,
+  ProgramState,
+  ProgramStatus,
+  SessionItem,
+} from 'dsh-supervision-protocol'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
+import { catalogOf } from './catalog.js'
+import type { Catalog } from './catalog.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
 import { HISTORY_ITEMS, historyItems, mirrorFrame, mirrorOf } from './mirror.js'
@@ -250,6 +261,8 @@ interface BridgeState {
   readonly calls: Map<string, CallRecord>
   /** Set only while an attach is replaying its session's persisted log. */
   replay?: ReplayWindow
+  /** This bind's catalog frame, in flight; `hello` awaits it before replay. */
+  catalog?: Promise<void>
 }
 
 /**
@@ -349,6 +362,51 @@ function presetsOf(value: unknown): AgentPresetsLike | undefined {
   const { resolve, mount } = value as { resolve?: unknown; mount?: unknown }
   if (typeof resolve !== 'function' || typeof mount !== 'function') return undefined
   return value as AgentPresetsLike
+}
+
+/** One `ctx.skills.list` row: the menu fields only, never the body. */
+interface SkillSummaryLike {
+  readonly name: string
+  readonly description: string
+}
+
+/** One skill as `ctx.skills.get` returns it: the body `/skill:` injects. */
+interface SkillDefinitionLike {
+  readonly name: string
+  readonly description: string
+  readonly content: string
+}
+
+/** The `ctx.skills` read surface: the menu rows and one skill's body. */
+interface SkillsLike {
+  list(options?: unknown): Promise<readonly SkillSummaryLike[]>
+  get(name: string, options?: unknown): Promise<SkillDefinitionLike | undefined>
+}
+
+/** One `ctx.commands.list` row: a name, its summary and an optional input hint. */
+interface CommandSummaryLike {
+  readonly name: string
+  readonly description: string
+  readonly input?: unknown
+}
+
+/** The `ctx.commands` read surface: the host commands an agent advertises. */
+interface CommandsLike {
+  list(agent: AgentLike): readonly CommandSummaryLike[]
+}
+
+/** @returns the host's skill catalog, when a usable one is mounted. */
+function skillsOf(value: unknown): SkillsLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { list, get } = value as { list?: unknown; get?: unknown }
+  return typeof list === 'function' && typeof get === 'function' ? value as SkillsLike : undefined
+}
+
+/** @returns the host's command catalog, when a usable one is mounted. */
+function commandsOf(value: unknown): CommandsLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const list = (value as { list?: unknown }).list
+  return typeof list === 'function' ? value as CommandsLike : undefined
 }
 
 /** @returns the host's workspace registry, when a usable one is mounted. */
@@ -452,6 +510,30 @@ function sessionLogOf(value: unknown): SessionLogLike | undefined {
 
 /** A session's persisted log, or the reason the attach goes without one. */
 type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure: string }
+
+/**
+ * Build one bridge's catalog payload, bounded. A service that never answers
+ * degrades to empty sections: the menu is worth a short wait, never a bogged
+ * attach.
+ * @param ctx - the plugin context; both services are optional.
+ * @param agent - the session whose view the catalogs answer for.
+ * @returns the capped menu, or empty sections when a service hangs.
+ */
+async function catalogWithin(ctx: PluginContext, agent: AgentLike): Promise<Catalog> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<Catalog>(resolve => {
+    timer = setTimeout(() => { resolve({ skills: [], commands: [] }) }, CATALOG_TIMEOUT_MS)
+    if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+  })
+  try {
+    return await Promise.race([
+      catalogOf({ skills: skillsOf(ctx.get?.('skills')), commands: commandsOf(ctx.get?.('commands')), agent }),
+      deadline,
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
 
 /**
  * Read one session's log for replay. Never throws: an old host or a locked log
@@ -646,6 +728,11 @@ const BOOT_POLL_MS = 500
  * attach; a replay is not worth a broken session.
  */
 const HISTORY_READ_TIMEOUT_MS = 4_000
+/**
+ * How long the catalog may hold the wire behind the root word. A menu is a
+ * convenience: half a conversation replayed late is not worth a hanging attach.
+ */
+const CATALOG_TIMEOUT_MS = 2_000
 
 /**
  * Mount the plugin in two layers.
@@ -1059,6 +1146,28 @@ function handlersFor(
   }
 
   /**
+   * Send one bridge's catalog frame: once per bind and once per switch, behind
+   * the root word. Bounded by `catalogWithin`, so a slow service costs the
+   * attach a short wait and nothing else.
+   * @param state - the bridge that just took the session.
+   */
+  const sendCatalog = async (state: BridgeState): Promise<void> => {
+    const catalog = await catalogWithin(ctx, state.agent)
+    // A switch during the fetch owns the bridge now; this menu is not its own.
+    if (bridged.get(state.agent.session.id) !== state) return
+    // The codec refuses an oversized frame by closing the bridge, so the one
+    // frame that must never fail is proven here; a menu that still cannot fit
+    // is replaced by the empty one rather than costing the operator the attach.
+    let frame: OutFrame = { t: 'catalog', skills: catalog.skills, commands: catalog.commands }
+    try {
+      encodeFrame(frame)
+    } catch {
+      frame = { t: 'catalog', skills: [], commands: [] }
+    }
+    state.bridge.send(frame)
+  }
+
+  /**
    * Arm the replay window on a freshly established bridge. From here until
    * `finishReplay`, a live event for this session is buffered instead of sent.
    * @param state - the bridge that just claimed the session.
@@ -1227,6 +1336,9 @@ function handlersFor(
     }
     // A child report alone sets `reported`, so children follow the root word.
     seedChildren(state)
+    // The menu follows every root word, bind and switch alike. `hello` awaits
+    // this promise so the replay can never overtake the catalog.
+    state.catalog = sendCatalog(state)
     return true
   }
 
@@ -1286,15 +1398,17 @@ function handlersFor(
         bridge.close()
         return
       }
-      // The attach arm replays the persisted log; a fresh session has none. The
-      // window opens only after `establish` owns the session and its
-      // subscriptions, and before the read awaits, so a live event that lands
-      // during the read waits behind the replay instead of being lost.
-      if (!('attach' in frame)) return
       const session = agent.session.id
       const state = bridged.get(session)
       if (state === undefined) return
-      const window = armReplay(state)
+      // The attach arm replays the persisted log; a fresh session has none. The
+      // window opens before anything awaits, so a live event that lands during
+      // the catalog fetch or the log read waits behind the replay instead of
+      // being lost — and the catalog itself is awaited so the menu precedes the
+      // transcript it describes.
+      const window = 'attach' in frame ? armReplay(state) : undefined
+      await state.catalog
+      if (window === undefined) return
       finishReplay(session, window, await readLog(ctx, session))
     },
 
@@ -1351,6 +1465,38 @@ function handlersFor(
             (error: unknown) => { bridge.send({ t: 'echo', text: `attach failed: ${reasonOf(error)}` }) },
           )
           return
+        case 'skill': {
+          const skills = skillsOf(ctx.get?.('skills'))
+          if (skills === undefined) {
+            bridge.send({ t: 'echo', text: 'skill service unavailable' })
+            return
+          }
+          const session = state.agent.session.id
+          // The line handler returns at once, so the read may outlive this bind:
+          // a /new or /attach switch meanwhile must win over the stale steer.
+          void (async (): Promise<void> => {
+            try {
+              const skill = await skills.get(command.name)
+              if (bridged.get(session) !== state) return
+              if (skill === undefined) {
+                bridge.send({ t: 'echo', text: `skill not found: ${command.name}` })
+                return
+              }
+              if (skill.content.trim() === '') {
+                bridge.send({ t: 'echo', text: `skill ${command.name} has no content` })
+                return
+              }
+              // The body is the point: the operator named the skill, so the model
+              // receives it as their own message rather than a command to parse.
+              state.agent.steer(userMessage(
+                `# Skill: ${skill.name}\n\n${skill.description}\n\n${skill.content}`,
+              ))
+            } catch (error) {
+              bridge.send({ t: 'echo', text: `skill failed: ${reasonOf(error)}` })
+            }
+          })()
+          return
+        }
         case 'approve':
         case 'reject': {
           const outcome: ApprovalOutcome = command.kind === 'approve' ? 'allowed-once' : 'rejected'

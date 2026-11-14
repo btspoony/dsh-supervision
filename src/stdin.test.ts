@@ -49,6 +49,18 @@ test('a malformed or unknown verb is unknown, named by its first word', () => {
   assert.deepEqual(parseLine('/'), { kind: 'unknown', verb: '' })
 })
 
+
+test('/skill and /skill: name one skill, and anything else is malformed', () => {
+  assert.deepEqual(parseLine('/skill:use-dsh-sup'), { kind: 'skill', name: 'use-dsh-sup' })
+  assert.deepEqual(parseLine('/skill use-dsh-sup'), { kind: 'skill', name: 'use-dsh-sup' })
+  assert.deepEqual(parseLine('/skill:a1'), { kind: 'skill', name: 'a1' })
+  assert.deepEqual(parseLine('/skill:'), { kind: 'unknown', verb: 'skill' })
+  assert.deepEqual(parseLine('/skill'), { kind: 'unknown', verb: 'skill' })
+  assert.deepEqual(parseLine('/skill two words'), { kind: 'unknown', verb: 'skill' })
+  assert.deepEqual(parseLine('/skill:Two'), { kind: 'unknown', verb: 'skill' })
+  assert.deepEqual(parseLine('/skill:-lead'), { kind: 'unknown', verb: 'skill' })
+  assert.deepEqual(parseLine('/skill:one two'), { kind: 'unknown', verb: 'skill' })
+})
 test('a bracketed-paste wrapper is stripped', () => {
   assert.deepEqual(parseLine('\u001b[200~/status\u001b[201~'), { kind: 'status' })
   assert.deepEqual(parseLine('\u001b[200~hello\u001b[201~'), { kind: 'steer', text: 'hello' })

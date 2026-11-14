@@ -7,6 +7,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  MAX_CATALOG_ARGUMENT_HINT,
+  MAX_CATALOG_COMMANDS,
+  MAX_CATALOG_DESCRIPTION,
+  MAX_CATALOG_NAME,
+  MAX_CATALOG_SKILLS,
   MAX_FRAME,
   MAX_ITEM_ARGS,
   MAX_ITEM_CALL_ID,
@@ -87,7 +92,7 @@ test('a rejected frame excerpt still stops at 60 characters plus the ellipsis', 
 test('a welcome must name a known state and a whole turn count', () => {
   const good = { t: 'welcome', proto: PROTO, session: 'session-1', title: 'repo', state: 'working', turn: 3 };
   assert.deepEqual(frames(decodeChunk('', `${JSON.stringify(good)}\n`)), [good]);
-  assert.equal(PROTO, 2, 'the mirror frame is a breaking cut');
+  assert.equal(PROTO, 3, 'the catalog frame is a breaking cut');
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, proto: 1 })}\n`).ok, false, 'proto 1 is stale');
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, state: 'busy' })}\n`).ok, false);
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, turn: 1.5 })}\n`).ok, false);
@@ -118,6 +123,74 @@ test('sessions frames validate every item or reject the frame', () => {
   assert.equal(decodeChunk('', '{"t":"sessions","items":{}}\n').ok, false);
 });
 
+
+test('a catalog frame carries both sections and trims instead of rejecting', () => {
+  const skills = Array.from({ length: MAX_CATALOG_SKILLS + 5 }, (_, index) => ({
+    name: `s${String(index)}`,
+    description: 'd'.repeat(MAX_CATALOG_DESCRIPTION + 20),
+  }));
+  const commands = Array.from({ length: MAX_CATALOG_COMMANDS + 5 }, (_, index) => ({
+    name: `c${String(index)}`,
+    description: 'short',
+    argumentHint: 'h'.repeat(MAX_CATALOG_ARGUMENT_HINT + 10),
+  }));
+  const frame = { t: 'catalog', skills, commands };
+  const [decoded] = frames(decodeChunk('', `${JSON.stringify(frame)}\n`));
+  assert.ok(decoded !== undefined && decoded.t === 'catalog');
+  assert.equal(decoded.skills.length, MAX_CATALOG_SKILLS);
+  assert.equal(decoded.skills[0]?.name, 's0');
+  assert.equal(decoded.skills[0]?.description.length, MAX_CATALOG_DESCRIPTION);
+  assert.equal(decoded.commands.length, MAX_CATALOG_COMMANDS);
+  assert.equal(decoded.commands[0]?.argumentHint?.length, MAX_CATALOG_ARGUMENT_HINT);
+  assert.equal(decodeChunk('', `${JSON.stringify({ t: 'catalog', skills: [], commands: [] })}\n`).ok, true);
+});
+
+test('an unusable name drops its row while descriptions are trimmed', () => {
+  const frame = {
+    t: 'catalog',
+    skills: [
+      { name: 'kept', description: 'd'.repeat(MAX_CATALOG_DESCRIPTION + 3) },
+      { name: 'n'.repeat(MAX_CATALOG_NAME + 1), description: 'over-long key' },
+    ],
+    commands: [{ name: 'compact', description: 'shrink the context' }],
+  };
+  const [decoded] = frames(decodeChunk('', `${JSON.stringify(frame)}\n`));
+  assert.ok(decoded !== undefined && decoded.t === 'catalog');
+  assert.equal(decoded.skills.length, 1, 'the over-cap key is dropped, not rewritten');
+  assert.equal(decoded.skills[0]?.name, 'kept');
+  assert.equal(decoded.skills[0]?.description.length, MAX_CATALOG_DESCRIPTION);
+  assert.deepEqual(decoded.commands[0], { name: 'compact', description: 'shrink the context' });
+});
+
+test('catalog text cannot carry control bytes into a terminal menu', () => {
+  const frame = {
+    t: 'catalog',
+    skills: [
+      { name: 'ok', description: 'x\u001b]52;c;SGVsbG8=\u0007' },
+      { name: 'evil\u001b]7501;state=done\u001b\\', description: 'dropped with its key' },
+      { name: 'line\nbreak', description: 'dropped too' },
+    ],
+    commands: [{ name: 'compact', description: '\u001b[2Jclear', argumentHint: 'h\u001b[31m' }],
+  };
+  const [decoded] = frames(decodeChunk('', `${JSON.stringify(frame)}\n`));
+  assert.ok(decoded !== undefined && decoded.t === 'catalog');
+  assert.deepEqual(decoded.skills, [{ name: 'ok', description: 'x ]52;c;SGVsbG8= ' }]);
+  assert.deepEqual(decoded.commands, [
+    { name: 'compact', description: ' [2Jclear', argumentHint: 'h [31m' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(decoded), /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+});
+
+test('a malformed catalog frame is rejected whole', () => {
+  const base = { t: 'catalog', skills: [], commands: [] };
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...base, skills: {} })}\n`).ok, false);
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...base, commands: 'nope' })}\n`).ok, false);
+  assert.equal(decodeChunk('', '{"t":"catalog","skills":[],"commands":[]}\n').ok, true);
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...base, skills: [{ name: 'x' }] })}\n`).ok, false);
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...base, skills: [{ name: 1, description: 'x' }] })}\n`).ok, false);
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...base, commands: [{ name: 'c', description: 'd', argumentHint: 2 }] })}\n`).ok, false);
+  assert.equal(decodeChunk('', `${JSON.stringify({ t: 'catalog', skills: [] })}\n`).ok, false);
+});
 test('the mirror caps are the ones the plugin must respect', () => {
   assert.deepEqual(
     [MAX_ITEM_TEXT, MAX_ITEM_REASONING, MAX_ITEM_ARGS, MAX_ITEM_DETAIL, MAX_ITEM_NAME, MAX_ITEM_CALL_ID],

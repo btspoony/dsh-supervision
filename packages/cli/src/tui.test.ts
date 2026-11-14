@@ -4,10 +4,31 @@
  */
 
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
+import { CombinedAutocompleteProvider, Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { renderMirror } from 'dsh-supervision-protocol';
+import { routeFrame } from './route.js';
 import { PLAIN, createTheme } from './theme.js';
+import {
+  CTRL_C_WINDOW_MS,
+  NO_CATALOG,
+  autocompleteCatalog,
+  catalogOf,
+  ctrlCAction,
+  escAction,
+  fdBinary,
+  isLocalExit,
+  lineAction,
+  providerFor,
+  routeLine,
+  surfaceKey,
+  type Catalog,
+  type KeyEffects,
+  type KeyMemory,
+} from './tui.js';
 import {
   FOLLOWING,
   Shell,
@@ -99,8 +120,10 @@ test('an echo status line updates state and turn; prose does not', () => {
   assert.equal(echoStatus('[turn 3] frobnicating'), undefined);
 });
 test('keys map to surface actions, arrows only with an empty editor', () => {
-  assert.deepEqual(keyAction('\x03', false), { kind: 'cancel' });
+  assert.deepEqual(keyAction('\x03', false), { kind: 'ctrl-c' });
   assert.deepEqual(keyAction('\x04', false), { kind: 'exit' });
+  assert.deepEqual(keyAction('\x1b', false), { kind: 'escape' });
+  assert.deepEqual(keyAction('\x1b', true), { kind: 'escape' });
   assert.deepEqual(keyAction('\x1b[5~', false), { kind: 'page', delta: -1 });
   assert.deepEqual(keyAction('\x1b[6~', false), { kind: 'page', delta: 1 });
   assert.deepEqual(keyAction('\x1b[A', true), { kind: 'line', delta: -1 });
@@ -131,7 +154,7 @@ test('a key release never acts: no second scroll, no second /cancel, no exit', (
   // The matching press sequences still do.
   assert.deepEqual(keyAction('\x1b[5;1~', true), { kind: 'page', delta: -1 });
   assert.deepEqual(keyAction('\x1b[6;1~', true), { kind: 'page', delta: 1 });
-  assert.deepEqual(keyAction('\x03', true), { kind: 'cancel' });
+  assert.deepEqual(keyAction('\x03', true), { kind: 'ctrl-c' });
   assert.deepEqual(keyAction('\x04', true), { kind: 'exit' });
   assert.deepEqual(keyAction('\x1b[5~', true), { kind: 'page', delta: -1 });
   assert.deepEqual(keyAction('\x1b[6~', true), { kind: 'page', delta: 1 });
@@ -604,4 +627,292 @@ test('block entries are separated; echo lines stay dense', () => {
   assert.ok(userAt >= 0 && replyAt > userAt && echoOneAt > replyAt && echoTwoAt === echoOneAt + 1);
   assert.equal(lines[replyAt - 1], '', 'a block entry is preceded by one blank row');
   assert.notEqual(lines[echoOneAt - 1], '', 'echo lines are not spread apart');
+});
+const SAMPLE: Catalog = {
+  skills: [
+    { name: 'use-dsh-sup', description: 'run the forwarder' },
+    { name: 'use-dsh-supervision', description: 'supervised session guide' },
+    { name: 'grill-me', description: 'stress-test a plan' },
+  ],
+  commands: [
+    { name: 'status', description: 'show session state' },
+    { name: 'approve', description: 'answer a parked ask', argumentHint: '<ask-id>' },
+  ],
+};
+
+test('the catalog becomes one skill entry per skill plus one per host command', () => {
+  const entries = autocompleteCatalog(SAMPLE);
+  assert.deepEqual(
+    entries.map((entry) => entry.name),
+    ['skill:use-dsh-sup', 'skill:use-dsh-supervision', 'skill:grill-me', 'status', 'approve'],
+  );
+  assert.equal(entries[0]?.description, 'run the forwarder');
+  assert.equal(entries[4]?.argumentHint, '<ask-id>', 'the host argument hint is passed through');
+  assert.equal(entries[3]?.argumentHint, undefined);
+  assert.deepEqual(autocompleteCatalog(NO_CATALOG), [], 'an empty catalog offers no menu');
+});
+
+test('the skill argument completions filter by prefix', async () => {
+  const entries = autocompleteCatalog(SAMPLE);
+  const skill = entries.find((entry) => entry.name === 'skill:use-dsh-sup');
+  const complete = skill?.getArgumentCompletions;
+  assert.ok(complete !== undefined, 'a skill entry carries argument completions');
+  const all = await complete('');
+  // The completion fills the argument, so it carries the bare skill name.
+  assert.deepEqual(all?.map((item) => item.value), ['use-dsh-sup', 'use-dsh-supervision', 'grill-me']);
+  const narrowed = await complete('use-dsh-sup');
+  assert.deepEqual(narrowed?.map((item) => item.label), ['use-dsh-sup', 'use-dsh-supervision']);
+  assert.deepEqual(await complete('nope'), []);
+});
+
+test('the provider lists skills for / and narrows to skills for /skill:', async () => {
+  const provider = new CombinedAutocompleteProvider(autocompleteCatalog(SAMPLE), process.cwd());
+  const signal = new AbortController().signal;
+  const root = await provider.getSuggestions(['/'], 0, 1, { signal });
+  assert.deepEqual(root?.items.map((item) => item.value).sort(), [
+    'approve',
+    'skill:grill-me',
+    'skill:use-dsh-sup',
+    'skill:use-dsh-supervision',
+    'status',
+  ]);
+  assert.equal(root?.prefix, '/');
+
+  const skillsOnly = await provider.getSuggestions(['/skill:'], 0, '/skill:'.length, { signal });
+  assert.deepEqual(skillsOnly?.items.map((item) => item.value), [
+    'skill:use-dsh-sup',
+    'skill:use-dsh-supervision',
+    'skill:grill-me',
+  ]);
+  // The bare skill name also finds its entry, without requiring the prefix.
+  const bare = await provider.getSuggestions(['/grill'], 0, '/grill'.length, { signal });
+  assert.deepEqual(bare?.items.map((item) => item.value), ['skill:grill-me']);
+});
+
+test('accepting a suggestion inserts the slash command and a space', async () => {
+  const provider = new CombinedAutocompleteProvider(autocompleteCatalog(SAMPLE), process.cwd());
+  const suggestion = await provider.getSuggestions(['/skill:'], 0, '/skill:'.length, {
+    signal: new AbortController().signal,
+  });
+  assert.ok(suggestion !== null && suggestion.items.length > 0, 'a skill suggestion exists');
+  const applied = provider.applyCompletion(['/skill:'], 0, '/skill:'.length, suggestion.items[0]!, suggestion.prefix);
+  assert.deepEqual(applied.lines, ['/skill:use-dsh-sup ']);
+  assert.deepEqual([applied.cursorLine, applied.cursorCol], [0, '/skill:use-dsh-sup '.length]);
+});
+
+test('the provider completes @files under the session base path', async (t) => {
+  if (fdBinary() === undefined) {
+    t.skip('fd is not installed, so pi-tui has no file-completion backend');
+    return;
+  }
+  const base = mkdtempSync(join(tmpdir(), 'dsup-cat-'));
+  writeFileSync(join(base, 'notes.md'), 'x');
+  try {
+    const provider = providerFor(NO_CATALOG, base);
+    const suggestion = await provider.getSuggestions(['@notes'], 0, '@notes'.length, {
+      signal: new AbortController().signal,
+    });
+    assert.ok(
+      suggestion?.items.some((item) => item.value.includes('notes.md')),
+      `expected notes.md under the base path, got ${JSON.stringify(suggestion?.items)}`,
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('catalogOf accepts only the catalog frame and passes its sections through', () => {
+  assert.deepEqual(catalogOf({ t: 'catalog', skills: SAMPLE.skills, commands: SAMPLE.commands }), SAMPLE);
+  assert.equal(catalogOf({ t: 'echo', text: 'x' }), undefined);
+  assert.equal(catalogOf({ t: 'welcome' }), undefined);
+  assert.deepEqual(catalogOf({ t: 'catalog', skills: [], commands: [] }), NO_CATALOG);
+});
+
+test('a catalog frame never reaches either sink', () => {
+  const frame = { t: 'catalog', skills: SAMPLE.skills, commands: SAMPLE.commands } as const;
+  assert.deepEqual(routeFrame(frame as never, true), {});
+  assert.deepEqual(routeFrame(frame as never, false), {});
+});
+test('only the exact lowercase exit commands are forwarder-local', () => {
+  for (const command of ['/q', '/quit', '/exit', '/bye']) {
+    assert.equal(isLocalExit(command), true, command);
+    assert.deepEqual(lineAction(command), { kind: 'exit' }, command);
+  }
+  for (const text of ['/q now', '/quiet', '/Q', '/EXIT', ' /q', '/bye all', '/quitter', 'hello']) {
+    assert.equal(isLocalExit(text), false, text);
+    assert.deepEqual(lineAction(text), { kind: 'send', text }, text);
+  }
+});
+
+test('Ctrl+C clears typed text, hints when empty, and exits on a second press', () => {
+  assert.equal(ctrlCAction({ editorEmpty: false, now: 1000, last: undefined }), 'clear');
+  assert.equal(ctrlCAction({ editorEmpty: false, now: 1000, last: 999 }), 'clear', 'text always wins over the window');
+  assert.equal(ctrlCAction({ editorEmpty: true, now: 1000, last: undefined }), 'hint');
+  assert.equal(ctrlCAction({ editorEmpty: true, now: 1000, last: 1000 }), 'exit');
+  assert.equal(ctrlCAction({ editorEmpty: true, now: 1000, last: 1000 - CTRL_C_WINDOW_MS }), 'exit');
+  assert.equal(ctrlCAction({ editorEmpty: true, now: 1000, last: 1000 - CTRL_C_WINDOW_MS - 1 }), 'hint');
+});
+
+test('the status bar shows the transient hint only while it is set', () => {
+  const bar = new StatusLine();
+  bar.set({ session: 'session-1', state: 'idle', turn: 2 });
+  assert.doesNotMatch(bar.render(80), /Ctrl\+C again/);
+  bar.setHint('Ctrl+C again to exit');
+  assert.match(bar.render(80), /Ctrl\+C again to exit/);
+  assert.equal(bar.hasHint(), true);
+  bar.setHint(undefined);
+  assert.equal(bar.hasHint(), false);
+  assert.doesNotMatch(bar.render(80), /Ctrl\+C again/);
+});
+test('catalog rows with control bytes never reach the menu', async () => {
+  const hostile: Catalog = {
+    skills: [
+      { name: 'safe-skill', description: 'a plain skill' },
+      { name: 'evil\u001b]0;pwned\u0007', description: 'has an OSC in the name' },
+      { name: 'evil\nsplit', description: 'newline in the name' },
+      { name: 'bad-desc', description: 'x\u001b]52;c;aGk=\u0007' },
+    ],
+    commands: [
+      { name: 'safe', description: 'plain command', argumentHint: '<arg>' },
+      { name: 'bad-hint', description: 'plain', argumentHint: '<\u001b[2J>' },
+    ],
+  };
+  const entries = autocompleteCatalog(hostile);
+  assert.deepEqual(entries.map((entry) => entry.name), ['skill:safe-skill', 'safe', 'bad-hint']);
+  // Only the control-free hint survives.
+  assert.equal(entries[2]?.argumentHint, undefined);
+  for (const entry of entries) {
+    assert.equal(entry.name.includes('\u001b'), false);
+    assert.equal((entry.description ?? '').includes('\u001b'), false);
+  }
+
+  const provider = providerFor(hostile, process.cwd());
+  const suggestions = await provider.getSuggestions(['/'], 0, 1, { signal: new AbortController().signal });
+  const rendered = JSON.stringify(suggestions);
+  assert.equal(rendered.includes('\\u001b'), false, 'no escape sequence survives into the menu');
+  assert.equal(rendered.includes('evil'), false, 'unsafe rows are dropped, not rewritten');
+  assert.ok(suggestions?.items.some((item) => item.value === 'skill:safe-skill'));
+});
+
+test('Esc passes through to an open menu and only cancels when it is closed', () => {
+  assert.equal(escAction({ menuOpen: true }), 'pass');
+  assert.equal(escAction({ menuOpen: false }), 'cancel');
+  assert.deepEqual(keyAction('\x1b', true), { kind: 'escape' });
+});
+
+test('the exit commands never reach the socket and exit exactly once', () => {
+  for (const command of ['/q', '/quit', '/exit', '/bye']) {
+    const sent: string[] = [];
+    let exits = 0;
+    routeLine(command, { send: (text) => sent.push(text), exit: () => { exits += 1; } });
+    assert.deepEqual(sent, [], `${command} was forwarded`);
+    assert.equal(exits, 1, `${command} did not exit`);
+  }
+  const sent: string[] = [];
+  let exits = 0;
+  routeLine('hello session', { send: (text) => sent.push(text), exit: () => { exits += 1; } });
+  assert.deepEqual(sent, ['hello session']);
+  assert.equal(exits, 0);
+});
+
+/** Records what the surface key handler did, for the conventions below. */
+function keyHarness(): { effects: KeyEffects; log: string[]; scrolled: string[] } {
+  const log: string[] = [];
+  const scrolled: string[] = [];
+  return {
+    log,
+    scrolled,
+    effects: {
+      sendLine: (text) => log.push(`send:${text}`),
+      exit: () => log.push('exit'),
+      clearEditor: () => log.push('clear'),
+      clearHint: () => log.push('hint:off'),
+      showHint: () => log.push('hint:on'),
+      scroll: (action) => {
+        scrolled.push(action.kind);
+        return true;
+      },
+    },
+  };
+}
+
+test('a second Ctrl+C inside the window exits exactly once', () => {
+  const harness = keyHarness();
+  let memory: KeyMemory = { lastCtrlC: undefined, exited: false };
+  const press = (now: number): void => {
+    const outcome = surfaceKey(
+      { kind: 'ctrl-c' },
+      memory,
+      { editorEmpty: true, menuOpen: false, now },
+      harness.effects,
+    );
+    assert.equal(outcome.consumed, true);
+    memory = outcome.memory;
+  };
+  press(1000);
+  assert.deepEqual(harness.log, ['hint:on'], 'the first press only hints');
+  press(1900);
+  assert.deepEqual(harness.log, ['hint:on', 'exit'], 'the second press exits');
+  press(2000);
+  press(2100);
+  assert.equal(harness.log.filter((entry) => entry === 'exit').length, 1, 'no double exit');
+});
+
+test('Esc cancels once with the menu closed and never with it open', () => {
+  const closed = keyHarness();
+  const cancelled = surfaceKey(
+    { kind: 'escape' },
+    { lastCtrlC: undefined, exited: false },
+    { editorEmpty: true, menuOpen: false, now: 0 },
+    closed.effects,
+  );
+  assert.equal(cancelled.consumed, true);
+  assert.deepEqual(closed.log, ['send:/cancel']);
+  assert.equal(
+    closed.log.filter((entry) => entry === 'send:/cancel').length,
+    1,
+    'exactly one /cancel',
+  );
+
+  const open = keyHarness();
+  const passed = surfaceKey(
+    { kind: 'escape' },
+    { lastCtrlC: undefined, exited: false },
+    { editorEmpty: true, menuOpen: true, now: 0 },
+    open.effects,
+  );
+  assert.equal(passed.consumed, false, 'the Editor gets the key');
+  assert.deepEqual(open.log, [], 'no turn interaction while the menu is open');
+});
+
+test('Esc disarms the Ctrl+C window: Ctrl+C, Esc, Ctrl+C neither keeps the first window nor exits', () => {
+  const harness = keyHarness();
+  let memory: KeyMemory = { lastCtrlC: undefined, exited: false };
+  const press = (action: Parameters<typeof surfaceKey>[0], now: number): void => {
+    memory = surfaceKey(
+      action,
+      memory,
+      { editorEmpty: true, menuOpen: false, now },
+      harness.effects,
+    ).memory;
+  };
+  press({ kind: 'ctrl-c' }, 1000);
+  assert.equal(memory.lastCtrlC, 1000, 'the first press arms the window');
+  press({ kind: 'escape' }, 1200);
+  assert.equal(memory.lastCtrlC, undefined, 'Esc disarms it');
+  press({ kind: 'ctrl-c' }, 1400);
+  assert.equal(harness.log.filter((entry) => entry === 'exit').length, 0, 'Esc cancelled the prompt, not the turn');
+  assert.equal(memory.lastCtrlC, 1400, 'the second Ctrl+C starts a new window');
+});
+
+test('Ctrl+C clears typed text instead of touching the turn', () => {
+  const harness = keyHarness();
+  const outcome = surfaceKey(
+    { kind: 'ctrl-c' },
+    { lastCtrlC: undefined, exited: false },
+    { editorEmpty: false, menuOpen: false, now: 500 },
+    harness.effects,
+  );
+  assert.deepEqual(harness.log, ['clear', 'hint:off']);
+  assert.equal(outcome.memory.lastCtrlC, undefined, 'clearing does not start the exit window');
 });

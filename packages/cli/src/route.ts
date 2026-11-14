@@ -35,6 +35,9 @@ export function routeFrame(frame: OutFrame, human: boolean): { tty?: string; out
       // so this table stays complete over `OutFrame`. A caller that routed it
       // instead would silently drop the exit code, so keep that arm first.
       return { tty: renderFrame(frame) };
+    case 'catalog':
+      // The surface claims this frame before routing; no sink ever writes it.
+      return {};
     case 'welcome':
     case 'sessions':
     case 'bye':

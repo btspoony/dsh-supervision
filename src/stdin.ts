@@ -11,6 +11,7 @@ export type Command =
   | { readonly kind: 'status' }
   | { readonly kind: 'new'; readonly cwd: string | undefined }
   | { readonly kind: 'attach'; readonly session: string }
+  | { readonly kind: 'skill'; readonly name: string }
   | { readonly kind: 'approve'; readonly ask: string }
   | { readonly kind: 'reject'; readonly ask: string }
   | { readonly kind: 'yes' }
@@ -25,6 +26,9 @@ export interface Split {
 
 /** A bracketed-paste wrapper around one whole line. */
 const PASTE = /^\u001b\[200~([\s\S]*)\u001b\[201~$/
+
+/** A skill name the host can address: kebab-case, no path or argument shapes. */
+const SKILL_NAME = /^[a-z0-9][a-z0-9-]*$/
 
 /**
  * Strip a bracketed-paste wrapper; hc sends raw text, but a terminal in front
@@ -50,6 +54,17 @@ export function parseLine(line: string): Command | undefined {
   if (!text.startsWith('/')) return { kind: 'steer', text }
 
   const [verb = '', ...args] = text.slice(1).trim().split(/\s+/)
+  // Both spellings name one skill: `/skill:<name>` and `/skill <name>`. Anything
+  // else that starts with the verb is that verb's malformed form, never a steer.
+  const skillName = verb === 'skill'
+    ? args[0]
+    : verb.startsWith('skill:') ? verb.slice('skill:'.length) : undefined
+  if (skillName !== undefined) {
+    const rest = verb === 'skill' ? args.slice(1) : args
+    return rest.length === 0 && SKILL_NAME.test(skillName)
+      ? { kind: 'skill', name: skillName }
+      : { kind: 'unknown', verb: 'skill' }
+  }
   switch (verb) {
     case 'cancel':
       return args.length === 0 ? { kind: 'cancel' } : { kind: 'unknown', verb }
