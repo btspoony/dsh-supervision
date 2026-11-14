@@ -367,9 +367,12 @@ function parseMirror(value: unknown): OutFrame | undefined {
 
 /**
  * The catalog frame: both sections must be arrays of well-formed rows. Caps are
- * applied by trimming — an over-long section or field is shortened, not a reason
- * to close the bridge — while a wrong type, a missing string field, or a bad
- * `argumentHint` is a malformed frame.
+ * applied by trimming — an over-long description or hint is shortened, not a
+ * reason to close the bridge — while a wrong type, a missing string field, or a
+ * bad `argumentHint` is a malformed frame. A row whose name cannot be used as a
+ * key (empty, over its cap, or carrying control bytes) is dropped instead of
+ * rewritten: a repaired key would advertise a skill that can never be invoked.
+ * Descriptions and hints are sanitized here, at the seam every consumer shares.
  */
 function parseCatalog(frame: Record<string, unknown>): OutFrame | undefined {
   const skills = parseCatalogSkills(frame['skills'])
@@ -386,7 +389,9 @@ function parseCatalogSkills(value: unknown): readonly CatalogSkill[] | undefined
     const name = entry['name']
     const description = entry['description']
     if (typeof name !== 'string' || typeof description !== 'string') return undefined
-    skills.push({ name: cap(name, MAX_CATALOG_NAME), description: cap(description, MAX_CATALOG_DESCRIPTION) })
+    const clean = catalogName(name)
+    if (clean === undefined) continue
+    skills.push({ name: clean, description: catalogText(description, MAX_CATALOG_DESCRIPTION) })
   }
   return skills
 }
@@ -401,18 +406,36 @@ function parseCatalogCommands(value: unknown): readonly CatalogCommand[] | undef
     const argumentHint = entry['argumentHint']
     if (typeof name !== 'string' || typeof description !== 'string') return undefined
     if (argumentHint !== undefined && typeof argumentHint !== 'string') return undefined
+    const clean = catalogName(name)
+    if (clean === undefined) continue
     commands.push({
-      name: cap(name, MAX_CATALOG_NAME),
-      description: cap(description, MAX_CATALOG_DESCRIPTION),
-      ...(argumentHint === undefined ? {} : { argumentHint: cap(argumentHint, MAX_CATALOG_ARGUMENT_HINT) }),
+      name: clean,
+      description: catalogText(description, MAX_CATALOG_DESCRIPTION),
+      ...(argumentHint === undefined ? {} : { argumentHint: catalogText(argumentHint, MAX_CATALOG_ARGUMENT_HINT) }),
     })
   }
   return commands
 }
 
-/** Trim one string field to its column cap; a field already inside it is kept. */
-function cap(text: string, limit: number): string {
-  return text.length > limit ? text.slice(0, limit) : text
+/**
+ * A menu name, or undefined when the row must be dropped: names are keys the
+ * menu hands back verbatim, so a control byte or an over-cap length cannot be
+ * repaired without advertising something uninvokable.
+ */
+function catalogName(value: string): string | undefined {
+  const clean = stripControls(value)
+  if (clean !== value || clean === '' || clean.length > MAX_CATALOG_NAME) return undefined
+  return clean
+}
+
+/**
+ * One capped, control-free menu text field. The menu is rendered by a terminal,
+ * so this is the seam that guarantees no row carries a sequence a terminal could
+ * execute, whatever the peer sent.
+ */
+function catalogText(text: string, limit: number): string {
+  const clean = stripControls(text)
+  return clean.length > limit ? clean.slice(0, limit) : clean
 }
 
 function parseSessions(items: unknown): OutFrame | undefined {

@@ -170,6 +170,10 @@ class FakeHost {
   skillsListError: string | undefined = undefined
   /** When set, `ctx.skills.list` holds its answer until this resolves. */
   catalogWait: Promise<void> | undefined = undefined
+  /** Every skill name `ctx.skills.get` was asked for, in call order. */
+  readonly skillGets: string[] = []
+  /** When set, `ctx.skills.get` holds its answer until this resolves. */
+  skillGetWait: Promise<void> | undefined = undefined
   /** Rows `ctx.commands.list` answers; `undefined` hides the command service. */
   catalogCommands: { name: string; description: string; input?: unknown }[] | undefined = undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
@@ -261,6 +265,8 @@ class FakeHost {
               return this.catalogSkills ?? []
             },
             get: async (skill: string) => {
+              this.skillGets.push(skill)
+              if (this.skillGetWait !== undefined) await this.skillGetWait
               const body = this.skillBodies.get(skill)
               return body === undefined
                 ? undefined
@@ -1636,6 +1642,31 @@ test('/skill: injects the named skill body as a user message', async () => {
   }
 })
 
+
+test('a switch during skills.get never steers into the previous session', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.skillBodies.set('body', { description: 'body skill', content: 'the body' })
+  let release: () => void = () => {}
+  host.skillGetWait = new Promise<void>(resolve => { release = resolve })
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/skill:body' })
+    await until(() => host.skillGets.length === 1, 'the held skill read')
+    // The bind moves to a cold session while the read is still open.
+    client.write({ t: 'line', text: '/attach session-2' })
+    await until(() => host.resumed.includes('session-2'), 'the switch to bind')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    release()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(host.steered.length, 0, 'the stale read never steers')
+  } finally {
+    host.dispose()
+  }
+})
 test('/skill echoes an unknown name and a skill with no body, and steers neither', async () => {
   const dir = tempDir()
   const host = new FakeHost()

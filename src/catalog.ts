@@ -12,6 +12,8 @@ import {
   MAX_CATALOG_DESCRIPTION,
   MAX_CATALOG_NAME,
   MAX_CATALOG_SKILLS,
+  MAX_FRAME,
+  stripControls,
 } from 'dsh-supervision-protocol'
 import type { CatalogCommand, CatalogSkill } from 'dsh-supervision-protocol'
 
@@ -36,10 +38,28 @@ export interface CatalogSources {
  * @returns the capped skills and commands, in the order the host listed them.
  */
 export async function catalogOf(sources: CatalogSources): Promise<Catalog> {
-  return {
-    skills: await skillsOf(sources.skills),
-    commands: await commandsOf(sources.commands, sources.agent),
-  }
+  return fitCatalog(
+    await skillsOf(sources.skills),
+    await commandsOf(sources.commands, sources.agent),
+  )
+}
+
+/**
+ * Shrink a capped catalog until its encoded frame fits the wire. Row and column
+ * caps do not compose to a frame — 200 skills with multibyte descriptions alone
+ * can exceed {@link MAX_FRAME} — and the transport answers an oversized frame by
+ * closing the attach. Commands go first (they are the host's convenience) and
+ * then skills from the tail, so each list keeps its own head.
+ */
+function fitCatalog(skills: CatalogSkill[], commands: CatalogCommand[]): Catalog {
+  while (commands.length > 0 && frameBytes(skills, commands) > MAX_FRAME) commands.pop()
+  while (skills.length > 0 && frameBytes(skills, commands) > MAX_FRAME) skills.pop()
+  return { skills, commands }
+}
+
+/** One catalog frame's encoded size, the trailing newline included. */
+function frameBytes(skills: readonly CatalogSkill[], commands: readonly CatalogCommand[]): number {
+  return Buffer.byteLength(JSON.stringify({ t: 'catalog', skills, commands }), 'utf8') + 1
 }
 
 async function skillsOf(value: unknown): Promise<CatalogSkill[]> {
@@ -56,7 +76,7 @@ async function skillsOf(value: unknown): Promise<CatalogSkill[]> {
   for (const row of rows) {
     if (skills.length >= MAX_CATALOG_SKILLS) break
     if (!isRecord(row)) continue
-    const name = text(row['name'], MAX_CATALOG_NAME)
+    const name = nameOf(row['name'])
     const description = text(row['description'], MAX_CATALOG_DESCRIPTION)
     if (name === undefined || description === undefined) continue
     skills.push({ name, description })
@@ -78,7 +98,7 @@ async function commandsOf(value: unknown, agent: unknown): Promise<CatalogComman
   for (const row of rows) {
     if (commands.length >= MAX_CATALOG_COMMANDS) break
     if (!isRecord(row)) continue
-    const name = text(row['name'], MAX_CATALOG_NAME)
+    const name = nameOf(row['name'])
     const description = text(row['description'], MAX_CATALOG_DESCRIPTION)
     if (name === undefined || description === undefined) continue
     const argumentHint = inputHint(row['input'])
@@ -98,6 +118,18 @@ function listOf(value: unknown): ((...args: unknown[]) => unknown) | undefined {
 function text(value: unknown, limit: number): string | undefined {
   if (typeof value !== 'string') return undefined
   return value.length > limit ? value.slice(0, limit) : value
+}
+
+/**
+ * A menu name, or undefined when the row must be dropped: the name is the key
+ * the menu hands back, so a control byte, an empty name or one over its cap is
+ * not repairable without advertising a skill nobody can invoke.
+ */
+function nameOf(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const clean = stripControls(value)
+  if (clean !== value || clean === '' || clean.length > MAX_CATALOG_NAME) return undefined
+  return clean
 }
 
 /** The free-form input hint a command advertises, already capped. */

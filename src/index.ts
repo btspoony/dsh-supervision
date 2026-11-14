@@ -10,8 +10,17 @@
 
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
-import { MAX_FRAME, PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
-import type { ErrorCode, HelloFrame, MirrorItem, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
+import { MAX_FRAME, PROTO, clearProgramStatus, encodeFrame, programStatus } from 'dsh-supervision-protocol'
+import type {
+  ErrorCode,
+  HelloFrame,
+  MirrorItem,
+  OutFrame,
+  ProgramKind,
+  ProgramState,
+  ProgramStatus,
+  SessionItem,
+} from 'dsh-supervision-protocol'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { catalogOf } from './catalog.js'
@@ -1146,7 +1155,16 @@ function handlersFor(
     const catalog = await catalogWithin(ctx, state.agent)
     // A switch during the fetch owns the bridge now; this menu is not its own.
     if (bridged.get(state.agent.session.id) !== state) return
-    state.bridge.send({ t: 'catalog', skills: catalog.skills, commands: catalog.commands })
+    // The codec refuses an oversized frame by closing the bridge, so the one
+    // frame that must never fail is proven here; a menu that still cannot fit
+    // is replaced by the empty one rather than costing the operator the attach.
+    let frame: OutFrame = { t: 'catalog', skills: catalog.skills, commands: catalog.commands }
+    try {
+      encodeFrame(frame)
+    } catch {
+      frame = { t: 'catalog', skills: [], commands: [] }
+    }
+    state.bridge.send(frame)
   }
 
   /**
@@ -1453,8 +1471,13 @@ function handlersFor(
             bridge.send({ t: 'echo', text: 'skill service unavailable' })
             return
           }
-          void skills.get(command.name).then(
-            skill => {
+          const session = state.agent.session.id
+          // The line handler returns at once, so the read may outlive this bind:
+          // a /new or /attach switch meanwhile must win over the stale steer.
+          void (async (): Promise<void> => {
+            try {
+              const skill = await skills.get(command.name)
+              if (bridged.get(session) !== state) return
               if (skill === undefined) {
                 bridge.send({ t: 'echo', text: `skill not found: ${command.name}` })
                 return
@@ -1468,9 +1491,10 @@ function handlersFor(
               state.agent.steer(userMessage(
                 `# Skill: ${skill.name}\n\n${skill.description}\n\n${skill.content}`,
               ))
-            },
-            (error: unknown) => { bridge.send({ t: 'echo', text: `skill failed: ${reasonOf(error)}` }) },
-          )
+            } catch (error) {
+              bridge.send({ t: 'echo', text: `skill failed: ${reasonOf(error)}` })
+            }
+          })()
           return
         }
         case 'approve':

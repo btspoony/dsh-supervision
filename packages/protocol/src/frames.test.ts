@@ -145,16 +145,40 @@ test('a catalog frame carries both sections and trims instead of rejecting', () 
   assert.equal(decodeChunk('', `${JSON.stringify({ t: 'catalog', skills: [], commands: [] })}\n`).ok, true);
 });
 
-test('a catalog name is trimmed to its cap and a command hint is optional', () => {
+test('an unusable name drops its row while descriptions are trimmed', () => {
   const frame = {
     t: 'catalog',
-    skills: [{ name: 'n'.repeat(MAX_CATALOG_NAME + 3), description: 'one line' }],
+    skills: [
+      { name: 'kept', description: 'd'.repeat(MAX_CATALOG_DESCRIPTION + 3) },
+      { name: 'n'.repeat(MAX_CATALOG_NAME + 1), description: 'over-long key' },
+    ],
     commands: [{ name: 'compact', description: 'shrink the context' }],
   };
   const [decoded] = frames(decodeChunk('', `${JSON.stringify(frame)}\n`));
   assert.ok(decoded !== undefined && decoded.t === 'catalog');
-  assert.equal(decoded.skills[0]?.name.length, MAX_CATALOG_NAME);
+  assert.equal(decoded.skills.length, 1, 'the over-cap key is dropped, not rewritten');
+  assert.equal(decoded.skills[0]?.name, 'kept');
+  assert.equal(decoded.skills[0]?.description.length, MAX_CATALOG_DESCRIPTION);
   assert.deepEqual(decoded.commands[0], { name: 'compact', description: 'shrink the context' });
+});
+
+test('catalog text cannot carry control bytes into a terminal menu', () => {
+  const frame = {
+    t: 'catalog',
+    skills: [
+      { name: 'ok', description: 'x\u001b]52;c;SGVsbG8=\u0007' },
+      { name: 'evil\u001b]7501;state=done\u001b\\', description: 'dropped with its key' },
+      { name: 'line\nbreak', description: 'dropped too' },
+    ],
+    commands: [{ name: 'compact', description: '\u001b[2Jclear', argumentHint: 'h\u001b[31m' }],
+  };
+  const [decoded] = frames(decodeChunk('', `${JSON.stringify(frame)}\n`));
+  assert.ok(decoded !== undefined && decoded.t === 'catalog');
+  assert.deepEqual(decoded.skills, [{ name: 'ok', description: 'x ]52;c;SGVsbG8= ' }]);
+  assert.deepEqual(decoded.commands, [
+    { name: 'compact', description: ' [2Jclear', argumentHint: 'h [31m' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(decoded), /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
 });
 
 test('a malformed catalog frame is rejected whole', () => {
