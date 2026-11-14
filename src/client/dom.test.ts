@@ -433,7 +433,7 @@ test('a card that is the editor parent still covers it, with the guard outside t
   })
 })
 
-test('without a composer card only the editor host is covered, never the page container', () => {
+test('without a composer card the placement controls are covered but page rows are not', () => {
   withFakeDom(() => {
     const doc = new FakeDoc()
     const composer = new FakeEl('div')
@@ -442,7 +442,9 @@ test('without a composer card only the editor host is covered, never the page co
     host.append(composer)
     const placement = new FakeEl('div')
     const toolbar = new FakeEl('div')
-    placement.append(host, toolbar)
+    const pageRow = new FakeEl('div')
+    pageRow.setAttribute('data-row-key', 'session:session-b')
+    placement.append(host, toolbar, pageRow)
     const row = new FakeEl('div')
     row.setAttribute('data-row-key', 'session:session-a')
     row.setAttribute('aria-selected', 'true')
@@ -453,13 +455,15 @@ test('without a composer card only the editor host is covered, never the page co
     assert.ok(guard !== null, 'the guard mounts on the placement')
     assert.equal(guard.parentEl, placement, 'the placement is the editor grandparent')
     assert.ok(host.hasAttribute('inert'), 'the editor host is covered')
-    // Deliberate limit: the placement may be a page container, so a card-less
-    // host keeps its toolbar operable rather than freezing every sibling.
-    assert.ok(!toolbar.hasAttribute('inert'), 'the toolbar is not swept without a card')
+    assert.ok(toolbar.hasAttribute('inert'), 'the toolbar beside the host is covered without a card')
+    assert.equal(toolbar.getAttribute('data-dsh-sup-composer'), '', 'the toolbar carries the cover marker')
+    assert.ok(!pageRow.hasAttribute('inert'), 'a page-level row under the placement stays operable')
     assert.ok(!sibling.hasAttribute('inert'), 'unrelated siblings around the placement stay operable')
     releaseGuard(doc as unknown as Document)
-    assert.ok(!host.hasAttribute('inert'), 'release clears the editor marker')
-    assert.ok(!toolbar.hasAttribute('inert'), 'release clears the toolbar marker')
+    assert.ok(!host.hasAttribute('inert'), 'release clears the editor inert')
+    assert.ok(!toolbar.hasAttribute('inert'), 'release clears the toolbar inert')
+    assert.ok(!host.hasAttribute('data-dsh-sup-composer'), 'release clears the editor marker')
+    assert.ok(!toolbar.hasAttribute('data-dsh-sup-composer'), 'release clears the toolbar marker')
   })
 })
 
