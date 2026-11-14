@@ -10,14 +10,14 @@
 import {
   Editor,
   ProcessTerminal,
-  TUI,
+  TuiMainScreen,
   matchesKey,
   truncateToWidth,
   wrapTextWithAnsi,
   type Component,
   type EditorTheme,
   type Terminal,
-} from '@mariozechner/pi-tui';
+} from '@earendil-works/pi-tui';
 import { isProgramState, renderMirror, type MirrorItem, type ProgramState } from 'dsh-supervision-protocol';
 
 /** Everything the status line knows; every field but `session` updates later. */
@@ -366,7 +366,7 @@ export interface StartTuiOptions {
  */
 export function startTui(options: StartTuiOptions): Surface {
   const terminal = new ProcessTerminal();
-  const tui = new TUI(terminal);
+  const tui = new TuiMainScreen(terminal);
   const transcript = new TranscriptView();
   const status = new StatusLine();
   const editor = new Editor(tui, THEME);

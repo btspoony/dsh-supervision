@@ -78,7 +78,9 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 | `↑` / `↓` | 编辑器为空时上下滚一行 |
 | `Home` / `End` | 跳到最早一行 / 回到最新 |
 
-向上滚动后，最后一行会显示 `↓ N new`，统计期间新到的条目；滚回底部就恢复跟随。`--no-tui` 在终端上也保留只追加的行模式表面；stdout 被重定向时永远走行模式，所以 `dsh-sup … | tee log` 写出的文件依然干净。
+向上滚动后，最后一行会显示 `↓ N new`，统计期间新到的条目；滚回底部就恢复跟随。界面的绘制使用 [`@earendil-works/pi-tui`](https://github.com/earendil-works/pi)。
+
+`--no-tui` 在终端上也保留只追加的行模式表面；stdout 被重定向时永远走行模式，所以 `dsh-sup … | tee log` 写出的文件依然干净。
 
 ### 应答审批
 

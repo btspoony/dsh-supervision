@@ -84,6 +84,8 @@ in the transcript, so scrolling back reaches the whole attach.
 
 Scrolled back, the last row shows `↓ N new` for the entries that arrived
 meanwhile, and scrolling to the bottom resumes following the live transcript.
+The surface is drawn with [`@earendil-works/pi-tui`](https://github.com/earendil-works/pi).
+
 `--no-tui` keeps the append-only line surface on a terminal; a redirected
 stdout always gets that line surface, so `dsh-sup … | tee log` stays
 machine-clean.
