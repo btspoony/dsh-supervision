@@ -1,7 +1,7 @@
 /**
  * The browser-side bridge decoration: a supervised session gets a heavy outline
- * and a whale-tail badge in the sidebar, and its composer is covered until the
- * operator takes control back.
+ * and a whale-tail capsule in the sidebar, and its input area is covered until
+ * the operator takes control back.
  *
  * The pure half (`rowSessionId`, `bridgedIds`) is here so the decisions stay
  * testable without a DOM; the imperative half only writes attributes and one
@@ -11,6 +11,7 @@
 import { isBridgePayload } from './banner.js'
 import type { SupervisionState } from './banner.js'
 import { GUARD_ID, syncGuard } from './dom.guard.js'
+import type { Translate } from './locale.js'
 
 /** A sidebar row carries its session in `data-row-key="session:<id>"`. */
 export const ROW_KEY = 'session:'
@@ -42,51 +43,162 @@ export function bridgedIds(state: SupervisionState | undefined): ReadonlySet<str
   return new Set(state === undefined ? [] : Object.keys(state.sessions))
 }
 
-/** The whale-tail badge: the same silhouette the thinking state draws. */
-const TAIL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8fb0ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19c1.8-1.2 3-3.3 3.4-6.1.1-.8.7-1.2 1.4-.8.6.4 1.1 1 1.6 1.8.9-2.9 2.6-4.8 4.9-5.9-.3 2.5.2 4.6 1.5 6.4 1.6 2.2 3.6 3 6.2 3-1.1 2.4-3 3.9-5.6 4.4-3.6.7-7-.2-10.2-2.6"/></svg>`
+/** The whale-tail silhouette the host thinking state draws (16x16 viewBox). */
+const TAIL_REST_PATH = 'M8.844 13.742C8.967 12.328 8.45 10.4 8.45 9.65C8.45 8.94 8.88 8.43 9.6 8.43C11.285 8.43 12.106 8.281 12.685 8.104C13.71 7.791 14.585 6.768 15.055 5.945C15.137 5.803 14.99 5.641 14.829 5.671C13.829 5.86 12.828 5.376 11.827 4.978C10.659 4.514 9.491 4.707 8.935 4.876C8.805 4.915 8.658 4.819 8.636 4.686C8.468 3.643 7.405 2.615 5.498 2.238C4.54 2.048 3.748 1.574 3.347 1.202C3.252 1.113 3.088 1.125 3.03 1.242C2.628 2.059 2.168 3.82 5.248 6.115C5.82 6.494 6.31 6.785 6.574 7.637C6.72 8.104 6.157 9.168 6.061 9.368C5.157 11.27 5.089 12.19 4.926 13.742'
+/** A stroked copy of the contour: the mask cutout and the still badge. */
+const tailSvg = (color: string): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="none" stroke="${color}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="${TAIL_REST_PATH}"/></svg>`
+// shortcut: host asset hash, breaks when dsh-client-ui-chat renames the running-whale APNG; re-verify the /plugins/... URL then.
+const WHALE_APNG_URL = '/plugins/@deepseek-ai/dsh-client-ui-chat/assets/running-whale%402x-06738fa29b2f.png'
 
-/** The one stylesheet this module installs, keyed by {@link BRIDGED_ATTR}. */
-const STYLE = `
+/**
+ * The one stylesheet this module installs, keyed by {@link BRIDGED_ATTR}.
+ * Exported pure so the visual contract stays testable without a DOM.
+ *
+ * The tails animate like the host's thinking state: the running-whale APNG is
+ * the mask, and its frames own the wag. The stroked SVG is the still fallback
+ * for reduced-motion and unsupported `mask`.
+ */
+export const STYLE = `
 [${BRIDGED_ATTR}] {
   position: relative;
-  padding-right: 20px !important;
-  border-radius: 10px;
-  box-shadow: inset 0 0 0 2px #7aa2ff, 0 0 0 1px rgba(122, 162, 255, 0.25), 0 0 14px rgba(122, 162, 255, 0.18);
+  padding-right: 40px !important;
+  border-radius: var(--dsw-radius-md, 12px) !important;
+  border-color: #3b6cf5 !important;
+  border-block: 3px solid #3b6cf5 !important;
+  background-color: rgba(127, 174, 255, 0.30) !important;
 }
 [${BRIDGED_ATTR}]::after {
   content: '';
   position: absolute;
-  top: 50%;
-  right: 4px;
-  width: 12px;
-  height: 12px;
-  transform: translateY(-50%);
-  background: no-repeat center / contain url("data:image/svg+xml,${encodeURIComponent(TAIL_SVG)}");
-  opacity: 0.95;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 40px;
+  border-radius: 0 calc(var(--dsw-radius-md, 12px) - 3px) calc(var(--dsw-radius-md, 12px) - 3px) 0;
+  background: #3b6cf5;
+  z-index: 0;
+  pointer-events: none;
+}
+[${BRIDGED_ATTR}]::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 40px;
+  background: #fff;
+  z-index: 1;
+  pointer-events: none;
+  -webkit-mask: url("data:image/svg+xml,${encodeURIComponent(tailSvg('#fff'))}") no-repeat center / 18px 18px;
+  mask: url("data:image/svg+xml,${encodeURIComponent(tailSvg('#fff'))}") no-repeat center / 18px 18px;
 }
 #${GUARD_ID} {
   position: absolute;
   inset: 0;
   z-index: 40;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  padding: 0.75rem;
-  border-radius: 12px;
-  background: rgba(9, 12, 20, 0.78);
-  backdrop-filter: blur(3px);
-  color: #dbe4ff;
+  padding: 24px;
+  border: 3px solid #3b6cf5;
+  background: rgba(127, 174, 255, 0.30);
+  color: #fff;
   font-size: 0.8125rem;
 }
+#${GUARD_ID}::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 32px;
+  height: 32px;
+  background: #fff;
+  z-index: 1;
+  pointer-events: none;
+  -webkit-mask: url("data:image/svg+xml,${encodeURIComponent(tailSvg('#fff'))}") no-repeat center / 15px 15px;
+  mask: url("data:image/svg+xml,${encodeURIComponent(tailSvg('#fff'))}") no-repeat center / 15px 15px;
+}
+#${GUARD_ID}::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 0 8px 0 8px;
+  background: #3b6cf5;
+  z-index: 0;
+  pointer-events: none;
+}
+#${GUARD_ID} > .dsh-sup-copy {
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  transform: translate(-50%, -100%);
+  background: #3b6cf5;
+  color: #fff;
+  border-radius: 8px 8px 0 0;
+  padding: 3px 12px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  z-index: 2;
+}
+#${GUARD_ID} > .dsh-sup-badge {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  padding: 2px 10px;
+  background: #3b6cf5;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 14px;
+  border-radius: 0 8px 0 8px;
+  z-index: 1;
+  pointer-events: none;
+}
 #${GUARD_ID} button {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1;
   font: inherit;
+  font-size: 0.875rem;
   cursor: pointer;
-  padding: 0.25rem 0.75rem;
+  min-height: 36px;
+  padding: 0.375rem 1.5rem;
+  border: none;
   border-radius: 999px;
-  border: 1px solid #7aa2ff;
-  background: rgba(122, 162, 255, 0.16);
-  color: #e6edff;
+  background: #3b6cf5;
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(9, 22, 54, .25);
+  transition: background-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+#${GUARD_ID} button:hover {
+  background: #5b86ff;
+  transform: translate(-50%, calc(-50% - 1px));
+  box-shadow: 0 3px 8px rgba(9, 22, 54, .35);
+}
+#${GUARD_ID} button:active {
+  background: #3b6cf5;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 1px 2px rgba(9, 22, 54, .25);
+}
+#${GUARD_ID} button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, .75);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  @supports (mask-mode: alpha) {
+    [${BRIDGED_ATTR}]::before {
+      -webkit-mask: url("${WHALE_APNG_URL}") no-repeat center / 18px 18px;
+      mask: url("${WHALE_APNG_URL}") no-repeat center / 18px 18px;
+    }
+    #${GUARD_ID}::before {
+      -webkit-mask: url("${WHALE_APNG_URL}") no-repeat center / 15px 15px;
+      mask: url("${WHALE_APNG_URL}") no-repeat center / 15px 15px;
+    }
+  }
 }
 `
 let styleInstalled = false
@@ -129,24 +241,25 @@ export async function reclaim(session: string): Promise<boolean> {
 /**
  * Poll the supervision state and keep the decoration in step.
  * @param doc - the page document.
+ * @param t - the translator for the guard's strings.
  * @param draw - the paint callback, injectable for a test.
  * @returns a stop function; the page normally outlives it.
  */
-export function watch(doc: Document, draw: typeof paint = paint): () => void {
+export function watch(doc: Document, t: Translate, draw: typeof paint = paint): () => void {
   let stopped = false
   const tick = async (): Promise<void> => {
     if (stopped) return
     try {
       const response = await fetch(STATE_URL)
       if (!response.ok) {
-        draw(doc, new Set(), reclaim)
+        draw(doc, new Set(), t, reclaim)
         return
       }
       const payload: unknown = await response.json()
-      draw(doc, bridgedIds(isBridgePayload(payload) ? payload : undefined), reclaim)
+      draw(doc, bridgedIds(isBridgePayload(payload) ? payload : undefined), t, reclaim)
     } catch {
       // An absent route (plain `dsh web`) or a dropped fetch means "not bridged".
-      draw(doc, new Set(), reclaim)
+      draw(doc, new Set(), t, reclaim)
     }
   }
   void tick()
@@ -162,11 +275,13 @@ export function watch(doc: Document, draw: typeof paint = paint): () => void {
  * step with the selected session.
  * @param doc - the page document.
  * @param ids - the bridged sessions from the latest poll.
+ * @param t - the translator for the guard's strings.
  * @param take - takes one session back; the guard's button calls it.
  */
 export function paint(
   doc: Document,
   ids: ReadonlySet<string>,
+  t: Translate,
   take: (session: string) => Promise<boolean>,
 ): void {
   installStyle(doc)
@@ -178,5 +293,5 @@ export function paint(
     if (ids.has(session)) row.setAttribute(BRIDGED_ATTR, '')
     else row.removeAttribute(BRIDGED_ATTR)
   }
-  syncGuard(doc, selected, ids, take)
+  syncGuard(doc, selected, ids, t, take)
 }

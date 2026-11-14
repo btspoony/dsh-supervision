@@ -1,16 +1,23 @@
 /**
- * The composer guard: while a session is supervised from a terminal its editor
- * is covered and made `inert`, so neither a pointer nor an already-focused
- * caret can type into it. The guard itself sits beside the editor, because an
- * `inert` subtree cannot host the button that takes the session back.
+ * The composer guard: while a session is supervised from a terminal its input
+ * area — editor and toolbar — is covered and the editor is made `inert`, so
+ * neither a pointer nor an already-focused caret can type into it. The guard
+ * itself sits beside the editor, because an `inert` subtree cannot host the
+ * button that takes the session back.
  *
  * Both mechanisms are re-asserted on every paint: the host may swap the editor
  * node while keeping its container, and a guard that trusted its own earlier
  * DOM writes would then show "covered" over a typeable editor.
  */
 
+import type { Translate } from './locale.js'
+
 /** The composer guard node id. */
 export const GUARD_ID = 'dsh-sup-guard'
+/** The caption span's class; also keys the stylesheet. */
+export const COPY_CLASS = 'dsh-sup-copy'
+/** The corner badge's class; also keys the stylesheet. */
+export const BADGE_CLASS = 'dsh-sup-badge'
 /** Marks the editor this module made inert. */
 export const HOST_ATTR = 'data-dsh-sup-composer'
 /** Records the holder's original inline `position` while the guard is mounted. */
@@ -31,6 +38,17 @@ export function guardFor(ids: ReadonlySet<string>, session: string | undefined):
 /** @returns the mounted guard, when one is in the document. */
 function guardNode(doc: Document): HTMLElement | null {
   return doc.getElementById(GUARD_ID)
+}
+
+/**
+ * Seat the guard's border on the holder's own rounding, so the cover hugs the
+ * input card instead of guessing a token.
+ * @param guard - the mounted guard.
+ * @param holder - the container the guard overlays.
+ */
+function seatGuard(guard: HTMLElement, holder: HTMLElement): void {
+  const radius = getComputedStyle(holder).borderRadius
+  guard.style.borderRadius = radius === '' ? '16px' : radius
 }
 
 /**
@@ -68,12 +86,14 @@ export function releaseGuard(doc: Document): void {
  * @param doc - the page document.
  * @param selected - the session the composer belongs to.
  * @param ids - the bridged sessions.
+ * @param t - the translator for the guard's strings.
  * @param reclaim - takes one session back; resolves true when the bridge is gone.
  */
 export function syncGuard(
   doc: Document,
   selected: string | undefined,
   ids: ReadonlySet<string>,
+  t: Translate,
   reclaim: (session: string) => Promise<boolean>,
 ): void {
   if (!guardFor(ids, selected)) {
@@ -86,14 +106,23 @@ export function syncGuard(
     releaseGuard(doc)
     return
   }
-  const holder = host.parentElement ?? host
+  // The whole input area (editor + toolbar) is the host's composer card; when
+  // present it is the holder, so the cover spans both like the host's own
+  // overlay slot would.
+  const card = (composer?.closest('[data-composer-card]') ?? null) as HTMLElement | null
+  const holder = card ?? host.parentElement ?? host
   const existing = guardNode(doc)
   if (existing !== null && existing.parentElement === holder) {
     // The guard outlives a session switch in the same composer: retarget it, so
     // Unlock never reclaims the session selected before this one, and re-assert
     // the covered state in case the host swapped the editor under the guard.
+    // The strings are re-read too, so a locale change lands on the next poll.
     existing.setAttribute(SESSION_ATTR, selected ?? '')
+    existing.querySelector(':scope > span.' + COPY_CLASS)?.replaceChildren(doc.createTextNode(t('caption')))
+    existing.querySelector(':scope > span.' + BADGE_CLASS)?.replaceChildren(doc.createTextNode(t('badge')))
+    existing.querySelector(':scope > button')?.replaceChildren(doc.createTextNode(t('unlock')))
     cover(host, holder)
+    seatGuard(existing, holder)
     return
   }
   releaseGuard(doc)
@@ -101,11 +130,15 @@ export function syncGuard(
   const guard = doc.createElement('div')
   guard.id = GUARD_ID
   guard.setAttribute(SESSION_ATTR, selected ?? '')
-  const label = doc.createElement('span')
-  label.textContent = 'Supervised from dsh-sup — this composer is covered.'
+  const copy = doc.createElement('span')
+  copy.className = COPY_CLASS
+  copy.textContent = t('caption')
+  const badge = doc.createElement('span')
+  badge.className = BADGE_CLASS
+  badge.textContent = t('badge')
   const button = doc.createElement('button')
   button.type = 'button'
-  button.textContent = 'Unlock'
+  button.textContent = t('unlock')
   button.addEventListener('click', () => {
     const target = guard.getAttribute(SESSION_ATTR) ?? ''
     void reclaim(target).then(taken => {
@@ -113,6 +146,7 @@ export function syncGuard(
       if (taken) releaseGuard(doc)
     })
   })
-  guard.append(label, button)
+  guard.append(copy, badge, button)
+  seatGuard(guard, holder)
   holder.append(guard)
 }
