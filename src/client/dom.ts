@@ -103,35 +103,10 @@ export const STYLE = `
   color: #fff;
   font-size: 0.8125rem;
 }
-#${GUARD_ID}::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 32px;
-  height: 32px;
-  background: #fff;
-  z-index: 1;
-  pointer-events: none;
-  -webkit-mask: url("data:image/svg+xml,${encodeURIComponent(tailSvg('#fff'))}") no-repeat center / 15px 15px;
-  mask: url("data:image/svg+xml,${encodeURIComponent(tailSvg('#fff'))}") no-repeat center / 15px 15px;
-}
-#${GUARD_ID}::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: 0 8px 0 8px;
-  background: #3b6cf5;
-  z-index: 0;
-  pointer-events: none;
-}
 #${GUARD_ID} > .dsh-sup-copy {
   position: absolute;
   left: 50%;
-  top: -3px;
+  top: 1px;
   transform: translate(-50%, -100%);
   background: #3b6cf5;
   color: #fff;
@@ -146,7 +121,7 @@ export const STYLE = `
   position: absolute;
   left: 0;
   bottom: 0;
-  padding: 2px 10px;
+  padding: 3px 10px 3px 24px;
   background: #3b6cf5;
   color: #fff;
   font-size: 11px;
@@ -155,6 +130,18 @@ export const STYLE = `
   border-radius: 0 8px 0 8px;
   z-index: 1;
   pointer-events: none;
+}
+#${GUARD_ID} > .dsh-sup-badge::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 50%;
+  translate: 0 -50%;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  -webkit-mask: url("data:image/svg+xml,${encodeURIComponent(tailSvg('#fff'))}") no-repeat center / contain;
+  mask: url("data:image/svg+xml,${encodeURIComponent(tailSvg('#fff'))}") no-repeat center / contain;
 }
 #${GUARD_ID} button {
   position: absolute;
@@ -194,9 +181,9 @@ export const STYLE = `
       -webkit-mask: url("${WHALE_APNG_URL}") no-repeat center / 18px 18px;
       mask: url("${WHALE_APNG_URL}") no-repeat center / 18px 18px;
     }
-    #${GUARD_ID}::before {
-      -webkit-mask: url("${WHALE_APNG_URL}") no-repeat center / 15px 15px;
-      mask: url("${WHALE_APNG_URL}") no-repeat center / 15px 15px;
+    #${GUARD_ID} > .dsh-sup-badge::before {
+      -webkit-mask: url("${WHALE_APNG_URL}") no-repeat center / contain;
+      mask: url("${WHALE_APNG_URL}") no-repeat center / contain;
     }
   }
 }
