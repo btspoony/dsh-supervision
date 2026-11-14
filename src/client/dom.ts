@@ -226,7 +226,34 @@ export async function reclaim(session: string): Promise<boolean> {
 }
 
 /**
- * Poll the supervision state and keep the decoration in step.
+ * Coalesce a burst of signals into at most one run per window. Extracted pure
+ * of the DOM so the throttling contract stays unit-testable.
+ * @param run - the work to run at most once per window.
+ * @param windowMs - the quiet period that separates two runs.
+ * @returns the schedule and cancel handles.
+ */
+export function coalescer(run: () => void, windowMs: number): { schedule(): void; cancel(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return {
+    schedule(): void {
+      if (timer !== undefined) return
+      timer = setTimeout(() => {
+        timer = undefined
+        run()
+      }, windowMs)
+    },
+    cancel(): void {
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+    },
+  }
+}
+
+/**
+ * Poll the supervision state and keep the decoration in step. The 2s poll is
+ * the freshness source, but selection changes and DOM churn also repaint from
+ * the cached state, so opening a supervised session shows the overlay at once
+ * instead of up to two seconds late.
  * @param doc - the page document.
  * @param t - the translator for the guard's strings.
  * @param draw - the paint callback, injectable for a test.
@@ -234,26 +261,48 @@ export async function reclaim(session: string): Promise<boolean> {
  */
 export function watch(doc: Document, t: Translate, draw: typeof paint = paint): () => void {
   let stopped = false
+  let cache: SupervisionState | undefined
+  const repaint = (): void => {
+    if (!stopped) draw(doc, bridgedIds(cache), t, reclaim)
+  }
+  const churn = coalescer(repaint, 100)
   const tick = async (): Promise<void> => {
     if (stopped) return
     try {
       const response = await fetch(STATE_URL)
       if (!response.ok) {
-        draw(doc, new Set(), t, reclaim)
+        cache = undefined
+        repaint()
         return
       }
       const payload: unknown = await response.json()
-      draw(doc, bridgedIds(isBridgePayload(payload) ? payload : undefined), t, reclaim)
+      cache = isBridgePayload(payload) ? payload : undefined
+      repaint()
     } catch {
       // An absent route (plain `dsh web`) or a dropped fetch means "not bridged".
-      draw(doc, new Set(), t, reclaim)
+      cache = undefined
+      repaint()
     }
   }
   void tick()
   const timer = setInterval(() => { void tick() }, POLL_MS)
+  // Selection changes are rare: repaint from the cache immediately.
+  const selectionObserver = new MutationObserver(repaint)
+  const churnObserver = new MutationObserver(() => { churn.schedule() })
+  if (doc.body !== null) {
+    selectionObserver.observe(doc.body, { subtree: true, attributes: true, attributeFilter: ['aria-selected'] })
+    churnObserver.observe(doc.body, { subtree: true, childList: true })
+  }
+  // The click that opens a session schedules a paint even before the observers fire.
+  const onClick = (): void => { churn.schedule() }
+  doc.addEventListener('click', onClick, { capture: true })
   return () => {
     stopped = true
     clearInterval(timer)
+    churn.cancel()
+    selectionObserver.disconnect()
+    churnObserver.disconnect()
+    doc.removeEventListener('click', onClick, { capture: true })
   }
 }
 

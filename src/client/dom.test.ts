@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { BRIDGED_ATTR, bridgedIds, rowSessionId, STYLE } from './dom.js'
+import { BRIDGED_ATTR, bridgedIds, coalescer, rowSessionId, STYLE } from './dom.js'
 import { BADGE_CLASS, COPY_CLASS, GUARD_ID, guardFor } from './dom.guard.js'
 import { en, zh } from './locale.js'
 
@@ -31,6 +31,21 @@ test('the guard covers exactly a bridged selected session', () => {
   assert.equal(guardFor(ids, 'session-a'), true)
   assert.equal(guardFor(ids, 'session-b'), false)
   assert.equal(guardFor(ids, undefined), false, 'no selection means no composer to cover')
+})
+
+test('the churn coalescer runs a burst once per window', async () => {
+  let runs = 0
+  const churn = coalescer(() => { runs += 1 }, 5)
+  churn.schedule()
+  churn.schedule()
+  churn.schedule()
+  assert.equal(runs, 0, 'the burst waits for the quiet period')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(runs, 1, 'three rapid mutations paint exactly once')
+  churn.schedule()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(runs, 2, 'a later quiet burst paints again')
+  churn.cancel()
 })
 
 test('the locale dictionaries carry every guard string in en and zh', () => {
