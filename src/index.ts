@@ -10,12 +10,14 @@
 
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
-import { PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
+import { MAX_FRAME, PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
 import type { ErrorCode, HelloFrame, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
+import { mirrorFrame, mirrorOf } from './mirror.js'
+import type { CallRecord, SessionEvent } from './mirror.js'
 import { parseLine } from './stdin.js'
 import { registerSupervisionRoutes, supervisionState } from './routes.js'
 import { isSkillsLike, registerSkill } from './skill.js'
@@ -110,15 +112,7 @@ export interface AgentsService {
   resume(options: { readonly resumeSessionId: string }): Promise<{ readonly agent: AgentLike }>
 }
 
-/** The slice of one `session/event` payload this plugin consumes. */
-export interface SessionEvent {
-  readonly type: string
-  readonly data?: {
-    readonly turn?: number
-    readonly reason?: { readonly kind?: string }
-    readonly title?: string
-  }
-}
+export type { SessionEvent }
 
 /** The Cordis context, reduced to the members this plugin uses. */
 export interface PluginContext {
@@ -236,6 +230,8 @@ interface BridgeState {
   shown: Shown
   /** Child records this bridge reported, keyed by the `id=` herdr-core holds. */
   readonly children: Map<string, RootState>
+  /** Started tool calls awaiting their result, so a result can report its `ms`. */
+  readonly calls: Map<string, CallRecord>
 }
 
 /**
@@ -698,6 +694,8 @@ function handlersFor(
   readonly snapshot: () => SupervisionState
 } {
   const bridged = new Map<string, BridgeState>()
+  /** Set once the first oversized mirror is dropped, so stderr says it once. */
+  let mirrorDropped = false
   /** The effect layer's listeners, open while at least one bridge is live. */
   let subscriptions: readonly (() => void)[] | undefined
   /**
@@ -977,12 +975,25 @@ function handlersFor(
     if (subscriptions !== undefined) return
     const offSession = ctx.on('session/event', (subject, event) => {
       const fact = factOf(event, config)
-      if (fact === undefined) return
       for (const state of bridged.values()) {
         if (subject.id === state.agent.session.id) {
-          feed(state, fact)
+          // A mirror is per bridged session: only the attached one is
+          // conversation here, and a child's transcript belongs to its own.
+          const item = mirrorOf(event, state.calls)
+          if (item !== undefined) {
+            // An oversized frame would close the socket, so it is dropped here
+            // instead; once is enough to say so on stderr.
+            const frame = mirrorFrame(item)
+            if (frame !== undefined) state.bridge.send(frame)
+            else if (!mirrorDropped) {
+              mirrorDropped = true
+              process.stderr.write(`dsh-supervision: mirror frame over ${String(MAX_FRAME)} bytes dropped\n`)
+            }
+          }
+          if (fact !== undefined) feed(state, fact)
           continue
         }
+        if (fact === undefined) continue
         const agent = ctx.agents.get(subject.id)
         if (agent !== undefined) feedChild(state, childIdOf(agent), fact)
       }
@@ -1061,6 +1072,7 @@ function handlersFor(
       root,
       shown: { state: root.current.state, msg: '', title: root.current.title, kind: undefined, turn: root.turn },
       children: new Map(),
+      calls: new Map(),
     }
     bridged.set(session, state)
     openSubscriptions()

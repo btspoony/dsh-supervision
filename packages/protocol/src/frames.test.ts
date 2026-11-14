@@ -6,13 +6,24 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MAX_FRAME, decodeChunk } from './frames.js';
-import type { Decoded, OutFrame } from './frames.js';
+import {
+  MAX_FRAME,
+  MAX_ITEM_ARGS,
+  MAX_ITEM_CALL_ID,
+  MAX_ITEM_DETAIL,
+  MAX_ITEM_NAME,
+  MAX_ITEM_REASONING,
+  MAX_ITEM_TEXT,
+  PROTO,
+  decodeChunk,
+  encodeFrame,
+} from './frames.js';
+import type { Decoded, MirrorItem, OutFrame } from './frames.js';
 import { encodeReport } from './osc.js';
 
 const welcome = JSON.stringify({
   t: 'welcome',
-  proto: 1,
+  proto: PROTO,
   session: 'session-1',
   title: 'repo',
   state: 'idle',
@@ -53,12 +64,31 @@ test('a terminated frame over the cap is rejected too', () => {
 test('invalid JSON and unknown frame types stop the stream', () => {
   assert.equal(decodeChunk('', 'not json\n').ok, false);
   assert.equal(decodeChunk('', '{"t":"nope"}\n').ok, false);
-  assert.equal(decodeChunk('', '{"t":"welcome","proto":2}\n').ok, false);
+  assert.equal(decodeChunk('', `{"t":"welcome","proto":${String(PROTO + 1)}}\n`).ok, false);
+});
+
+test('a rejected frame reaches stderr stripped of the bytes a terminal executes', () => {
+  // This reason is printed on the same terminal carrying the machine records, so
+  // an OSC title set or an erase in the peer's bytes must not act there.
+  const hostile = 'x\u001b]0;owned\u0007\u001b[2J\u009b2Jy\u202eevil';
+  const decoded = decodeChunk('', `${hostile}\n`);
+  assert.equal(decoded.ok, false);
+  const reason = decoded.ok ? '' : decoded.reason;
+  assert.doesNotMatch(reason, /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+  assert.equal(reason, 'invalid frame: x ]0;owned  [2J 2Jy evil');
+});
+
+test('a rejected frame excerpt still stops at 60 characters plus the ellipsis', () => {
+  const decoded = decodeChunk('', `${'z'.repeat(200)}\n`);
+  assert.equal(decoded.ok, false);
+  assert.equal(decoded.ok ? '' : decoded.reason, `invalid frame: ${'z'.repeat(60)}…`);
 });
 
 test('a welcome must name a known state and a whole turn count', () => {
-  const good = { t: 'welcome', proto: 1, session: 'session-1', title: 'repo', state: 'working', turn: 3 };
+  const good = { t: 'welcome', proto: PROTO, session: 'session-1', title: 'repo', state: 'working', turn: 3 };
   assert.deepEqual(frames(decodeChunk('', `${JSON.stringify(good)}\n`)), [good]);
+  assert.equal(PROTO, 2, 'the mirror frame is a breaking cut');
+  assert.equal(decodeChunk('', `${JSON.stringify({ ...good, proto: 1 })}\n`).ok, false, 'proto 1 is stale');
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, state: 'busy' })}\n`).ok, false);
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, turn: 1.5 })}\n`).ok, false);
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, session: '' })}\n`).ok, false);
@@ -86,6 +116,52 @@ test('sessions frames validate every item or reject the frame', () => {
   const bad = '{"t":"sessions","items":[{"id":"session-1","cwd":"/repo","live":"yes","bridged":false}]}';
   assert.equal(decodeChunk('', `${bad}\n`).ok, false);
   assert.equal(decodeChunk('', '{"t":"sessions","items":{}}\n').ok, false);
+});
+
+test('the mirror caps are the ones the plugin must respect', () => {
+  assert.deepEqual(
+    [MAX_ITEM_TEXT, MAX_ITEM_REASONING, MAX_ITEM_ARGS, MAX_ITEM_DETAIL, MAX_ITEM_NAME, MAX_ITEM_CALL_ID],
+    [16 * 1024, 1024, 512, 2048, 64, 96],
+  );
+});
+
+test('every mirror item kind survives the wire', () => {
+  const items: readonly MirrorItem[] = [
+    { k: 'user', text: 'implement the mirror' },
+    {
+      k: 'assistant',
+      text: 'one block per step',
+      reasoning: 'no deltas to stream',
+      usage: { inputTokens: 1234, outputTokens: 340, cacheReadTokens: 900 },
+      interrupted: true,
+      turn: 4,
+    },
+    { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'a\nb', ms: 12, turn: 4 },
+    { k: 'assistant', turn: 0 },
+    { k: 'tool', callId: 'c2', name: 'grep', args: '', state: 'start', turn: 4 },
+  ];
+  for (const item of items) {
+    const decoded = decodeChunk('', encodeFrame({ t: 'mirror', item }));
+    assert.deepEqual(frames(decoded), [{ t: 'mirror', item }]);
+  }
+});
+
+test('a mirror frame rejects an unknown kind, state or turn', () => {
+  const mirror = (item: unknown): string => `${JSON.stringify({ t: 'mirror', item })}\n`;
+  const tool = { k: 'tool', callId: 'c1', name: 'bash', args: '{}', state: 'ok', turn: 1 };
+  const assistant = { k: 'assistant', turn: 1 };
+  assert.equal(decodeChunk('', mirror({ ...tool, k: 'nope' })).ok, false);
+  assert.equal(decodeChunk('', mirror({ ...tool, state: 'maybe' })).ok, false);
+  assert.equal(decodeChunk('', mirror({ ...tool, turn: -1 })).ok, false);
+  assert.equal(decodeChunk('', mirror({ ...assistant, turn: 1.5 })).ok, false);
+  assert.equal(decodeChunk('', mirror({ ...assistant, usage: { inputTokens: 1.5, outputTokens: 1 } })).ok, false);
+  assert.equal(decodeChunk('', mirror({ ...assistant, usage: { inputTokens: -1, outputTokens: 1 } })).ok, false);
+  assert.equal(decodeChunk('', mirror({ ...assistant, usage: { outputTokens: 1 } })).ok, false);
+  assert.equal(decodeChunk('', mirror({ ...tool, callId: 1 })).ok, false);
+  assert.equal(decodeChunk('', mirror({ ...assistant, reasoning: 1 })).ok, false);
+  assert.equal(decodeChunk('', mirror(undefined)).ok, false);
+  assert.equal(decodeChunk('', mirror([])).ok, false);
+  assert.equal(decodeChunk('', '{"t":"mirror"}\n').ok, false);
 });
 
 test('a report is one OSC 7501 line terminated with ST', () => {

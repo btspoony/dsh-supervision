@@ -4,7 +4,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { BACKEND_OFFLINE, connect, type Connection } from './connection.js';
-import type { HelloFrame } from 'dsh-supervision-protocol';
+import { PROTO, type HelloFrame } from 'dsh-supervision-protocol';
 
 interface Harness {
   readonly socketPath: string;
@@ -51,7 +51,7 @@ test('hello reaches the plugin and welcome reaches the client', async () => {
   let connection: Connection | undefined;
 
   const client = new Promise<string>((resolve) => {
-    connection = connect(harness.socketPath, { t: 'hello', proto: 1, pid: 7, new: { cwd: '/repo' } }, {
+    connection = connect(harness.socketPath, { t: 'hello', proto: PROTO, pid: 7, new: { cwd: '/repo' } }, {
       onFrame: (frame) => {
         if (frame.t === 'welcome') resolve(frame.session);
       },
@@ -61,10 +61,10 @@ test('hello reaches the plugin and welcome reaches the client', async () => {
   });
 
   const socket = await harness.peer;
-  assert.deepEqual(await readHello(socket), { t: 'hello', proto: 1, pid: 7, new: { cwd: '/repo' } });
+  assert.deepEqual(await readHello(socket), { t: 'hello', proto: PROTO, pid: 7, new: { cwd: '/repo' } });
 
   socket.write(
-    `${JSON.stringify({ t: 'welcome', proto: 1, session: 'session-1', title: 'repo', state: 'idle', turn: 0 })}\n`,
+    `${JSON.stringify({ t: 'welcome', proto: PROTO, session: 'session-1', title: 'repo', state: 'idle', turn: 0 })}\n`,
   );
   assert.equal(await client, 'session-1');
 
@@ -76,7 +76,7 @@ test('a socket that closes without welcome reports a lost backend once', async (
   const harness = listen();
   const reasons: string[] = [];
   const lost = new Promise<void>((resolve) => {
-    connect(harness.socketPath, { t: 'hello', proto: 1, pid: 7 }, {
+    connect(harness.socketPath, { t: 'hello', proto: PROTO, pid: 7 }, {
       onFrame: () => {},
       onLost: (msg) => {
         reasons.push(msg);
@@ -96,7 +96,7 @@ test('a socket that closes without welcome reports a lost backend once', async (
 test('an oversized frame ends the connection and names the cap', async () => {
   const harness = listen();
   const lost = new Promise<string>((resolve) => {
-    connect(harness.socketPath, { t: 'hello', proto: 1, pid: 7 }, {
+    connect(harness.socketPath, { t: 'hello', proto: PROTO, pid: 7 }, {
       onFrame: () => {},
       onLost: (msg, detail) => resolve(`${msg}: ${detail}`),
       onRefused: (detail) => assert.fail(`unexpected refusal: ${detail}`),
@@ -114,7 +114,7 @@ test('a frame split across writes is assembled before dispatch', async () => {
   const echoes: string[] = [];
 
   const received = new Promise<void>((resolve) => {
-    connection = connect(harness.socketPath, { t: 'hello', proto: 1, pid: 7 }, {
+    connection = connect(harness.socketPath, { t: 'hello', proto: PROTO, pid: 7 }, {
       onFrame: (frame) => {
         if (frame.t === 'echo') {
           echoes.push(frame.text);
@@ -144,7 +144,7 @@ test('an oversized line is refused locally: nothing is written and no backend is
   const losses: string[] = [];
   let connection: Connection | undefined;
 
-  connection = connect(harness.socketPath, { t: 'hello', proto: 1, pid: 7 }, {
+  connection = connect(harness.socketPath, { t: 'hello', proto: PROTO, pid: 7 }, {
     onFrame: () => {},
     onLost: (msg) => losses.push(msg),
     onRefused: (detail) => refusals.push(detail),
@@ -175,7 +175,7 @@ test('a refused line leaves the bridge usable for the next line', async () => {
     arrived = resolve;
   });
 
-  const connection = connect(harness.socketPath, { t: 'hello', proto: 1, pid: 7 }, {
+  const connection = connect(harness.socketPath, { t: 'hello', proto: PROTO, pid: 7 }, {
     onFrame: () => {},
     onLost: (msg) => assert.fail(`unexpected loss: ${msg}`),
     onRefused: () => {},
