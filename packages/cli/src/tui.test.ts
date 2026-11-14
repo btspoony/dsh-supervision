@@ -555,6 +555,40 @@ test('an interrupted reply keeps both its body and the marker at full width', ()
   }
 });
 
+test('the follow marker stays byte-clean under the plain theme at any width', () => {
+  for (const width of [1, 3, 6]) {
+    const view = new TranscriptView({ width, theme: PLAIN });
+    view.height = 2;
+    for (let i = 0; i < 6; i++) view.push(`line ${String(i)}`);
+    view.render(width);
+    view.page(-1);
+    view.push('line 6');
+    view.push('line 7');
+    const lines = view.render(width);
+    assert.match(lines.join('\n'), /↓|\d/, 'the marker is still rendered');
+    for (const line of lines) {
+      assert.equal(line.includes('\x1b'), false, `plain width ${String(width)} kept an escape: ${JSON.stringify(line)}`);
+      assert.ok(visibleWidth(line) <= width, `plain width ${String(width)}: ${JSON.stringify(line)} overflows`);
+    }
+  }
+});
+
+test('a wide grapheme at the cut boundary cannot widen a coloured row', () => {
+  const color = createTheme({ color: true });
+  const entries = [
+    { k: 'tool', callId: 'c', name: 'bash', args: JSON.stringify({ command: '中文内容🙂'.repeat(6) }), state: 'ok', detail: '中文🙂'.repeat(10), ms: 4, turn: 1 },
+    { k: 'user', text: '中文内容🙂'.repeat(6) },
+    { k: 'assistant', turn: 1, text: '中文内容🙂'.repeat(6), interrupted: true },
+  ] as const;
+  for (const width of [10, 40]) {
+    for (const entry of entries) {
+      for (const line of renderEntry(entry, width, color)) {
+        assert.ok(visibleWidth(line) <= width, `width ${String(width)}: ${JSON.stringify(line)} is ${String(visibleWidth(line))}`);
+      }
+    }
+  }
+});
+
 test('block entries are separated; echo lines stay dense', () => {
   const view = new TranscriptView({ width: 20 });
   view.height = 12;

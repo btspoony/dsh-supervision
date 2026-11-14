@@ -259,6 +259,8 @@ export class TranscriptView implements Component {
   /** Width the flattened lines are wrapped at; a different render rewraps all. */
   private width: number;
   private readonly wrapEntry: (entry: MirrorItem | string, width: number) => string[];
+  /** The theme the chrome (the follow marker) draws with. */
+  private readonly theme: Theme;
 
   /**
    * @param options - entry renderer injection (for call-counting tests), the
@@ -266,6 +268,7 @@ export class TranscriptView implements Component {
    */
   constructor(options: TranscriptOptions = {}) {
     const theme = options.theme ?? PLAIN;
+    this.theme = theme;
     this.width = Math.max(1, Math.floor(options.width ?? 80));
     this.wrapEntry = options.wrapEntry ?? ((entry, width) => renderEntry(entry, width, theme));
   }
@@ -311,7 +314,7 @@ export class TranscriptView implements Component {
     const rows = marker === undefined ? this.height : this.height - 1;
     const visible = this.flat.slice(top, top + rows);
     while (visible.length < rows) visible.unshift('');
-    if (marker !== undefined) visible.push(truncateToWidth(marker, w));
+    if (marker !== undefined) visible.push(this.theme.color ? clipStyled(marker, w) : truncatePlain(marker, w));
     return visible;
   }
 
@@ -482,7 +485,7 @@ function toolEntry(item: Extract<MirrorItem, { k: 'tool' }>, width: number, them
   const parts = toolParts(item);
   const head = `${theme.fg(parts.token, parts.glyph)} ${theme.bold(parts.name)}${parts.summary === '' ? '' : theme.dim(`: ${parts.summary}`)}${parts.meta === '' ? '' : theme.dim(parts.meta)}`;
   const headWidth = visibleWidth(head);
-  const fitted = headWidth > width ? sliceByColumn(head, 0, width) : head;
+  const fitted = headWidth > width ? sliceByColumn(head, 0, width, true) : head;
   const lines = [theme.bg(parts.bg, fitted + ' '.repeat(Math.max(0, width - Math.min(headWidth, width))))];
   if (parts.detail !== '') lines.push(...fitLines(theme.dim(`  └─ ${parts.detail}`), width));
   return lines;
@@ -516,7 +519,7 @@ function wrapPlain(text: string, width: number): string[] {
  */
 function clipStyled(line: string, width: number): string {
   if (visibleWidth(line) <= width) return line;
-  return `${sliceByColumn(line, 0, width)}\x1b[0m`;
+  return `${sliceByColumn(line, 0, width, true)}\x1b[0m`;
 }
 
 /** Truncates to `width` visible columns by code point; adds no escape sequence. */
