@@ -7,7 +7,7 @@
  * `routeFrame` already produces, because a supervisor parses those bytes.
  */
 
-import { statSync } from 'node:fs';
+import { accessSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import {
   Box,
@@ -197,6 +197,103 @@ export function ctrlCAction(input: {
   return 'hint';
 }
 
+/**
+ * Esc belongs to an open completion menu, not to the turn: while the menu is up
+ * the Editor must receive the key so it can close it, and only then does Esc
+ * mean "cancel the running turn".
+ * @param context - whether the editor's completion menu is open.
+ */
+export function escAction(context: { readonly menuOpen: boolean }): 'pass' | 'cancel' {
+  return context.menuOpen ? 'pass' : 'cancel';
+}
+
+/** What one submitted line does: end the bridge locally, or send the text. */
+export interface LineSink {
+  readonly send: (text: string) => void;
+  readonly exit: () => void;
+}
+
+/**
+ * Routes one submitted line. A forwarder-local exit command ends the bridge and
+ * is never written to the socket as a `line` frame.
+ * @param text - the submitted editor text.
+ * @param sink - the socket writer and the local exit.
+ */
+export function routeLine(text: string, sink: LineSink): void {
+  const action = lineAction(text);
+  if (action.kind === 'exit') {
+    sink.exit();
+    return;
+  }
+  sink.send(action.text);
+}
+
+/** Side effects the surface's key handling needs; tests pass fakes. */
+export interface KeyEffects {
+  readonly sendLine: (text: string) => void;
+  readonly exit: () => void;
+  readonly clearEditor: () => void;
+  readonly clearHint: () => void;
+  readonly showHint: () => void;
+  /** Applies a scroll action to the transcript; returns whether it moved. */
+  readonly scroll: (action: KeyAction) => boolean;
+}
+
+/** What the key handler remembers between keystrokes. */
+export interface KeyMemory {
+  readonly lastCtrlC: number | undefined;
+  /** Set once an exit was dispatched, so no second trigger can exit twice. */
+  readonly exited: boolean;
+}
+
+/** The result of one key: the new memory and whether the surface consumed it. */
+export interface KeyOutcome {
+  readonly memory: KeyMemory;
+  readonly consumed: boolean;
+}
+
+/**
+ * Applies one key action to the surface. Pure in its arguments — the caller
+ * supplies the effects — so the Ctrl+C/Esc conventions are testable without a
+ * terminal.
+ * @param action - the decoded key action.
+ * @param memory - the previous keystroke's state.
+ * @param context - editor state and the current time.
+ * @param effects - what the surface can do.
+ */
+export function surfaceKey(
+  action: KeyAction,
+  memory: KeyMemory,
+  context: { readonly editorEmpty: boolean; readonly menuOpen: boolean; readonly now: number },
+  effects: KeyEffects,
+): KeyOutcome {
+  if (action.kind === 'escape') {
+    if (escAction({ menuOpen: context.menuOpen }) === 'pass') return { memory, consumed: false };
+    effects.sendLine('/cancel');
+    return { memory, consumed: true };
+  }
+  if (action.kind === 'ctrl-c') {
+    const next = ctrlCAction({ editorEmpty: context.editorEmpty, now: context.now, last: memory.lastCtrlC });
+    if (next === 'clear') {
+      effects.clearEditor();
+      effects.clearHint();
+      return { memory: { lastCtrlC: undefined, exited: memory.exited }, consumed: true };
+    }
+    if (next === 'hint') {
+      effects.showHint();
+      return { memory: { lastCtrlC: context.now, exited: memory.exited }, consumed: true };
+    }
+    if (!memory.exited) effects.exit();
+    return { memory: { lastCtrlC: undefined, exited: true }, consumed: true };
+  }
+  if (action.kind === 'exit') {
+    if (!memory.exited) effects.exit();
+    return { memory: { lastCtrlC: undefined, exited: true }, consumed: true };
+  }
+  effects.scroll(action);
+  return { memory: { lastCtrlC: undefined, exited: memory.exited }, consumed: true };
+}
+
 /** One attach surface: `tui` owns stdout, `line` is today's append-only path. */
 export function chooseSurface(input: {
   readonly stdinTTY: boolean;
@@ -233,20 +330,31 @@ export function catalogOf(frame: unknown): Catalog | undefined {
  * @param catalog - the host's advertised vocabulary; an empty one yields no menu.
  */
 export function autocompleteCatalog(catalog: Catalog): SlashCommand[] {
+  // A host string goes straight into the menu, which the terminal renders
+  // verbatim: a control byte there is an escape sequence or a split into the
+  // editor's inserted text. Unsafe rows are dropped, never silently rewritten.
+  const safeSkills = catalog.skills.filter(
+    (skill) => COMMAND_NAME.test(skill.name) && isPlainText(skill.name) && isPlainText(skill.description),
+  );
   const items = (prefix: string): AutocompleteItem[] =>
-    catalog.skills
+    safeSkills
       .filter((skill) => skill.name.startsWith(prefix))
-      .map((skill) => ({ value: `skill:${skill.name}`, label: skill.name, description: skill.description }));
-  const skills: SlashCommand[] = catalog.skills.map((skill) => ({
+      // The argument is a skill name, so the completion inserts the name only.
+      .map((skill) => ({ value: skill.name, label: skill.name, description: skill.description }));
+  const skills: SlashCommand[] = safeSkills.map((skill) => ({
     name: `skill:${skill.name}`,
     description: skill.description,
     getArgumentCompletions: (prefix: string) => items(prefix),
   }));
-  const commands: SlashCommand[] = catalog.commands.map((command) => ({
-    name: command.name,
-    description: command.description,
-    ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
-  }));
+  const commands: SlashCommand[] = catalog.commands
+    .filter((command) => COMMAND_NAME.test(command.name) && isPlainText(command.name) && isPlainText(command.description))
+    .map((command) => ({
+      name: command.name,
+      description: command.description,
+      ...(command.argumentHint === undefined || !isPlainText(command.argumentHint)
+        ? {}
+        : { argumentHint: command.argumentHint }),
+    }));
   return [...skills, ...commands];
 }
 
@@ -261,7 +369,8 @@ export function fdBinary(): string | undefined {
     for (const dir of dirs) {
       const candidate = join(dir, name);
       try {
-        if (statSync(candidate).isFile()) return candidate;
+        accessSync(candidate, constants.X_OK);
+        return candidate;
       } catch {
         // Not in this directory; keep looking.
       }
@@ -279,9 +388,17 @@ export function providerFor(catalog: Catalog, basePath: string): CombinedAutocom
   return new CombinedAutocompleteProvider(autocompleteCatalog(catalog), basePath, fdBinary() ?? null);
 }
 
+/** A menu row's name must stay a single well-formed command word. */
+const COMMAND_NAME = /^[a-z0-9:-]+$/;
+
+/** True when a catalog field carries no control bytes a terminal would obey. */
+function isPlainText(value: string): boolean {
+  return stripControls(value) === value;
+}
+
 /** What one input sequence means to the surface, if anything. */
 export type KeyAction =
-  | { readonly kind: 'cancel' }
+  | { readonly kind: 'escape' }
   | { readonly kind: 'ctrl-c' }
   | { readonly kind: 'exit' }
   | { readonly kind: 'page'; readonly delta: number }
@@ -305,7 +422,7 @@ export function keyAction(data: string, editorEmpty: boolean): KeyAction | undef
   // default, so they land here first.
   if (matchesKey(data, 'ctrl+c')) return { kind: 'ctrl-c' };
   if (matchesKey(data, 'ctrl+d')) return { kind: 'exit' };
-  if (matchesKey(data, 'escape')) return { kind: 'cancel' };
+  if (matchesKey(data, 'escape')) return { kind: 'escape' };
   if (matchesKey(data, 'pageUp')) return { kind: 'page', delta: -1 };
   if (matchesKey(data, 'pageDown')) return { kind: 'page', delta: 1 };
   if (!editorEmpty) return undefined;
@@ -895,7 +1012,7 @@ export function startTui(options: StartTuiOptions): Surface {
 
   /** The Ctrl+C hint is transient: any other key, or the window, clears it. */
   let hintTimer: ReturnType<typeof setTimeout> | undefined;
-  let lastCtrlC: number | undefined;
+  let memory: KeyMemory = { lastCtrlC: undefined, exited: false };
   const clearHint = (): void => {
     if (hintTimer !== undefined) {
       clearTimeout(hintTimer);
@@ -905,7 +1022,6 @@ export function startTui(options: StartTuiOptions): Surface {
       status.setHint(undefined);
       tui.requestRender();
     }
-    lastCtrlC = undefined;
   };
   const showHint = (): void => {
     if (hintTimer !== undefined) clearTimeout(hintTimer);
@@ -920,46 +1036,49 @@ export function startTui(options: StartTuiOptions): Surface {
 
   tui.addChild(shell);
   tui.setFocus(editor);
+  const effects: KeyEffects = {
+    sendLine: options.sendLine,
+    exit: options.onExit,
+    clearEditor: (): void => { editor.setText(''); },
+    clearHint,
+    showHint,
+    scroll: (action: KeyAction): boolean => {
+      switch (action.kind) {
+        case 'page':
+          return transcript.page(action.delta);
+        case 'line':
+          return transcript.line(action.delta);
+        case 'top':
+          return transcript.toTop();
+        case 'bottom':
+          return transcript.toBottom();
+        default:
+          return false;
+      }
+    },
+  };
+
   tui.addInputListener((data: string) => {
     const action = keyAction(data, editor.getText() === '');
     if (action === undefined) {
       // A printable key or a release: the hint no longer applies.
-      if (lastCtrlC !== undefined) clearHint();
+      if (memory.lastCtrlC !== undefined) {
+        memory = { ...memory, lastCtrlC: undefined };
+        clearHint();
+      }
       return undefined;
     }
     if (action.kind !== 'ctrl-c') clearHint();
-    switch (action.kind) {
-      case 'cancel':
-        options.sendLine('/cancel');
-        break;
-      case 'ctrl-c': {
-        const next = ctrlCAction({ editorEmpty: editor.getText() === '', now: Date.now(), last: lastCtrlC });
-        if (next === 'clear') {
-          editor.setText('');
-        } else if (next === 'hint') {
-          lastCtrlC = Date.now();
-          showHint();
-        } else {
-          options.onExit();
-        }
-        break;
-      }
-      case 'exit':
-        options.onExit();
-        break;
-      case 'page':
-        if (transcript.page(action.delta)) tui.requestRender();
-        break;
-      case 'line':
-        if (transcript.line(action.delta)) tui.requestRender();
-        break;
-      case 'top':
-        if (transcript.toTop()) tui.requestRender();
-        break;
-      case 'bottom':
-        if (transcript.toBottom()) tui.requestRender();
-        break;
-    }
+    const outcome = surfaceKey(
+      action,
+      memory,
+      { editorEmpty: editor.getText() === '', menuOpen: editor.capturesViewportInput, now: Date.now() },
+      effects,
+    );
+    memory = outcome.memory;
+    if (!outcome.consumed) return undefined;
+    // Esc closes the menu inside the Editor; the surface only redraws its own.
+    tui.requestRender();
     return { consume: true };
   });
 

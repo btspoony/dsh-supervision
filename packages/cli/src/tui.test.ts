@@ -18,11 +18,16 @@ import {
   autocompleteCatalog,
   catalogOf,
   ctrlCAction,
+  escAction,
   fdBinary,
   isLocalExit,
   lineAction,
   providerFor,
+  routeLine,
+  surfaceKey,
   type Catalog,
+  type KeyEffects,
+  type KeyMemory,
 } from './tui.js';
 import {
   FOLLOWING,
@@ -117,8 +122,8 @@ test('an echo status line updates state and turn; prose does not', () => {
 test('keys map to surface actions, arrows only with an empty editor', () => {
   assert.deepEqual(keyAction('\x03', false), { kind: 'ctrl-c' });
   assert.deepEqual(keyAction('\x04', false), { kind: 'exit' });
-  assert.deepEqual(keyAction('\x1b', false), { kind: 'cancel' });
-  assert.deepEqual(keyAction('\x1b', true), { kind: 'cancel' });
+  assert.deepEqual(keyAction('\x1b', false), { kind: 'escape' });
+  assert.deepEqual(keyAction('\x1b', true), { kind: 'escape' });
   assert.deepEqual(keyAction('\x1b[5~', false), { kind: 'page', delta: -1 });
   assert.deepEqual(keyAction('\x1b[6~', false), { kind: 'page', delta: 1 });
   assert.deepEqual(keyAction('\x1b[A', true), { kind: 'line', delta: -1 });
@@ -653,11 +658,8 @@ test('the skill argument completions filter by prefix', async () => {
   const complete = skill?.getArgumentCompletions;
   assert.ok(complete !== undefined, 'a skill entry carries argument completions');
   const all = await complete('');
-  assert.deepEqual(all?.map((item) => item.value), [
-    'skill:use-dsh-sup',
-    'skill:use-dsh-supervision',
-    'skill:grill-me',
-  ]);
+  // The completion fills the argument, so it carries the bare skill name.
+  assert.deepEqual(all?.map((item) => item.value), ['use-dsh-sup', 'use-dsh-supervision', 'grill-me']);
   const narrowed = await complete('use-dsh-sup');
   assert.deepEqual(narrowed?.map((item) => item.label), ['use-dsh-sup', 'use-dsh-supervision']);
   assert.deepEqual(await complete('nope'), []);
@@ -761,4 +763,136 @@ test('the status bar shows the transient hint only while it is set', () => {
   bar.setHint(undefined);
   assert.equal(bar.hasHint(), false);
   assert.doesNotMatch(bar.render(80), /Ctrl\+C again/);
+});
+test('catalog rows with control bytes never reach the menu', async () => {
+  const hostile: Catalog = {
+    skills: [
+      { name: 'safe-skill', description: 'a plain skill' },
+      { name: 'evil\u001b]0;pwned\u0007', description: 'has an OSC in the name' },
+      { name: 'evil\nsplit', description: 'newline in the name' },
+      { name: 'bad-desc', description: 'x\u001b]52;c;aGk=\u0007' },
+    ],
+    commands: [
+      { name: 'safe', description: 'plain command', argumentHint: '<arg>' },
+      { name: 'bad-hint', description: 'plain', argumentHint: '<\u001b[2J>' },
+    ],
+  };
+  const entries = autocompleteCatalog(hostile);
+  assert.deepEqual(entries.map((entry) => entry.name), ['skill:safe-skill', 'safe', 'bad-hint']);
+  // Only the control-free hint survives.
+  assert.equal(entries[2]?.argumentHint, undefined);
+  for (const entry of entries) {
+    assert.equal(entry.name.includes('\u001b'), false);
+    assert.equal((entry.description ?? '').includes('\u001b'), false);
+  }
+
+  const provider = providerFor(hostile, process.cwd());
+  const suggestions = await provider.getSuggestions(['/'], 0, 1, { signal: new AbortController().signal });
+  const rendered = JSON.stringify(suggestions);
+  assert.equal(rendered.includes('\\u001b'), false, 'no escape sequence survives into the menu');
+  assert.equal(rendered.includes('evil'), false, 'unsafe rows are dropped, not rewritten');
+  assert.ok(suggestions?.items.some((item) => item.value === 'skill:safe-skill'));
+});
+
+test('Esc passes through to an open menu and only cancels when it is closed', () => {
+  assert.equal(escAction({ menuOpen: true }), 'pass');
+  assert.equal(escAction({ menuOpen: false }), 'cancel');
+  assert.deepEqual(keyAction('\x1b', true), { kind: 'escape' });
+});
+
+test('the exit commands never reach the socket and exit exactly once', () => {
+  for (const command of ['/q', '/quit', '/exit', '/bye']) {
+    const sent: string[] = [];
+    let exits = 0;
+    routeLine(command, { send: (text) => sent.push(text), exit: () => { exits += 1; } });
+    assert.deepEqual(sent, [], `${command} was forwarded`);
+    assert.equal(exits, 1, `${command} did not exit`);
+  }
+  const sent: string[] = [];
+  let exits = 0;
+  routeLine('hello session', { send: (text) => sent.push(text), exit: () => { exits += 1; } });
+  assert.deepEqual(sent, ['hello session']);
+  assert.equal(exits, 0);
+});
+
+/** Records what the surface key handler did, for the conventions below. */
+function keyHarness(): { effects: KeyEffects; log: string[]; scrolled: string[] } {
+  const log: string[] = [];
+  const scrolled: string[] = [];
+  return {
+    log,
+    scrolled,
+    effects: {
+      sendLine: (text) => log.push(`send:${text}`),
+      exit: () => log.push('exit'),
+      clearEditor: () => log.push('clear'),
+      clearHint: () => log.push('hint:off'),
+      showHint: () => log.push('hint:on'),
+      scroll: (action) => {
+        scrolled.push(action.kind);
+        return true;
+      },
+    },
+  };
+}
+
+test('a second Ctrl+C inside the window exits exactly once', () => {
+  const harness = keyHarness();
+  let memory: KeyMemory = { lastCtrlC: undefined, exited: false };
+  const press = (now: number): void => {
+    const outcome = surfaceKey(
+      { kind: 'ctrl-c' },
+      memory,
+      { editorEmpty: true, menuOpen: false, now },
+      harness.effects,
+    );
+    assert.equal(outcome.consumed, true);
+    memory = outcome.memory;
+  };
+  press(1000);
+  assert.deepEqual(harness.log, ['hint:on'], 'the first press only hints');
+  press(1900);
+  assert.deepEqual(harness.log, ['hint:on', 'exit'], 'the second press exits');
+  press(2000);
+  press(2100);
+  assert.equal(harness.log.filter((entry) => entry === 'exit').length, 1, 'no double exit');
+});
+
+test('Esc cancels once with the menu closed and never with it open', () => {
+  const closed = keyHarness();
+  const cancelled = surfaceKey(
+    { kind: 'escape' },
+    { lastCtrlC: undefined, exited: false },
+    { editorEmpty: true, menuOpen: false, now: 0 },
+    closed.effects,
+  );
+  assert.equal(cancelled.consumed, true);
+  assert.deepEqual(closed.log, ['send:/cancel']);
+  assert.equal(
+    closed.log.filter((entry) => entry === 'send:/cancel').length,
+    1,
+    'exactly one /cancel',
+  );
+
+  const open = keyHarness();
+  const passed = surfaceKey(
+    { kind: 'escape' },
+    { lastCtrlC: undefined, exited: false },
+    { editorEmpty: true, menuOpen: true, now: 0 },
+    open.effects,
+  );
+  assert.equal(passed.consumed, false, 'the Editor gets the key');
+  assert.deepEqual(open.log, [], 'no turn interaction while the menu is open');
+});
+
+test('Ctrl+C clears typed text instead of touching the turn', () => {
+  const harness = keyHarness();
+  const outcome = surfaceKey(
+    { kind: 'ctrl-c' },
+    { lastCtrlC: undefined, exited: false },
+    { editorEmpty: false, menuOpen: false, now: 500 },
+    harness.effects,
+  );
+  assert.deepEqual(harness.log, ['clear', 'hint:off']);
+  assert.equal(outcome.memory.lastCtrlC, undefined, 'clearing does not start the exit window');
 });
