@@ -58,6 +58,13 @@ forwarded stays in the transcript, so scrolling back reaches the whole attach. T
 surface takes over the alternate screen; terminal scrollback is not written, and
 the last frame returns to the normal screen on exit.
 
+The surface is themed so input and output are distinguishable: the operator's line
+is a tinted `❯` block, assistant prose renders as Markdown (headings, lists,
+inline code, bordered fences), tool calls are coloured status rows with a dim
+detail line, system/echo lines are dim, the status bar is a reverse-video row, and
+the editor is framed in the accent colour. `NO_COLOR`, a non-terminal stdout or
+`TERM=dumb` keeps the layout and drops the colour.
+
 | Key | Effect |
 |---|---|
 | `Enter` | send the editor's text as one operator line |

@@ -8,19 +8,24 @@
  */
 
 import {
+  Box,
   Editor,
+  Markdown,
   ProcessTerminal,
+  Spacer,
   TuiAltScreen,
   getKeybindings,
   isKeyRelease,
   matchesKey,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
   type Component,
   type EditorTheme,
   type Terminal,
 } from '@earendil-works/pi-tui';
-import { isProgramState, renderMirror, type MirrorItem, type ProgramState } from 'dsh-supervision-protocol';
+import { isProgramState, stripControls, type MirrorItem, type ProgramState } from 'dsh-supervision-protocol';
+import { PLAIN, markdownTheme, themeFor, type Theme, type Token } from './theme.js';
 
 /** Everything the status line knows; every field but `session` updates later. */
 export interface Status {
@@ -176,30 +181,65 @@ export function keyAction(data: string, editorEmpty: boolean): KeyAction | undef
   return undefined;
 }
 
-export const THEME: EditorTheme = {
-  borderColor: (text: string): string => text,
-  selectList: {
-    selectedPrefix: (text: string): string => text,
-    selectedText: (text: string): string => text,
-    description: (text: string): string => text,
-    scrollInfo: (text: string): string => text,
-    noMatch: (text: string): string => text,
-  },
-};
+/**
+ * The editor frame in one theme: the accent border marks where typing goes, so
+ * input reads as a different region from the transcript above it.
+ * @param theme - the surface's theme.
+ */
+export function editorTheme(theme: Theme): EditorTheme {
+  return {
+    borderColor: (text: string): string => theme.fg('accent', text),
+    selectList: {
+      selectedPrefix: (text: string): string => theme.fg('accent', text),
+      selectedText: (text: string): string => theme.bold(text),
+      description: (text: string): string => theme.dim(text),
+      scrollInfo: (text: string): string => theme.dim(text),
+      noMatch: (text: string): string => theme.dim(text),
+    },
+  };
+}
 
-/** Session, state and turn, on one line above the editor. */
+/** The plain editor frame, for callers that build a shell without a terminal. */
+export const THEME: EditorTheme = editorTheme(PLAIN);
+
+/** The colour a state segment carries inside the bar. */
+function stateToken(state: ProgramState): Token {
+  switch (state) {
+    case 'working':
+      return 'accent';
+    case 'done':
+      return 'success';
+    case 'blocked':
+      return 'warning';
+    case 'error':
+      return 'error';
+    case 'idle':
+      return 'muted';
+  }
+}
+
+/** Session, state and turn, on one reverse-video bar above the editor. */
 export class StatusLine {
   private status: Status = {};
+  private readonly theme: Theme;
+
+  constructor(theme: Theme = PLAIN) {
+    this.theme = theme;
+  }
 
   set(next: Status): void {
     this.status = { ...this.status, ...next };
   }
 
   render(width: number): string {
+    const w = Math.max(1, Math.floor(width));
     const parts = [this.status.session ?? 'dsh-sup'];
-    if (this.status.state !== undefined) parts.push(this.status.state);
+    if (this.status.state !== undefined) parts.push(this.theme.fg(stateToken(this.status.state), this.status.state));
     if (this.status.turn !== undefined) parts.push(`turn ${String(this.status.turn)}`);
-    return truncateToWidth(parts.join(' · '), width);
+    const text = parts.join(' · ');
+    // The bar owns the whole row: pad first, then invert across the width.
+    const padded = text + ' '.repeat(Math.max(0, w - visibleWidth(text)));
+    return truncateToWidth(this.theme.bar(padded), w);
   }
 }
 
@@ -220,21 +260,20 @@ export class TranscriptView implements Component {
   private readonly wrapEntry: (entry: MirrorItem | string, width: number) => string[];
 
   /**
-   * @param wrapEntry - one entry's lines; injectable so a test can count calls.
-   * @param width - the width to wrap at until a render names the real one.
+   * @param options - entry renderer injection (for call-counting tests), the
+   *   wrap width before the first render, and the theme the entries draw with.
    */
-  constructor(
-    wrapEntry: (entry: MirrorItem | string, width: number) => string[] = renderEntry,
-    width = 80,
-  ) {
-    this.wrapEntry = wrapEntry;
-    this.width = Math.max(1, Math.floor(width));
+  constructor(options: TranscriptOptions = {}) {
+    const theme = options.theme ?? PLAIN;
+    this.width = Math.max(1, Math.floor(options.width ?? 80));
+    this.wrapEntry = options.wrapEntry ?? ((entry, width) => renderEntry(entry, width, theme));
   }
 
   push(entry: MirrorItem | string): void {
+    const block = this.block(this.entries.length, entry);
     this.entries.push(entry);
     // Only the new entry is wrapped; the history stays as the last frame left it.
-    append(this.flat, this.wrapEntry(entry, this.width));
+    append(this.flat, block);
     this.scrollState = afterAppend(this.scrollState, 1, this.flat.length, this.height);
   }
 
@@ -286,13 +325,168 @@ export class TranscriptView implements Component {
   private rewrap(width: number): void {
     this.width = width;
     this.flat = [];
-    for (const entry of this.entries) append(this.flat, this.wrapEntry(entry, width));
+    for (const [index, entry] of this.entries.entries()) append(this.flat, this.block(index, entry));
+  }
+
+  /**
+   * A block entry is separated from what precedes it, so a reply never starts
+   * flush against the previous one; echo lines stay dense.
+   */
+  private block(index: number, entry: MirrorItem | string): string[] {
+    const lines = this.wrapEntry(entry, this.width);
+    if (index === 0 || typeof entry === 'string' || lines.length === 0) return lines;
+    return [...SPACER.render(this.width), ...lines];
   }
 }
 
-/** One entry's lines at a width; the only place an entry is rendered. */
-function renderEntry(entry: MirrorItem | string, width: number): string[] {
-  return fitLines(typeof entry === 'string' ? entry : renderMirror(entry, width), width);
+/** A blank row between block entries; one shared instance is enough. */
+const SPACER = new Spacer(1);
+
+/** Prefixes a child's first line with a mark, keeping the child inside `width`. */
+class Gutter implements Component {
+  private readonly child: Component;
+  private readonly mark: string;
+
+  constructor(child: Component, mark: string) {
+    this.child = child;
+    this.mark = mark;
+  }
+
+  render(width: number): string[] {
+    const w = Math.max(1, Math.floor(width));
+    const markWidth = Math.min(visibleWidth(this.mark), Math.max(0, w - 1));
+    if (markWidth === 0) return this.child.render(w);
+    const mark = truncateToWidth(this.mark, markWidth);
+    const blank = ' '.repeat(markWidth);
+    const inner = this.child.render(w - markWidth);
+    if (inner.length === 0) return [mark];
+    return inner.map((line, index) => `${index === 0 ? mark : blank}${line}`);
+  }
+
+  invalidate(): void {
+    this.child.invalidate();
+  }
+}
+
+/**
+ * The user's own line: a tinted block with a gutter, so the thing a person
+ * typed never reads like model output.
+ */
+function userEntry(text: string, width: number, theme: Theme): string[] {
+  const bg = (line: string): string => theme.bg('userBg', line);
+  const body = new Markdown(stripControls(text, '\n\t'), 0, 0, markdownTheme(theme), {
+    color: (line: string): string => theme.fg('userFg', line),
+    bgColor: bg,
+  });
+  const box = new Box(1, 0, bg);
+  box.addChild(new Gutter(body, theme.fg('accent', '❯ ')));
+  return box.render(width);
+}
+
+/** Thousands separated, so a large step reads at a glance. */
+function count(value: number): string {
+  return value.toLocaleString('en-US');
+}
+
+/** The token usage footer: dim, right-aligned, the same content as before. */
+function usageLine(
+  usage: { readonly inputTokens: number; readonly outputTokens: number; readonly cacheReadTokens?: number },
+  width: number,
+  theme: Theme,
+): string {
+  const cache = usage.cacheReadTokens;
+  const text = `⟦↑${count(usage.inputTokens)} ↓${count(usage.outputTokens)}${cache === undefined ? '' : ` R${count(cache)}`}⟧`;
+  return theme.dim(' '.repeat(Math.max(0, width - visibleWidth(text))) + text);
+}
+
+/** Assistant prose: dim reasoning, markdown body, dim usage footer. */
+function assistantEntry(item: Extract<MirrorItem, { k: 'assistant' }>, width: number, theme: Theme): string[] {
+  const lines: string[] = [];
+  const reasoning = stripControls(item.reasoning ?? '', '\n\t').split('\n')[0]?.trim() ?? '';
+  if (reasoning !== '') lines.push(...fitLines(theme.dim(`· ${reasoning}`), width));
+  const text = stripControls(item.text ?? '', '\n\t');
+  if (text.trim() !== '') lines.push(...new Markdown(text, 0, 0, markdownTheme(theme)).render(width));
+  if (item.interrupted === true) {
+    const last = lines.length - 1;
+    if (last === -1) lines.push(theme.dim('(interrupted)'));
+    else lines[last] = `${(lines[last] ?? '').trimEnd()}${theme.dim(' (interrupted)')}`;
+  }
+  if (item.usage !== undefined) lines.push(usageLine(item.usage, width, theme));
+  return lines;
+}
+
+/** Argument keys worth one status line, in the order a reader wants them. */
+const SUMMARY_KEYS = ['description', 'command', 'path', 'query', 'pattern'] as const;
+
+/** The first useful argument a tool call carries, or the head of the raw args. */
+function summarize(args: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(args);
+  } catch {
+    parsed = undefined;
+  }
+  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    const record = parsed as Record<string, unknown>;
+    for (const key of SUMMARY_KEYS) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim() !== '') return value.split('\n')[0]?.trim() ?? '';
+    }
+  }
+  return args.split('\n')[0]?.trim() ?? '';
+}
+
+/** A tool call: a coloured status band, then the dim detail line. */
+function toolEntry(item: Extract<MirrorItem, { k: 'tool' }>, width: number, theme: Theme): string[] {
+  const look: { readonly glyph: string; readonly token: Token; readonly bg: Token } =
+    item.state === 'start'
+      ? { glyph: '⏳', token: 'warning', bg: 'toolBgPending' }
+      : item.state === 'ok'
+        ? { glyph: '✔', token: 'success', bg: 'toolBgOk' }
+        : { glyph: '✘', token: 'error', bg: 'toolBgError' };
+  const name = stripControls(item.name);
+  const summary = summarize(stripControls(item.args, '\n\t'));
+  const meta = item.state !== 'start' && item.ms !== undefined ? ` ⟦${String(item.ms)}ms⟧` : '';
+  const head = `${theme.fg(look.token, look.glyph)} ${theme.bold(name)}${summary === '' ? '' : theme.dim(`: ${summary}`)}${meta === '' ? '' : theme.dim(meta)}`;
+  const lines = [theme.bg(look.bg, head + ' '.repeat(Math.max(0, width - visibleWidth(head))))];
+  const detail = stripControls(item.detail ?? '', '\n\t').split('\n')[0]?.trim() ?? '';
+  if (detail !== '') lines.push(...fitLines(theme.dim(`  └─ ${detail}`), width));
+  return lines;
+}
+
+/** An echo or other system line: dim, and small enough to stay dense. */
+function systemEntry(text: string, width: number, theme: Theme): string[] {
+  return fitLines(text, width).map((line) => theme.dim(line));
+}
+
+/**
+ * One entry's lines at a width, fully styled: user block, assistant markdown,
+ * tool band or dim system line.
+ * @param entry - a mirror item, or an echo line (a string).
+ * @param width - the viewport width; every line is truncated to it.
+ * @param theme - the surface theme; plain by default, so output stays byte-clean.
+ */
+export function renderEntry(entry: MirrorItem | string, width: number, theme: Theme = PLAIN): string[] {
+  const w = Math.max(1, Math.floor(width));
+  const lines =
+    typeof entry === 'string'
+      ? systemEntry(entry, w, theme)
+      : entry.k === 'user'
+        ? userEntry(entry.text, w, theme)
+        : entry.k === 'assistant'
+          ? assistantEntry(entry, w, theme)
+          : toolEntry(entry, w, theme);
+  return lines.map((line) => truncateToWidth(line, w));
+}
+
+/** Entry renderer injection for tests plus the drawing options. */
+export interface TranscriptOptions {
+  /** Width entries wrap at until a render names the real one. */
+  readonly width?: number;
+  /** The theme entries draw with; plain when omitted. */
+  readonly theme?: Theme;
+  /** Replaces the themed renderer, e.g. to count calls without a terminal. */
+  readonly wrapEntry?: (entry: MirrorItem | string, width: number) => string[];
 }
 
 /** Appends in place; a spread would give a huge block one call frame per line. */
@@ -408,9 +602,10 @@ export function startTui(options: StartTuiOptions): Surface {
   // scrollback while attached. Mouse capture stays off — the plan has no mouse
   // support, and leaving it on would steal the terminal's own selection.
   const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
-  const transcript = new TranscriptView();
-  const status = new StatusLine();
-  const editor = new Editor(tui, THEME);
+  const theme = themeFor();
+  const transcript = new TranscriptView({ theme });
+  const status = new StatusLine(theme);
+  const editor = new Editor(tui, editorTheme(theme));
   const shell = new Shell(terminal, transcript, editor, status, options.width ?? 80);
 
   editor.onSubmit = (text: string): void => {

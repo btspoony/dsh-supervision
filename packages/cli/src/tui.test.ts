@@ -7,13 +7,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { renderMirror } from 'dsh-supervision-protocol';
+import { PLAIN, createTheme } from './theme.js';
 import {
   FOLLOWING,
   Shell,
   StatusLine,
   THEME,
   TranscriptView,
+  editorTheme,
   oscStatus,
+  renderEntry,
   afterAppend,
   chooseSurface,
   echoStatus,
@@ -177,9 +180,11 @@ test('a rendered mirror item never exceeds the viewport width', () => {
 });
 test('an append wraps only the new entry; a width change rebuilds all', () => {
   const calls: string[] = [];
-  const view = new TranscriptView((entry, width) => {
-    calls.push(typeof entry === 'string' ? entry : 'item');
-    return fitLines(typeof entry === 'string' ? entry : renderMirror(entry, width), width);
+  const view = new TranscriptView({
+    wrapEntry: (entry, width) => {
+      calls.push(typeof entry === 'string' ? entry : 'item');
+      return fitLines(typeof entry === 'string' ? entry : renderMirror(entry, width), width);
+    },
   });
   view.height = 4;
   view.push('alpha');
@@ -385,4 +390,117 @@ test('an OSC 7501 root record advances the status; a child record does not', () 
   if (echoed !== undefined) status.set(echoed);
   assert.match(status.render(80), /idle/);
   assert.match(status.render(80), /turn 4/);
+});
+test('user, assistant, tool and system entries are visually distinct', () => {
+  const color = createTheme({ color: true });
+  const user = renderEntry({ k: 'user', text: 'hello **there**' }, 40, color).join('\n');
+  assert.match(user, /48;5;236/, 'the user block is tinted');
+  assert.match(user, /❯/, 'the user block carries a gutter');
+  assert.match(user, /38;5;252/, 'the user text keeps its own foreground');
+
+  const assistant = renderEntry(
+    {
+      k: 'assistant',
+      turn: 1,
+      text: '# Title\n\n- item\n\n`inline`\n\n```ts\nconst x = 1;\n```',
+    },
+    40,
+    color,
+  ).join('\n');
+  assert.match(assistant, /\x1b\[1m[^\n]*38;5;39|38;5;39[^\n]*\x1b\[1m/, 'the heading is bold accent');
+  assert.match(assistant, /38;5;73/, 'inline code has its own colour');
+  assert.match(assistant, /38;5;240/, 'the fence border is dim');
+  assert.match(assistant, /\`\`\`ts/, 'the fenced block keeps its language marker');
+  assert.match(assistant, /- item|38;5;39m- /, 'the list bullet is present and accented');
+
+  const tool = renderEntry(
+    { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'src', ms: 12, turn: 1 },
+    40,
+    color,
+  ).join('\n');
+  assert.match(tool, /✔/);
+  assert.match(tool, /38;5;40/, 'a successful tool call is green');
+  assert.match(tool, /48;5;22/, 'a successful tool call has its own band');
+  assert.match(tool, /└─ src/, 'the detail line keeps its gutter');
+
+  const failure = renderEntry(
+    { k: 'tool', callId: 'c2', name: 'bash', args: '{}', state: 'error', turn: 1 },
+    40,
+    color,
+  ).join('\n');
+  assert.match(failure, /✘/);
+  assert.match(failure, /38;5;203/, 'a failed tool call is red');
+
+  const system = renderEntry('[turn 1] working', 40, color).join('\n');
+  assert.match(system, /\x1b\[2m/, 'system lines are dim');
+});
+
+test('the plain theme renders the whole surface without escape bytes', () => {
+  const blocks = [
+    renderEntry({ k: 'user', text: 'hello' }, 40, PLAIN),
+    renderEntry({ k: 'assistant', turn: 1, reasoning: 'why', text: '# T\n\n- x', usage: { inputTokens: 1, outputTokens: 2 } }, 40, PLAIN),
+    renderEntry({ k: 'tool', callId: 'c', name: 'bash', args: '{"command":"ls"}', state: 'start', turn: 1 }, 40, PLAIN),
+    renderEntry('echo line', 40, PLAIN),
+    new StatusLine(PLAIN).render(40),
+    editorTheme(PLAIN).borderColor('────'),
+  ];
+  for (const block of blocks) {
+    const lines = typeof block === 'string' ? [block] : block;
+    for (const line of lines) assert.equal(line.includes('\x1b'), false, `plain output kept an escape: ${JSON.stringify(line)}`);
+  }
+});
+
+test('the status bar owns its row and colour-codes the state', () => {
+  const color = createTheme({ color: true });
+  const bar = new StatusLine(color);
+  bar.set({ session: 'session-pty', state: 'blocked', turn: 3 });
+  const rendered = bar.render(40);
+  assert.equal(visibleWidth(rendered), 40, 'the bar fills the width');
+  assert.match(rendered, /\x1b\[7m/, 'the bar is reverse video');
+  assert.match(rendered, /38;5;214/, 'blocked is the warning colour');
+  assert.match(rendered, /session-pty/);
+  assert.match(rendered, /turn 3/);
+  for (const state of ['working', 'done', 'blocked', 'error', 'idle'] as const) {
+    const line = new StatusLine(createTheme({ color: true }));
+    line.set({ session: 's', state });
+    assert.ok(line.render(20).includes('\x1b['), `${state} is colour-coded`);
+  }
+});
+
+test('the editor frame is accent-coloured with colour and plain without', () => {
+  assert.match(editorTheme(createTheme({ color: true })).borderColor('─'), /38;5;39/);
+  assert.equal(editorTheme(PLAIN).borderColor('─'), '─');
+});
+
+test('every entry kind fits widths 40, 10 and 1', () => {
+  const entries = [
+    { k: 'user', text: 'hello there, this is a longer line of operator input' },
+    { k: 'assistant', turn: 1, reasoning: 'thinking', text: '# Title\n\n- one\n- two\n\n`code`\n\n```ts\nconst x = 1;\n```', usage: { inputTokens: 1234, outputTokens: 56 } },
+    { k: 'tool', callId: 'c', name: 'bash', args: '{"command":"ls -la"}', state: 'ok', detail: 'packages/protocol/src', ms: 12, turn: 1 },
+    'echo line that is long enough to wrap at a narrow width',
+  ] as const;
+  for (const width of [40, 10, 1]) {
+    for (const entry of entries) {
+      for (const line of renderEntry(entry, width, PLAIN)) {
+        assert.ok(visibleWidth(line) <= width, `width ${String(width)}: ${JSON.stringify(line)} overflows`);
+      }
+    }
+  }
+});
+
+test('block entries are separated; echo lines stay dense', () => {
+  const view = new TranscriptView({ width: 20 });
+  view.height = 12;
+  view.push({ k: 'user', text: 'hello' });
+  view.push({ k: 'assistant', turn: 1, text: 'reply' });
+  view.push('echo one');
+  view.push('echo two');
+  const lines = view.render(20).map((line) => line.trimEnd());
+  const userAt = lines.findIndex((line) => line.includes('❯'));
+  const replyAt = lines.findIndex((line) => line === 'reply');
+  const echoOneAt = lines.findIndex((line) => line === 'echo one');
+  const echoTwoAt = lines.findIndex((line) => line === 'echo two');
+  assert.ok(userAt >= 0 && replyAt > userAt && echoOneAt > replyAt && echoTwoAt === echoOneAt + 1);
+  assert.equal(lines[replyAt - 1], '', 'a block entry is preceded by one blank row');
+  assert.notEqual(lines[echoOneAt - 1], '', 'echo lines are not spread apart');
 });

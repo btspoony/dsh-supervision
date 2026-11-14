@@ -89,6 +89,16 @@ Scrolled back, the last row shows `↓ N new` for the entries that arrived
 meanwhile, and scrolling to the bottom resumes following the live transcript.
 The surface is drawn with [`@earendil-works/pi-tui`](https://github.com/earendil-works/pi).
 
+The surface is themed, so input and output are distinguishable at a glance: the
+operator's line is a tinted block behind a `❯` gutter, assistant prose renders as
+Markdown (headings, lists, inline code, fenced blocks with a border), tool calls
+are coloured status rows (`⏳` pending, `✔` ok, `✘` failed) with a dim detail
+line, system and echo lines are dim, the status bar is a reverse-video row with a
+colour-coded state, and the editor is framed in the accent colour. `NO_COLOR`, a
+non-terminal stdout, or `TERM=dumb` keeps the same layout with no colour, so
+captured output stays clean. Themes change how those lines look, never the keys
+in the table above or the bytes a redirected stdout receives.
+
 `--no-tui` keeps the append-only line surface on a terminal; a redirected
 stdout always gets that line surface, so `dsh-sup … | tee log` stays
 machine-clean.
