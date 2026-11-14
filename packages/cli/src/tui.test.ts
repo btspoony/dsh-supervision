@@ -488,6 +488,73 @@ test('every entry kind fits widths 40, 10 and 1', () => {
   }
 });
 
+test('a user entry keeps its text down to one column', () => {
+  for (const theme of [PLAIN, createTheme({ color: true })]) {
+    for (const width of [1, 3, 10, 40]) {
+      const lines = renderEntry({ k: 'user', text: 'hello' }, width, theme);
+      const joined = lines.join('\n');
+      const label = theme.color ? 'colour' : 'plain';
+      assert.ok(joined.includes('h'), `${label} width ${String(width)} lost the text: ${JSON.stringify(lines)}`);
+      assert.doesNotMatch(joined, /…/u, `${label} width ${String(width)} substituted an ellipsis`);
+      for (const line of lines) {
+        assert.ok(visibleWidth(line) <= width, `${label} width ${String(width)}: ${JSON.stringify(line)} overflows`);
+      }
+    }
+  }
+});
+
+test('widths 1, 3, 10 and 40 keep every entry readable and inside the viewport', () => {
+  const entries = [
+    { k: 'user', text: 'operator input' },
+    { k: 'assistant', turn: 1, text: 'Reply text with a long tail ' + 'x'.repeat(120), interrupted: true },
+    { k: 'tool', callId: 'c', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'packages/cli/src', ms: 4, turn: 1 },
+  ] as const;
+  for (const theme of [PLAIN, createTheme({ color: true })]) {
+    for (const width of [1, 3, 10, 40]) {
+      for (const entry of entries) {
+        const lines = renderEntry(entry, width, theme);
+        const joined = lines.join('\n');
+        for (const line of lines) {
+          assert.ok(visibleWidth(line) <= width, `width ${String(width)}: ${JSON.stringify(line)} overflows`);
+        }
+        if (entry.k === 'user') assert.ok(joined.includes('o'), 'user text survives');
+        if (entry.k === 'assistant') {
+          assert.ok(joined.includes('R'), 'assistant text survives');
+          // The marker is 13 columns, so only a row that wide can show it.
+          if (width === 40) assert.ok(joined.includes('(interrupted)'), 'the marker survives');
+        }
+        if (entry.k === 'tool') assert.ok(joined.includes('✔'), 'the tool glyph survives');
+      }
+    }
+  }
+});
+
+test('the plain path emits no ESC or OSC bytes for links and overlong lines', () => {
+  const entries = [
+    { k: 'user', text: '[docs](https://example.com/page) ' + 'x'.repeat(200) },
+    { k: 'assistant', turn: 1, text: 'See [the docs](https://example.com/x) and ' + 'y'.repeat(200) },
+    'echo ' + 'z'.repeat(200),
+    { k: 'tool', callId: 'c', name: 'bash', args: '{"command":"' + 'w'.repeat(200) + '"}', state: 'ok', detail: 'd'.repeat(200), turn: 1 },
+  ] as const;
+  for (const width of [40, 10, 3, 1]) {
+    for (const entry of entries) {
+      for (const line of renderEntry(entry, width, PLAIN)) {
+        assert.equal(line.includes('\x1b'), false, `plain width ${String(width)} kept an escape: ${JSON.stringify(line)}`);
+        assert.ok(visibleWidth(line) <= width, `plain width ${String(width)}: ${JSON.stringify(line)} overflows`);
+      }
+    }
+  }
+});
+
+test('an interrupted reply keeps both its body and the marker at full width', () => {
+  const body = 'x'.repeat(40);
+  for (const theme of [PLAIN, createTheme({ color: true })]) {
+    const joined = renderEntry({ k: 'assistant', turn: 1, text: body, interrupted: true }, 40, theme).join('\n');
+    assert.ok(joined.includes(body), 'the full-width body survives');
+    assert.ok(joined.includes('(interrupted)'), 'the marker gets its own line');
+  }
+});
+
 test('block entries are separated; echo lines stay dense', () => {
   const view = new TranscriptView({ width: 20 });
   view.height = 12;

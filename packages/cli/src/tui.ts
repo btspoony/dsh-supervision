@@ -17,6 +17,7 @@ import {
   getKeybindings,
   isKeyRelease,
   matchesKey,
+  sliceByColumn,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -239,7 +240,7 @@ export class StatusLine {
     const text = parts.join(' · ');
     // The bar owns the whole row: pad first, then invert across the width.
     const padded = text + ' '.repeat(Math.max(0, w - visibleWidth(text)));
-    return truncateToWidth(this.theme.bar(padded), w);
+    return this.theme.color ? clipStyled(this.theme.bar(padded), w) : truncatePlain(padded, w);
   }
 }
 
@@ -354,9 +355,10 @@ class Gutter implements Component {
 
   render(width: number): string[] {
     const w = Math.max(1, Math.floor(width));
-    const markWidth = Math.min(visibleWidth(this.mark), Math.max(0, w - 1));
-    if (markWidth === 0) return this.child.render(w);
-    const mark = truncateToWidth(this.mark, markWidth);
+    const markWidth = visibleWidth(this.mark);
+    // Below the mark's own width there is no room for a gutter; the text wins.
+    if (markWidth === 0 || markWidth >= w) return this.child.render(w);
+    const mark = this.mark;
     const blank = ' '.repeat(markWidth);
     const inner = this.child.render(w - markWidth);
     if (inner.length === 0) return [mark];
@@ -378,7 +380,9 @@ function userEntry(text: string, width: number, theme: Theme): string[] {
     color: (line: string): string => theme.fg('userFg', line),
     bgColor: bg,
   });
-  const box = new Box(1, 0, bg);
+  // Padding is a luxury the narrowest terminals cannot afford: one column of
+  // padding on both sides of a 1-column viewport would leave no text at all.
+  const box = new Box(width >= 3 ? 1 : 0, 0, bg);
   box.addChild(new Gutter(body, theme.fg('accent', '❯ ')));
   return box.render(width);
 }
@@ -388,15 +392,28 @@ function count(value: number): string {
   return value.toLocaleString('en-US');
 }
 
+/** The usage footer's text, shared by both rendering paths. */
+function usageText(usage: {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens?: number;
+}): string {
+  const cache = usage.cacheReadTokens;
+  return `⟦↑${count(usage.inputTokens)} ↓${count(usage.outputTokens)}${cache === undefined ? '' : ` R${count(cache)}`}⟧`;
+}
+
+/** Right-aligns one plain line; a line wider than the row is left alone. */
+function rightAlign(text: string, width: number): string {
+  return ' '.repeat(Math.max(0, width - visibleWidth(text))) + text;
+}
+
 /** The token usage footer: dim, right-aligned, the same content as before. */
 function usageLine(
   usage: { readonly inputTokens: number; readonly outputTokens: number; readonly cacheReadTokens?: number },
   width: number,
   theme: Theme,
 ): string {
-  const cache = usage.cacheReadTokens;
-  const text = `⟦↑${count(usage.inputTokens)} ↓${count(usage.outputTokens)}${cache === undefined ? '' : ` R${count(cache)}`}⟧`;
-  return theme.dim(' '.repeat(Math.max(0, width - visibleWidth(text))) + text);
+  return theme.dim(rightAlign(usageText(usage), width));
 }
 
 /** Assistant prose: dim reasoning, markdown body, dim usage footer. */
@@ -406,11 +423,8 @@ function assistantEntry(item: Extract<MirrorItem, { k: 'assistant' }>, width: nu
   if (reasoning !== '') lines.push(...fitLines(theme.dim(`· ${reasoning}`), width));
   const text = stripControls(item.text ?? '', '\n\t');
   if (text.trim() !== '') lines.push(...new Markdown(text, 0, 0, markdownTheme(theme)).render(width));
-  if (item.interrupted === true) {
-    const last = lines.length - 1;
-    if (last === -1) lines.push(theme.dim('(interrupted)'));
-    else lines[last] = `${(lines[last] ?? '').trimEnd()}${theme.dim(' (interrupted)')}`;
-  }
+  // Its own line: appending to a full-width body line would truncate the marker.
+  if (item.interrupted === true) lines.push(theme.dim('(interrupted)'));
   if (item.usage !== undefined) lines.push(usageLine(item.usage, width, theme));
   return lines;
 }
@@ -436,27 +450,122 @@ function summarize(args: string): string {
   return args.split('\n')[0]?.trim() ?? '';
 }
 
+/** The pieces of one tool call, shared by both rendering paths. */
+interface ToolParts {
+  readonly glyph: string;
+  readonly token: Token;
+  readonly bg: Token;
+  readonly name: string;
+  readonly summary: string;
+  readonly meta: string;
+  readonly detail: string;
+}
+
+function toolParts(item: Extract<MirrorItem, { k: 'tool' }>): ToolParts {
+  const look =
+    item.state === 'start'
+      ? { glyph: '⏳', token: 'warning' as const, bg: 'toolBgPending' as const }
+      : item.state === 'ok'
+        ? { glyph: '✔', token: 'success' as const, bg: 'toolBgOk' as const }
+        : { glyph: '✘', token: 'error' as const, bg: 'toolBgError' as const };
+  return {
+    ...look,
+    name: stripControls(item.name),
+    summary: summarize(stripControls(item.args, '\n\t')),
+    meta: item.state !== 'start' && item.ms !== undefined ? ` ⟦${String(item.ms)}ms⟧` : '',
+    detail: stripControls(item.detail ?? '', '\n\t').split('\n')[0]?.trim() ?? '',
+  };
+}
+
 /** A tool call: a coloured status band, then the dim detail line. */
 function toolEntry(item: Extract<MirrorItem, { k: 'tool' }>, width: number, theme: Theme): string[] {
-  const look: { readonly glyph: string; readonly token: Token; readonly bg: Token } =
-    item.state === 'start'
-      ? { glyph: '⏳', token: 'warning', bg: 'toolBgPending' }
-      : item.state === 'ok'
-        ? { glyph: '✔', token: 'success', bg: 'toolBgOk' }
-        : { glyph: '✘', token: 'error', bg: 'toolBgError' };
-  const name = stripControls(item.name);
-  const summary = summarize(stripControls(item.args, '\n\t'));
-  const meta = item.state !== 'start' && item.ms !== undefined ? ` ⟦${String(item.ms)}ms⟧` : '';
-  const head = `${theme.fg(look.token, look.glyph)} ${theme.bold(name)}${summary === '' ? '' : theme.dim(`: ${summary}`)}${meta === '' ? '' : theme.dim(meta)}`;
-  const lines = [theme.bg(look.bg, head + ' '.repeat(Math.max(0, width - visibleWidth(head))))];
-  const detail = stripControls(item.detail ?? '', '\n\t').split('\n')[0]?.trim() ?? '';
-  if (detail !== '') lines.push(...fitLines(theme.dim(`  └─ ${detail}`), width));
+  const parts = toolParts(item);
+  const head = `${theme.fg(parts.token, parts.glyph)} ${theme.bold(parts.name)}${parts.summary === '' ? '' : theme.dim(`: ${parts.summary}`)}${parts.meta === '' ? '' : theme.dim(parts.meta)}`;
+  const headWidth = visibleWidth(head);
+  const fitted = headWidth > width ? sliceByColumn(head, 0, width) : head;
+  const lines = [theme.bg(parts.bg, fitted + ' '.repeat(Math.max(0, width - Math.min(headWidth, width))))];
+  if (parts.detail !== '') lines.push(...fitLines(theme.dim(`  └─ ${parts.detail}`), width));
   return lines;
 }
 
 /** An echo or other system line: dim, and small enough to stay dense. */
 function systemEntry(text: string, width: number, theme: Theme): string[] {
   return fitLines(text, width).map((line) => theme.dim(line));
+}
+
+/**
+ * Wraps plain text to `width` columns. `wrapTextWithAnsi` only preserves escape
+ * sequences, so plain input comes back plain — which the ANSI-aware truncation
+ * helper below does not: its truncating branch appends a reset.
+ */
+function wrapPlain(text: string, width: number): string[] {
+  const w = Math.max(1, Math.floor(width));
+  const lines: string[] = [];
+  for (const source of text.split('\n')) {
+    const wrapped = wrapTextWithAnsi(source, w);
+    if (wrapped.length === 0) lines.push('');
+    else lines.push(...wrapped);
+  }
+  return lines;
+}
+
+/**
+ * Fits a styled line to `width` by slicing visible columns. `truncateToWidth`
+ * replaces an overflowing line with an ellipsis, which loses the content; a
+ * slice keeps it and appends one reset for whatever style was still open.
+ */
+function clipStyled(line: string, width: number): string {
+  if (visibleWidth(line) <= width) return line;
+  return `${sliceByColumn(line, 0, width)}\x1b[0m`;
+}
+
+/** Truncates to `width` visible columns by code point; adds no escape sequence. */
+function truncatePlain(line: string, width: number): string {
+  const w = Math.max(1, Math.floor(width));
+  if (visibleWidth(line) <= w) return line;
+  let out = '';
+  for (const char of line) {
+    if (visibleWidth(out + char) > w) break;
+    out += char;
+  }
+  return out;
+}
+
+/**
+ * The plain-theme renderer: same information as the coloured blocks, no SGR and
+ * no OSC. It deliberately avoids `Box`, `Markdown` and `truncateToWidth`, each
+ * of which can emit styling even when every theme function is an identity.
+ */
+function plainEntry(entry: MirrorItem | string, width: number): string[] {
+  if (typeof entry === 'string') return wrapPlain(entry, width);
+  switch (entry.k) {
+    case 'user': {
+      const mark = '❯ ';
+      const markWidth = Math.min(visibleWidth(mark), Math.max(0, width - 1));
+      const body = wrapPlain(stripControls(entry.text, '\n\t'), Math.max(1, width - markWidth));
+      if (markWidth === 0) return body;
+      const head = truncatePlain(mark, markWidth);
+      const blank = ' '.repeat(markWidth);
+      return body.map((line, index) => `${index === 0 ? head : blank}${line}`);
+    }
+    case 'assistant': {
+      const lines: string[] = [];
+      const reasoning = stripControls(entry.reasoning ?? '', '\n\t').split('\n')[0]?.trim() ?? '';
+      if (reasoning !== '') lines.push(...wrapPlain(`· ${reasoning}`, width));
+      const text = stripControls(entry.text ?? '', '\n\t');
+      if (text.trim() !== '') lines.push(...wrapPlain(text, width));
+      if (entry.interrupted === true) lines.push('(interrupted)');
+      if (entry.usage !== undefined) lines.push(rightAlign(usageText(entry.usage), width));
+      return lines;
+    }
+    case 'tool': {
+      const parts = toolParts(entry);
+      const head = `${parts.glyph} ${parts.name}${parts.summary === '' ? '' : `: ${parts.summary}`}${parts.meta}`;
+      const lines = wrapPlain(head, width);
+      if (parts.detail !== '') lines.push(...wrapPlain(`  └─ ${parts.detail}`, width));
+      return lines;
+    }
+  }
 }
 
 /**
@@ -468,6 +577,9 @@ function systemEntry(text: string, width: number, theme: Theme): string[] {
  */
 export function renderEntry(entry: MirrorItem | string, width: number, theme: Theme = PLAIN): string[] {
   const w = Math.max(1, Math.floor(width));
+  // The plain path must stay byte-clean: pi-tui's truncation appends a reset and
+  // its Markdown renders links through OSC 8, so neither is used without colour.
+  if (!theme.color) return plainEntry(entry, w).map((line) => truncatePlain(line, w));
   const lines =
     typeof entry === 'string'
       ? systemEntry(entry, w, theme)
@@ -476,7 +588,7 @@ export function renderEntry(entry: MirrorItem | string, width: number, theme: Th
         : entry.k === 'assistant'
           ? assistantEntry(entry, w, theme)
           : toolEntry(entry, w, theme);
-  return lines.map((line) => truncateToWidth(line, w));
+  return lines.map((line) => clipStyled(line, w));
 }
 
 /** Entry renderer injection for tests plus the drawing options. */
