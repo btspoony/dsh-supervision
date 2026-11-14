@@ -169,12 +169,12 @@ test('the codec rejects anything that is not a well-formed frame', () => {
     '{"t":"nope"}',
     '{"t":"hello"}',
     '{"t":"hello","proto":"1","pid":1}',
-    '{"t":"hello","proto":1,"pid":1.5}',
-    '{"t":"hello","proto":1,"pid":1,"attach":7}',
-    '{"t":"hello","proto":1,"pid":1,"attach":""}',
-    '{"t":"hello","proto":1,"pid":1,"new":{"cwd":""}}',
-    '{"t":"hello","proto":1,"pid":1,"attach":"session-1","new":{"cwd":"/repo"}}',
-    '{"t":"hello","proto":1,"pid":1,"new":{}}',
+    `{"t":"hello","proto":${String(PROTO)},"pid":1.5}`,
+    `{"t":"hello","proto":${String(PROTO)},"pid":1,"attach":7}`,
+    `{"t":"hello","proto":${String(PROTO)},"pid":1,"attach":""}`,
+    `{"t":"hello","proto":${String(PROTO)},"pid":1,"new":{"cwd":""}}`,
+    `{"t":"hello","proto":${String(PROTO)},"pid":1,"attach":"session-1","new":{"cwd":"/repo"}}`,
+    `{"t":"hello","proto":${String(PROTO)},"pid":1,"new":{}}`,
     '{"t":"line"}',
     '{"t":"list","cwd":5}',
   ]
@@ -183,9 +183,9 @@ test('the codec rejects anything that is not a well-formed frame', () => {
 
 test('the codec round-trips every legal inbound frame', () => {
   const frames: readonly InFrame[] = [
-    { t: 'hello', proto: 1, pid: 7 },
-    { t: 'hello', proto: 1, pid: 7, attach: 'session-1' },
-    { t: 'hello', proto: 1, pid: 7, new: { cwd: '/repo' } },
+    { t: 'hello', proto: PROTO, pid: 7 },
+    { t: 'hello', proto: PROTO, pid: 7, attach: 'session-1' },
+    { t: 'hello', proto: PROTO, pid: 7, new: { cwd: '/repo' } },
     { t: 'line', text: 'say hi' },
     { t: 'list' },
     { t: 'list', cwd: '/repo' },
@@ -200,9 +200,9 @@ test('an over-cap frame is refused rather than written', () => {
 })
 
 test('a registry entry is only trusted once its shape is proven', () => {
-  const good = { proto: 1, pid: 5, socket: '/tmp/s', startedAt: 1, dshVersion: '1' }
+  const good = { proto: PROTO, pid: 5, socket: '/tmp/s', startedAt: 1, dshVersion: '1' }
   assert.equal(isRegistryEntry(good), true)
-  assert.equal(isRegistryEntry({ ...good, proto: 2 }), false)
+  assert.equal(isRegistryEntry({ ...good, proto: PROTO + 1 }), false)
   assert.equal(isRegistryEntry({ ...good, pid: 0 }), false)
   assert.equal(isRegistryEntry({ ...good, socket: '' }), false)
   assert.equal(isRegistryEntry(null), false)
@@ -214,7 +214,7 @@ test('hello is answered with welcome, and then osc follows', async () => {
   const { transport } = await serve(dir)
   const client = new Client(transport.socketPath)
   await client.ready()
-  client.write({ t: 'hello', proto: 1, pid: process.pid })
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid })
   const frames = await client.take(1)
   assert.deepEqual(frames[0], {
     t: 'welcome',
@@ -232,7 +232,7 @@ test('a hello with another proto is refused', async () => {
   const { transport } = await serve(dir)
   const client = new Client(transport.socketPath)
   await client.ready()
-  client.write({ t: 'hello', proto: 2, pid: process.pid })
+  client.write({ t: 'hello', proto: PROTO + 1, pid: process.pid })
   const [frame] = await client.take(1)
   assert.equal(frame?.t, 'error')
   assert.equal(frame !== undefined && frame.t === 'error' ? frame.code : '', 'protocol')
@@ -245,12 +245,12 @@ test('a second hello for the same session is busy, and the first keeps its bridg
   const { transport } = await serve(dir)
   const first = new Client(transport.socketPath)
   await first.ready()
-  first.write({ t: 'hello', proto: 1, pid: process.pid, attach: 'session-1' })
+  first.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
   await first.take(1)
 
   const second = new Client(transport.socketPath)
   await second.ready()
-  second.write({ t: 'hello', proto: 1, pid: process.pid, attach: 'session-1' })
+  second.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
   const [refusal] = await second.take(1)
   assert.equal(refusal?.t, 'error')
   assert.equal(refusal !== undefined && refusal.t === 'error' ? refusal.code : '', 'busy')
@@ -299,7 +299,7 @@ test('a bind that finishes after its forwarder closed cannot claim the session',
 
   const forwarder = new Client(transport.socketPath)
   await forwarder.ready()
-  forwarder.write({ t: 'hello', proto: 1, pid: process.pid, attach: 'session-keep' })
+  forwarder.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-keep' })
   // Destroy only once the server holds the binding, so `bye` below is certain.
   await claimed
   forwarder.socket.destroy()
@@ -314,7 +314,7 @@ test('a bind that finishes after its forwarder closed cannot claim the session',
 
     const next = new Client(transport.socketPath)
     await next.ready()
-    next.write({ t: 'hello', proto: 1, pid: process.pid, attach: 'session-1' })
+    next.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
     const [frame] = await next.take(1)
     assert.deepEqual(frame, {
       t: 'welcome',
@@ -347,7 +347,7 @@ test('sent reports reach only the bridge that owns the session', async () => {
   const { transport } = await serve(dir)
   const client = new Client(transport.socketPath)
   await client.ready()
-  client.write({ t: 'hello', proto: 1, pid: process.pid, attach: 'session-1' })
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
   await client.take(1)
   transport.send({ t: 'osc', data: '\u001b]7501;state=working\u001b\\' }, 'session-1')
   transport.send({ t: 'osc', data: 'ignored' }, 'session-other')
@@ -431,7 +431,7 @@ test('a registry entry of the wrong shape is left alone', () => {
   mkdirSync(dir, { recursive: true })
   const paths = registryPaths(dir, 2 ** 22 + 7, '0ddba11')
   // A pid that is provably dead, in an entry that proves nothing else.
-  writeFileSync(paths.json, '{"proto":1,"pid":"nope"}')
+  writeFileSync(paths.json, `{"proto":${String(PROTO)},"pid":"nope"}`)
   writeFileSync(paths.socket, '')
   assert.deepEqual(reclaimStale(dir), [])
   assert.equal(existsSync(paths.json), true)
