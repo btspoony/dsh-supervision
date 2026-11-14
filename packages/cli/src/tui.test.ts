@@ -4,10 +4,15 @@
  */
 
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
+import { CombinedAutocompleteProvider, Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { renderMirror } from 'dsh-supervision-protocol';
+import { routeFrame } from './route.js';
 import { PLAIN, createTheme } from './theme.js';
+import { NO_CATALOG, autocompleteCatalog, catalogOf, fdBinary, providerFor, type Catalog } from './tui.js';
 import {
   FOLLOWING,
   Shell,
@@ -604,4 +609,112 @@ test('block entries are separated; echo lines stay dense', () => {
   assert.ok(userAt >= 0 && replyAt > userAt && echoOneAt > replyAt && echoTwoAt === echoOneAt + 1);
   assert.equal(lines[replyAt - 1], '', 'a block entry is preceded by one blank row');
   assert.notEqual(lines[echoOneAt - 1], '', 'echo lines are not spread apart');
+});
+const SAMPLE: Catalog = {
+  skills: [
+    { name: 'use-dsh-sup', description: 'run the forwarder' },
+    { name: 'use-dsh-supervision', description: 'supervised session guide' },
+    { name: 'grill-me', description: 'stress-test a plan' },
+  ],
+  commands: [
+    { name: 'status', description: 'show session state' },
+    { name: 'approve', description: 'answer a parked ask', argumentHint: '<ask-id>' },
+  ],
+};
+
+test('the catalog becomes one skill entry per skill plus one per host command', () => {
+  const entries = autocompleteCatalog(SAMPLE);
+  assert.deepEqual(
+    entries.map((entry) => entry.name),
+    ['skill:use-dsh-sup', 'skill:use-dsh-supervision', 'skill:grill-me', 'status', 'approve'],
+  );
+  assert.equal(entries[0]?.description, 'run the forwarder');
+  assert.equal(entries[4]?.argumentHint, '<ask-id>', 'the host argument hint is passed through');
+  assert.equal(entries[3]?.argumentHint, undefined);
+  assert.deepEqual(autocompleteCatalog(NO_CATALOG), [], 'an empty catalog offers no menu');
+});
+
+test('the skill argument completions filter by prefix', async () => {
+  const entries = autocompleteCatalog(SAMPLE);
+  const skill = entries.find((entry) => entry.name === 'skill:use-dsh-sup');
+  const complete = skill?.getArgumentCompletions;
+  assert.ok(complete !== undefined, 'a skill entry carries argument completions');
+  const all = await complete('');
+  assert.deepEqual(all?.map((item) => item.value), [
+    'skill:use-dsh-sup',
+    'skill:use-dsh-supervision',
+    'skill:grill-me',
+  ]);
+  const narrowed = await complete('use-dsh-sup');
+  assert.deepEqual(narrowed?.map((item) => item.label), ['use-dsh-sup', 'use-dsh-supervision']);
+  assert.deepEqual(await complete('nope'), []);
+});
+
+test('the provider lists skills for / and narrows to skills for /skill:', async () => {
+  const provider = new CombinedAutocompleteProvider(autocompleteCatalog(SAMPLE), process.cwd());
+  const signal = new AbortController().signal;
+  const root = await provider.getSuggestions(['/'], 0, 1, { signal });
+  assert.deepEqual(root?.items.map((item) => item.value).sort(), [
+    'approve',
+    'skill:grill-me',
+    'skill:use-dsh-sup',
+    'skill:use-dsh-supervision',
+    'status',
+  ]);
+  assert.equal(root?.prefix, '/');
+
+  const skillsOnly = await provider.getSuggestions(['/skill:'], 0, '/skill:'.length, { signal });
+  assert.deepEqual(skillsOnly?.items.map((item) => item.value), [
+    'skill:use-dsh-sup',
+    'skill:use-dsh-supervision',
+    'skill:grill-me',
+  ]);
+  // The bare skill name also finds its entry, without requiring the prefix.
+  const bare = await provider.getSuggestions(['/grill'], 0, '/grill'.length, { signal });
+  assert.deepEqual(bare?.items.map((item) => item.value), ['skill:grill-me']);
+});
+
+test('accepting a suggestion inserts the slash command and a space', async () => {
+  const provider = new CombinedAutocompleteProvider(autocompleteCatalog(SAMPLE), process.cwd());
+  const suggestion = await provider.getSuggestions(['/skill:'], 0, '/skill:'.length, {
+    signal: new AbortController().signal,
+  });
+  assert.ok(suggestion !== null && suggestion.items.length > 0, 'a skill suggestion exists');
+  const applied = provider.applyCompletion(['/skill:'], 0, '/skill:'.length, suggestion.items[0]!, suggestion.prefix);
+  assert.deepEqual(applied.lines, ['/skill:use-dsh-sup ']);
+  assert.deepEqual([applied.cursorLine, applied.cursorCol], [0, '/skill:use-dsh-sup '.length]);
+});
+
+test('the provider completes @files under the session base path', async (t) => {
+  if (fdBinary() === undefined) {
+    t.skip('fd is not installed, so pi-tui has no file-completion backend');
+    return;
+  }
+  const base = mkdtempSync(join(tmpdir(), 'dsup-cat-'));
+  writeFileSync(join(base, 'notes.md'), 'x');
+  try {
+    const provider = providerFor(NO_CATALOG, base);
+    const suggestion = await provider.getSuggestions(['@notes'], 0, '@notes'.length, {
+      signal: new AbortController().signal,
+    });
+    assert.ok(
+      suggestion?.items.some((item) => item.value.includes('notes.md')),
+      `expected notes.md under the base path, got ${JSON.stringify(suggestion?.items)}`,
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('catalogOf accepts only the catalog frame and passes its sections through', () => {
+  assert.deepEqual(catalogOf({ t: 'catalog', skills: SAMPLE.skills, commands: SAMPLE.commands }), SAMPLE);
+  assert.equal(catalogOf({ t: 'echo', text: 'x' }), undefined);
+  assert.equal(catalogOf({ t: 'welcome' }), undefined);
+  assert.deepEqual(catalogOf({ t: 'catalog', skills: [], commands: [] }), NO_CATALOG);
+});
+
+test('a catalog frame never reaches either sink', () => {
+  const frame = { t: 'catalog', skills: SAMPLE.skills, commands: SAMPLE.commands } as const;
+  assert.deepEqual(routeFrame(frame as never, true), {});
+  assert.deepEqual(routeFrame(frame as never, false), {});
 });

@@ -75,6 +75,14 @@ the editor is framed in the accent colour. `NO_COLOR`, a non-terminal stdout or
 | `↑` / `↓` | scroll one line, while the editor is empty |
 | `Home` / `End` | oldest line / back to the newest (when the editor is empty) |
 
+Typing `/` opens the suggestion menu the plugin's `catalog` frame feeds: the
+session's skills appear as `/skill:<name>` (fuzzy-matching the bare name works)
+and the host's slash commands as `/name`; Tab/Enter accepts. Accepting
+`/skill:<name>` or typing it by hand is forwarded like any other line, and the
+plugin injects that skill's body. The catalog frame never reaches stdout or
+`/dev/tty`; `--no-tui` ignores it. `@file` completion resolves against the
+session's directory when `fd` is installed.
+
 Scrolled back, the last row shows `↓ N new` for entries that arrived meanwhile;
 reaching the bottom resumes following. `--no-tui`, or a redirected stdout, keeps
 the append-only line surface: in line mode those blocks go to stdout only when

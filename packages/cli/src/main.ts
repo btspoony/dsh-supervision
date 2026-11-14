@@ -6,7 +6,7 @@ import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { routeFrame } from './route.js';
 import { skillText, version } from './skill.js';
-import { chooseSurface, echoStatus, oscStatus, startTui, type Surface } from './tui.js';
+import { catalogOf, chooseSurface, echoStatus, oscStatus, startTui, type Surface } from './tui.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
@@ -148,6 +148,13 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
           settle(exitCodeFor(frame.code));
           return;
         }
+        // The catalog is surface input only: it feeds the slash menu and must
+        // never reach stdout or /dev/tty, in either mode.
+        const catalog = catalogOf(frame);
+        if (catalog !== undefined) {
+          surface?.setCatalog(catalog);
+          return;
+        }
         const routed = routeFrame(frame, process.stdout.isTTY === true);
         if (routed.tty !== undefined) tty.write(routed.tty);
         // The human sink is stdout itself, never the tty writer: a redirected
@@ -173,7 +180,15 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
         if (frame.t === 'welcome') {
           title = frame.title;
           if (useTui) {
-            surface = startTui({ title, sendLine, width: process.stdout.columns, onExit: () => { settle(EXIT.ok); } });
+            surface = startTui({
+              title,
+              sendLine,
+              width: process.stdout.columns,
+              // A new session's hello carries its directory; an attach has no
+              // cwd on the wire, so @file falls back to this process's directory.
+              basePath: 'new' in hello ? hello.new.cwd : process.cwd(),
+              onExit: () => { settle(EXIT.ok); },
+            });
             surface.setStatus({ session: frame.session, state: frame.state, turn: frame.turn });
           } else {
             pump(sendLine);

@@ -7,8 +7,11 @@
  * `routeFrame` already produces, because a supervisor parses those bytes.
  */
 
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   Box,
+  CombinedAutocompleteProvider,
   Editor,
   Markdown,
   ProcessTerminal,
@@ -21,11 +24,20 @@ import {
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
+  type AutocompleteItem,
   type Component,
   type EditorTheme,
+  type SlashCommand,
   type Terminal,
 } from '@earendil-works/pi-tui';
-import { isProgramState, stripControls, type MirrorItem, type ProgramState } from 'dsh-supervision-protocol';
+import {
+  isProgramState,
+  stripControls,
+  type CatalogCommand,
+  type CatalogSkill,
+  type MirrorItem,
+  type ProgramState,
+} from 'dsh-supervision-protocol';
 import { PLAIN, markdownTheme, themeFor, type Theme, type Token } from './theme.js';
 
 /** Everything the status line knows; every field but `session` updates later. */
@@ -146,6 +158,79 @@ export function chooseSurface(input: {
   readonly noTui: boolean;
 }): 'tui' | 'line' {
   return input.stdinTTY && input.stdoutTTY && !input.noTui ? 'tui' : 'line';
+}
+
+/** The session's slash vocabulary, as the plugin sends it after `welcome`. */
+export type Catalog = { readonly skills: readonly CatalogSkill[]; readonly commands: readonly CatalogCommand[] };
+
+/** An empty catalog: what a host with neither service advertises. */
+export const NO_CATALOG: Catalog = { skills: [], commands: [] };
+
+/**
+ * The catalog an inbound frame carries, or nothing for every other frame.
+ * @param frame - any decoded frame; the tag is enough because the codec already
+ *   proved the shape before the frame reached this surface.
+ */
+export function catalogOf(frame: unknown): Catalog | undefined {
+  if (typeof frame !== 'object' || frame === null) return undefined;
+  const record = frame as Record<string, unknown>;
+  if (record['t'] !== 'catalog') return undefined;
+  // The codec proved the sections before the frame reached the surface.
+  return { skills: record['skills'] as CatalogSkill[], commands: record['commands'] as CatalogCommand[] };
+}
+
+/**
+ * The slash menu for one catalog: a `skill:<name>` entry per skill (typed as
+ * `/skill:`, which the provider fuzzy-matches against the bare names), then one
+ * entry per host command. Argument completions filter the skills again, so a
+ * half-typed name narrows instead of guessing.
+ * @param catalog - the host's advertised vocabulary; an empty one yields no menu.
+ */
+export function autocompleteCatalog(catalog: Catalog): SlashCommand[] {
+  const items = (prefix: string): AutocompleteItem[] =>
+    catalog.skills
+      .filter((skill) => skill.name.startsWith(prefix))
+      .map((skill) => ({ value: `skill:${skill.name}`, label: skill.name, description: skill.description }));
+  const skills: SlashCommand[] = catalog.skills.map((skill) => ({
+    name: `skill:${skill.name}`,
+    description: skill.description,
+    getArgumentCompletions: (prefix: string) => items(prefix),
+  }));
+  const commands: SlashCommand[] = catalog.commands.map((command) => ({
+    name: command.name,
+    description: command.description,
+    ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+  }));
+  return [...skills, ...commands];
+}
+
+/**
+ * The `fd` binary pi-tui's file completion spawns, when it is installed. The
+ * library needs an explicit path; without one, `@file` completion is simply off.
+ * @returns the binary path, or undefined.
+ */
+export function fdBinary(): string | undefined {
+  const dirs = (process.env['PATH'] ?? '').split(':').filter((dir) => dir !== '');
+  for (const name of ['fd', 'fdfind']) {
+    for (const dir of dirs) {
+      const candidate = join(dir, name);
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch {
+        // Not in this directory; keep looking.
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The editor's autocomplete provider for one catalog.
+ * @param catalog - the host's advertised vocabulary.
+ * @param basePath - the session's directory; `@file` completion resolves here.
+ */
+export function providerFor(catalog: Catalog, basePath: string): CombinedAutocompleteProvider {
+  return new CombinedAutocompleteProvider(autocompleteCatalog(catalog), basePath, fdBinary() ?? null);
 }
 
 /** What one input sequence means to the surface, if anything. */
@@ -693,6 +778,8 @@ export interface Surface {
   /** A mirror item, or an echo line (a string) from the plugin. */
   push(entry: MirrorItem | string): void;
   setStatus(status: Status): void;
+  /** Replaces the slash menu; the plugin re-sends this after a session switch. */
+  setCatalog(catalog: Catalog): void;
   stop(): void;
 }
 
@@ -704,6 +791,8 @@ export interface StartTuiOptions {
   readonly onExit: () => void;
   /** Render width before the terminal reports its columns. */
   readonly width?: number;
+  /** Directory `@file` completion resolves against: the session's cwd. */
+  readonly basePath?: string;
 }
 
 /**
@@ -722,6 +811,13 @@ export function startTui(options: StartTuiOptions): Surface {
   const status = new StatusLine(theme);
   const editor = new Editor(tui, editorTheme(theme));
   const shell = new Shell(terminal, transcript, editor, status, options.width ?? 80);
+  const basePath = options.basePath ?? process.cwd();
+
+  /** The slash menu for one catalog; rebuilt whenever the host sends a new one. */
+  const useCatalog = (catalog: Catalog): void => {
+    editor.setAutocompleteProvider(providerFor(catalog, basePath));
+  };
+  useCatalog(NO_CATALOG);
 
   editor.onSubmit = (text: string): void => {
     if (text.trim() === '') return;
@@ -788,6 +884,9 @@ export function startTui(options: StartTuiOptions): Surface {
     setStatus: (next: Status): void => {
       status.set(next);
       tui.requestRender();
+    },
+    setCatalog: (catalog: Catalog): void => {
+      useCatalog(catalog);
     },
     stop,
   };

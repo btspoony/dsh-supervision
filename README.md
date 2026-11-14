@@ -103,6 +103,16 @@ in the table above or the bytes a redirected stdout receives.
 stdout always gets that line surface, so `dsh-sup … | tee log` stays
 machine-clean.
 
+**Suggestions.** The plugin sends a `catalog` frame with the session's skills and
+host slash commands once the attach is up, and the editor turns it into a menu:
+typing `/` lists every entry, typing `/skill:` narrows to the session's skills as
+`/skill:<name>` (fuzzy-matching the bare name works too), and tab/enter accepts
+the highlighted one into the editor. The catalog frame is surface input only — it
+never reaches stdout or `/dev/tty`, and line mode ignores it. `@file` completion
+resolves against the session's directory when the `fd` binary is installed. The
+names are the host's own: `/skill:<name>` is forwarded like any other line, so the
+plugin turns it into the skill's body.
+
 ### Answer an approval
 
 Ask where the session stands, then answer the parked ask by id:
