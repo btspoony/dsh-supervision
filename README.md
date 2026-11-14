@@ -80,7 +80,7 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 ### Take back control
 
-While a session is bridged the GUI marks it in the sidebar and over the input area. The session's sidebar row wears a 3px blue ring on its own rounding, a light-blue translucent fill (`rgba(127, 174, 255, 0.30)`), and a wider blue capsule that fills the row height with an animated whale tail at its right edge, so a supervised session cannot be mistaken for one that is yours to type into. Opening it covers the whole input area — editor and toolbar — with a blue-bordered, light-blue translucent panel (`rgba(127, 174, 255, 0.30)`): the editor is made `inert`, so neither the pointer nor an already-focused caret can type into it, a **Bridged** badge is fused into the overlay's bottom-left corner, a human one-line caption (`This chat is controlled from your terminal. The input box is locked.`, localized English/Chinese via the host locale service) sits in the darkened bottom band, and the panel's single **Unlock** button posts the reclaim; only a confirmed release removes the guard, so a refused unlock leaves it in place. The bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
+While a session is bridged the GUI marks it in the sidebar and over the input area. The session's sidebar row wears a 3px blue ring on its own rounding, a light-blue translucent fill (`rgba(127, 174, 255, 0.30)`), and a wider blue capsule that fills the row height with an animated whale tail at its right edge, so a supervised session cannot be mistaken for one that is yours to type into. Opening it covers the whole input area — editor and toolbar — with a blue-bordered, light-blue translucent panel (`rgba(127, 174, 255, 0.30)`): the editor is made `inert`, so neither the pointer nor an already-focused caret can type into it. A blue caption tab sits on the panel's top edge, above the frame, quoting the shipped English string — "This chat is supervised from elsewhere — the input box is locked" (localized English/Chinese via the host locale service); a **Bridged** badge with a small white whale tail is fused into the overlay's bottom-left corner; and the panel's single **Unlock** button posts the reclaim — only a confirmed release removes the guard, so a refused unlock leaves it in place. The bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
 
 ### Agent skill
 
@@ -121,7 +121,7 @@ This half is reference material for implementers and coding agents; if you only 
 
 | Path | What lives there |
 |---|---|
-| `src/` | the host plugin and the browser supervision banner (`src/client/`) |
+| `src/` | the host plugin and the browser supervision decoration (`src/client/`) |
 | `packages/protocol` | the OSC 7501 encoder and the NDJSON frame codec |
 | `packages/cli` | the `dsh-sup` forwarder |
 | `lib/` | build output |
@@ -168,7 +168,7 @@ Six keys, all of them read by `src/index.ts`; an unknown shape is refused with a
 
 | Key | Default | What it does |
 |---|---|---|
-| `enabled` | `true` | Mount anything at all. `false` is a hard off switch: no socket, no routes, no banner. |
+| `enabled` | `true` | Mount anything at all. `false` is a hard off switch: no socket, no routes, no client decoration. |
 | `programStatus` | `true` | Emit OSC 7501 reports. Off leaves the socket answering `list` only. |
 | `echo` | `true` | Mirror state changes and approval decisions as `echo` lines for the supervisor. |
 | `app` | `"dsh"` | The program word every report restates. |

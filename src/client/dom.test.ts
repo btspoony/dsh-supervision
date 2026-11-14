@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { BRIDGED_ATTR, bridgedIds, coalescer, rowSessionId, STYLE } from './dom.js'
+import { BRIDGED_ATTR, bridgedIds, coalescer, paint, rowSessionId, STYLE } from './dom.js'
+import { apply } from './index.js'
 import { BADGE_CLASS, COPY_CLASS, GUARD_ID, guardFor } from './dom.guard.js'
 import { en, zh } from './locale.js'
 
@@ -159,12 +159,291 @@ test('the guard covers the input card and the page has one reclaim control', () 
   assert.match(focused, /outline:\s*2px solid rgba\(255, 255, 255, \.75\)/)
   const buttons = STYLE.match(new RegExp('#' + GUARD_ID + ' button\\s*\\{', 'g')) ?? []
   assert.equal(buttons.length, 1, 'exactly one reclaim control may exist')
-  const guardSource = readFileSync(new URL('../../src/client/dom.guard.ts', import.meta.url), 'utf8')
-  const created = guardSource.match(/createElement\('button'\)/g) ?? []
-  assert.equal(created.length, 1, 'the guard builds exactly one button node; a second DOM control fails here')
-  const badges = guardSource.match(/className = BADGE_CLASS/g) ?? []
-  assert.equal(badges.length, 1, 'the guard builds exactly one badge node')
-  for (const call of ["t('caption')", "t('badge')", "t('unlock')"]) {
-    assert.ok(guardSource.includes(call), 'the guard renders ' + call + ' through the translator')
+})
+
+/* ------------------------------------------------------------------------ */
+/* A minimal fake DOM: only what paint/syncGuard touch. Behavior tests for  */
+/* the guard (review T1/S1) run in node against these stubs.                */
+/* ------------------------------------------------------------------------ */
+
+class FakeEl {
+  tagName: string
+  id = ''
+  className = ''
+  type = ''
+  textContent = ''
+  children: FakeEl[] = []
+  parentEl: FakeEl | null = null
+  attrs = new Map<string, string>()
+  style: Record<string, string> = {}
+  private listeners = new Map<string, Array<() => void>>()
+
+  constructor(tagName: string) {
+    this.tagName = tagName
   }
+
+  get parentElement(): FakeEl | null {
+    return this.parentEl
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attrs.set(name, value)
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attrs.get(name) ?? null
+  }
+
+  removeAttribute(name: string): void {
+    this.attrs.delete(name)
+  }
+
+  hasAttribute(name: string): boolean {
+    return this.attrs.has(name)
+  }
+
+  addEventListener(type: string, listener: () => void): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
+  }
+
+  dispatch(type: string): void {
+    for (const listener of this.listeners.get(type) ?? []) listener()
+  }
+
+  append(...els: FakeEl[]): void {
+    for (const el of els) {
+      el.parentEl = this
+      this.children.push(el)
+    }
+  }
+
+  replaceChildren(...els: FakeEl[]): void {
+    this.children = []
+    this.append(...els)
+  }
+
+  contains(other: FakeEl): boolean {
+    let cur: FakeEl | null = other
+    while (cur !== null) {
+      if (cur === this) return true
+      cur = cur.parentEl
+    }
+    return false
+  }
+
+  matches(selector: string): boolean {
+    if (selector.startsWith('#')) return this.id === selector.slice(1)
+    const attr = /^\[([\w-]+)(?:="([\w-]+)")?\]$/.exec(selector)
+    if (attr !== null && attr[1] !== undefined) {
+      const value = attr[2]
+      return value === undefined ? this.hasAttribute(attr[1]) : this.getAttribute(attr[1]) === value
+    }
+    const tag = /^(\w+)(?:\.([\w-]+))?$/.exec(selector)
+    if (tag !== null && tag[1] !== undefined) {
+      if (this.tagName !== tag[1]) return false
+      return tag[2] === undefined || this.className.split(' ').includes(tag[2])
+    }
+    return false
+  }
+
+  closest(selector: string): FakeEl | null {
+    let cur: FakeEl | null = this
+    while (cur !== null) {
+      if (cur.matches(selector)) return cur
+      cur = cur.parentEl
+    }
+    return null
+  }
+
+  querySelectorAll(selector: string): FakeEl[] {
+    const out: FakeEl[] = []
+    const walk = (el: FakeEl): void => {
+      for (const child of el.children) {
+        if (child.matches(selector)) out.push(child)
+        walk(child)
+      }
+    }
+    walk(this)
+    return out
+  }
+
+  querySelector(selector: string): FakeEl | null {
+    if (selector.startsWith(':scope > ')) {
+      const inner = selector.slice(':scope > '.length)
+      return this.children.find(child => child.matches(inner)) ?? null
+    }
+    return this.querySelectorAll(selector)[0] ?? null
+  }
+}
+
+class FakeDoc {
+  root = new FakeEl('root')
+  head = new FakeEl('head')
+  body: FakeEl
+  listenerCount = 0
+
+  constructor() {
+    this.body = this.root
+    this.root.append(this.head)
+  }
+
+  addEventListener(): void {
+    this.listenerCount += 1
+  }
+
+  removeEventListener(): void {
+    this.listenerCount -= 1
+  }
+
+  createElement(tagName: string): FakeEl {
+    return new FakeEl(tagName)
+  }
+
+  createTextNode(text: string): FakeEl {
+    const node = new FakeEl('#text')
+    node.textContent = text
+    return node
+  }
+
+  getElementById(id: string): FakeEl | null {
+    return this.root.querySelector('#' + id)
+  }
+
+  querySelector(selector: string): FakeEl | null {
+    return this.root.querySelector(selector)
+  }
+
+  querySelectorAll(selector: string): FakeEl[] {
+    return this.root.querySelectorAll(selector)
+  }
+}
+
+const t = (key: string): string => en[key as keyof typeof en]
+
+/** One composer inside a composer card, plus two session rows. */
+function bridgedScene(): { doc: FakeDoc; card: FakeEl; host: FakeEl; composer: FakeEl; rowA: FakeEl; rowB: FakeEl } {
+  const doc = new FakeDoc()
+  const composer = new FakeEl('div')
+  composer.setAttribute('contenteditable', 'true')
+  const host = new FakeEl('div')
+  host.append(composer)
+  const card = new FakeEl('div')
+  card.setAttribute('data-composer-card', '')
+  card.append(host)
+  const rowA = new FakeEl('div')
+  rowA.setAttribute('data-row-key', 'session:session-a')
+  rowA.setAttribute('aria-selected', 'true')
+  const rowB = new FakeEl('div')
+  rowB.setAttribute('data-row-key', 'session:session-b')
+  doc.root.append(card, rowA, rowB)
+  return { doc, card, host, composer, rowA, rowB }
+}
+
+function withFakeDom(run: () => void): void {
+  const g = globalThis as Record<string, unknown>
+  const prev = { document: g.document, MutationObserver: g.MutationObserver, getComputedStyle: g.getComputedStyle }
+  g.MutationObserver = class {
+    observe(): void {}
+    disconnect(): void {}
+  }
+  g.getComputedStyle = (): { borderRadius: string } => ({ borderRadius: '16px' })
+  try {
+    run()
+  } finally {
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete g[key]
+      else g[key] = value
+    }
+  }
+}
+
+test('a bridged composer is covered by one guard under the card, and Unlock reclaims it', () => {
+  withFakeDom(() => {
+    const { doc, card, host, composer } = bridgedScene()
+    const reclaimed: string[] = []
+    const take = (session: string): Promise<boolean> => {
+      reclaimed.push(session)
+      return new Promise(() => {})
+    }
+    paint(doc as unknown as Document, new Set(['session-a']), t, take)
+    const guard = doc.getElementById(GUARD_ID)
+    assert.ok(guard !== null, 'the guard mounts')
+    assert.equal(guard.parentEl, card, 'the guard sits under the composer card')
+    assert.ok(host.hasAttribute('inert'), 'the editor subtree is inert')
+    const buttons = guard.querySelectorAll('button')
+    assert.equal(buttons.length, 1, 'exactly one reclaim control')
+    assert.equal(buttons[0]?.textContent, en.unlock)
+    buttons[0]?.dispatch('click')
+    assert.deepEqual(reclaimed, ['session-a'], 'the click reclaims the covered session')
+  })
+})
+
+test('a card that is the editor parent never hosts the guard inside the inert subtree', () => {
+  withFakeDom(() => {
+    const doc = new FakeDoc()
+    const composer = new FakeEl('div')
+    composer.setAttribute('contenteditable', 'true')
+    const card = new FakeEl('div')
+    card.setAttribute('data-composer-card', '')
+    card.append(composer)
+    const row = new FakeEl('div')
+    row.setAttribute('data-row-key', 'session:session-a')
+    row.setAttribute('aria-selected', 'true')
+    doc.root.append(card, row)
+    paint(doc as unknown as Document, new Set(['session-a']), t, () => new Promise(() => {}))
+    assert.equal(doc.getElementById(GUARD_ID), null, 'no guard mounts inside the inert host')
+    assert.ok(!composer.hasAttribute('inert'), 'the editor is not frozen by a guard that cannot reclaim')
+    assert.equal(card.querySelectorAll('button').length, 0, 'no dead reclaim button')
+  })
+})
+
+test('after a retarget the same guard reclaims the newly selected session', () => {
+  withFakeDom(() => {
+    const { doc, rowA, rowB } = bridgedScene()
+    const reclaimed: string[] = []
+    const take = (session: string): Promise<boolean> => {
+      reclaimed.push(session)
+      return new Promise(() => {})
+    }
+    paint(doc as unknown as Document, new Set(['session-a', 'session-b']), t, take)
+    rowA.setAttribute('aria-selected', 'false')
+    rowB.setAttribute('aria-selected', 'true')
+    paint(doc as unknown as Document, new Set(['session-a', 'session-b']), t, take)
+    const guard = doc.getElementById(GUARD_ID)
+    assert.ok(guard !== null)
+    assert.equal(guard.querySelectorAll('button').length, 1, 'retarget keeps a single control')
+    guard.querySelector('button')?.dispatch('click')
+    assert.deepEqual(reclaimed, ['session-b'], 'Unlock reclaims the session selected now')
+  })
+})
+
+test('apply owns the watch and locale registrations through the host effect scope', () => {
+  withFakeDom(() => {
+    const g = globalThis as Record<string, unknown>
+    g.document = new FakeDoc()
+    const registrations: Array<{ run: () => () => void; label: string }> = []
+    const registered: string[] = []
+    const fakeLocale = {
+      register: (namespace: string): (() => void) => {
+        registered.push(namespace)
+        return () => {}
+      },
+      bind: (): typeof t => t,
+    }
+    const ctx = {
+      effect: (run: () => () => void, label: string): void => {
+        registrations.push({ run, label })
+      },
+      get: (name: string): unknown => (name === 'locale' ? fakeLocale : undefined),
+    }
+    apply(ctx)
+    apply(ctx)
+    const labels = registrations.map(registration => registration.label)
+    assert.equal(labels.filter(label => label === 'dsh-supervision: locale').length, 2, 'dictionary registration is effect-owned')
+    assert.equal(labels.filter(label => label === 'dsh-supervision: watch').length, 2, 'each apply offers its watch; the host scope owns disposal by label')
+    const stops = registrations.map(registration => registration.run())
+    for (const stop of stops) assert.equal(typeof stop, 'function', 'every registration disposes')
+    assert.deepEqual(registered, ['supervision', 'supervision'], 'running the effects registers the dictionaries reflectively')
+    for (const stop of stops) stop()
+  })
 })

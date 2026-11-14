@@ -19,7 +19,10 @@ interface LocaleFace {
 
 /** The client context, reduced to the faces this plugin touches. */
 export interface ClientContext {
+  /** Direct member, when the host wires one. */
   readonly locale?: LocaleFace
+  /** Reflective service lookup; the repo convention for optional services. */
+  readonly get?: (name: string) => unknown
   /**
    * Host effect scope: runs the callback, tracks its cleanup, and disposes it
    * with the entry. Absent on hosts without the scope service.
@@ -28,17 +31,23 @@ export interface ClientContext {
 }
 
 export const name = 'dsh-supervision'
-/** The locale service supplies the guard's strings; everything else is DOM. */
-export const inject = ['locale']
+/**
+ * No required services: the locale face is read reflectively (`ctx.get`), so a
+ * host without it still loads the decoration in English.
+ */
+export const inject: string[] = []
 
 /**
  * Start the decoration: register the strings, then poll and paint.
- * @param ctx - the client root context; `locale` may be absent.
+ * @param ctx - the client root context; every member may be absent.
  */
 export function apply(ctx?: ClientContext): void {
   if (typeof document === 'undefined') return
+  // Optional host service, read reflectively like the server half reads its
+  // webserver: a declared dependency would keep this plugin from loading on
+  // hosts that mount no locale service at all.
+  const locale = (ctx?.get?.('locale') ?? ctx?.locale) as LocaleFace | undefined
   let t: Translate
-  const locale = ctx?.locale
   if (locale !== undefined) {
     const register = (): (() => void) => locale.register('supervision', { en, zh })
     // Official plugins own registration through the host effect scope, so a
@@ -50,5 +59,8 @@ export function apply(ctx?: ClientContext): void {
     // No locale service: the English dictionary is the fallback rendering.
     t = (key) => en[key as keyof typeof en] ?? key
   }
-  watch(document, t)
+  // Own the watcher like the registration: a hot re-apply must not leak a
+  // second interval that keeps polling after unload.
+  if (ctx?.effect !== undefined) ctx.effect(() => watch(document, t), 'dsh-supervision: watch')
+  else watch(document, t)
 }

@@ -108,9 +108,16 @@ export function syncGuard(
   }
   // The whole input area (editor + toolbar) is the host's composer card; when
   // present it is the holder, so the cover spans both like the host's own
-  // overlay slot would.
+  // overlay slot would. The holder must be a strict ancestor of `host`: an
+  // `inert` subtree cannot host the guard's button, so a card that IS the
+  // editor's own parent would leave the only reclaim control dead.
   const card = (composer?.closest('[data-composer-card]') ?? null) as HTMLElement | null
-  const holder = card ?? host.parentElement ?? host
+  const candidate = card ?? host.parentElement ?? null
+  const holder = candidate !== null && candidate !== host && candidate.contains(host) ? candidate : null
+  if (holder === null) {
+    releaseGuard(doc)
+    return
+  }
   const existing = guardNode(doc)
   if (existing !== null && existing.parentElement === holder) {
     // The guard outlives a session switch in the same composer: retarget it, so
