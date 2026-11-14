@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connect } from 'node:net'
 import type { Socket } from 'node:net'
-import { after, test } from 'node:test'
+import { after, mock, test } from 'node:test'
 import { DEFAULTS, apply, validateConfig } from './index.js'
 import type {
   ApprovalListener,
@@ -1367,6 +1367,47 @@ test('a log read that never answers cannot hold the attach', async () => {
   }
 })
 
+
+test('a timed-out read flushes what arrived while it hung and keeps the bridge', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.historyWait = new Promise<void>(() => {})
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  // Simulated clock: the 4 s deadline fires without spending 4 s, and the
+  // production timing is untouched.
+  mock.timers.enable({ apis: ['setTimeout'] })
+  const started = Date.now()
+
+  try {
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+    await client.take(1)
+    // Buffered while the read is still hanging: the deadline's flush must not
+    // lose it.
+    host.emit('session-1', {
+      type: 'user/message',
+      seq: 1,
+      time: 100,
+      data: { turn: 1, content: [{ type: 'text', text: 'buffered live' }], source: { kind: 'user' } },
+    })
+    mock.timers.tick(4_000)
+    await until(() => client.frames.length >= 3, 'the timeout echo and the buffered item')
+    assert.deepEqual(client.frames.slice(1), [
+      { t: 'echo', text: 'history unavailable: timed out' },
+      { t: 'mirror', item: { k: 'user', text: 'buffered live' } },
+    ])
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(client.frames.length, 3, 'the buffered item lands exactly once')
+    assert.ok(Date.now() - started < 4_000, 'the deadline was simulated, not waited out')
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the timeout')
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
 test('a tool result produced during the read pairs with the snapshot call', async () => {
   const dir = tempDir()
   const host = new FakeHost()
