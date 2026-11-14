@@ -2,8 +2,8 @@
  * The composer guard: while a session is supervised from a terminal its input
  * area — editor and toolbar — is covered and the editor is made `inert`, so
  * neither a pointer nor an already-focused caret can type into it. On a card
- * the card's subtree is swept; without a card the placement's controls are
- * swept, except page-level entries such as session rows. The guard
+ * the card's subtree is swept; without a card the toolbar beside the editor is.
+ * The guard
  * itself sits beside the inert subtree, because an `inert` subtree cannot host
  * the button that takes the session back.
  *
@@ -20,7 +20,7 @@ export const GUARD_ID = 'dsh-sup-guard'
 export const COPY_CLASS = 'dsh-sup-copy'
 /** The corner badge's class; also keys the stylesheet. */
 export const BADGE_CLASS = 'dsh-sup-badge'
-/** Marks the editor this module made inert. */
+/** Marks every node this module made inert; `1` when it was already inert. */
 export const HOST_ATTR = 'data-dsh-sup-composer'
 /** Records the holder's original inline `position` while the guard is mounted. */
 const HOLDER_ATTR = 'data-dsh-sup-holder'
@@ -81,8 +81,8 @@ function placementFor(host: HTMLElement, card: HTMLElement | null): HTMLElement 
  * Re-assert the covered state on one editor and its container. The composer
  * card's element children are made inert except the guard itself, so toolbar
  * siblings (send, stop, attach) cannot be focused or Enter-activated either.
- * Without a card the placement's children are swept the same way, skipping
- * page-level entries such as session rows (`data-row-key`).
+ * Without a card only the toolbar boxes adjacent to the editor host are marked,
+ * never the page container's other children (session rows, navigation).
  * @param host - the editor's parent; always covered.
  * @param holder - the placement the guard overlays.
  * @param card - the composer card when it is a strict ancestor of `host`.
@@ -95,14 +95,16 @@ function cover(host: HTMLElement, holder: HTMLElement, card: HTMLElement | null)
     if (!el.hasAttribute('inert')) el.setAttribute('inert', '')
   }
   mark(host)
-  // Sweep the composer card's own subtree. Without a card the placement is the
-  // input container (the editor host plus its toolbar), so its controls are
-  // covered too — but page-level entries such as session rows share a
-  // page-container placement and must stay operable, so they are skipped.
-  const sweepRoot = card ?? holder
-  for (const child of Array.from(sweepRoot.children)) {
-    if (child.hasAttribute('data-row-key')) continue
-    mark(child)
+  // The composer card's own subtree is covered when one exists. Without a
+  // card, only the toolbar boxes adjacent to the editor host are covered: the
+  // placement may be a page container, and sweeping its children would freeze
+  // session rows, navigation and any nested list wrapper around them.
+  if (card !== null) {
+    for (const child of Array.from(card.children)) mark(child)
+  } else {
+    for (const neighbour of [host.previousElementSibling, host.nextElementSibling]) {
+      if (neighbour !== null) mark(neighbour)
+    }
   }
   // Positionability comes from the cascade, not the inline style: a composer
   // card laid out by CSS (`position: sticky`, the usual bottom-anchored input)

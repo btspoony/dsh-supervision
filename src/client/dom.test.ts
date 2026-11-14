@@ -194,6 +194,20 @@ class FakeEl {
     return this.parentEl
   }
 
+  get previousElementSibling(): FakeEl | null {
+    const parent = this.parentEl
+    if (parent === null) return null
+    const index = parent.children.indexOf(this)
+    return index > 0 ? parent.children[index - 1] ?? null : null
+  }
+
+  get nextElementSibling(): FakeEl | null {
+    const parent = this.parentEl
+    if (parent === null) return null
+    const index = parent.children.indexOf(this)
+    return index >= 0 && index + 1 < parent.children.length ? parent.children[index + 1] ?? null : null
+  }
+
   setAttribute(name: string, value: string): void {
     this.attrs.set(name, value)
   }
