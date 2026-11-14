@@ -433,7 +433,7 @@ test('a card that is the editor parent still covers it, with the guard outside t
   })
 })
 
-test('without a composer card the toolbar beside the editor host is covered', () => {
+test('without a composer card only the editor host is covered, never the page container', () => {
   withFakeDom(() => {
     const doc = new FakeDoc()
     const composer = new FakeEl('div')
@@ -453,8 +453,9 @@ test('without a composer card the toolbar beside the editor host is covered', ()
     assert.ok(guard !== null, 'the guard mounts on the placement')
     assert.equal(guard.parentEl, placement, 'the placement is the editor grandparent')
     assert.ok(host.hasAttribute('inert'), 'the editor host is covered')
-    assert.ok(toolbar.hasAttribute('inert'), 'the toolbar under the placement is covered')
-    assert.equal(toolbar.getAttribute('data-dsh-sup-composer'), '', 'the toolbar carries the cover marker')
+    // Deliberate limit: the placement may be a page container, so a card-less
+    // host keeps its toolbar operable rather than freezing every sibling.
+    assert.ok(!toolbar.hasAttribute('inert'), 'the toolbar is not swept without a card')
     assert.ok(!sibling.hasAttribute('inert'), 'unrelated siblings around the placement stay operable')
     releaseGuard(doc as unknown as Document)
     assert.ok(!host.hasAttribute('inert'), 'release clears the editor marker')
