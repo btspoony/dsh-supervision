@@ -151,6 +151,52 @@ export function echoStatus(text: string): Status | undefined {
   return { state: raw, turn: Number(match[1]) };
 }
 
+/** How long a second Ctrl+C on an empty editor still counts as "again". */
+export const CTRL_C_WINDOW_MS = 1500;
+
+/** The dim hint one Ctrl+C on an empty editor shows. */
+export const CTRL_C_HINT = 'Ctrl+C again to exit';
+
+/**
+ * The forwarder-local exit commands: exact, lowercase, no arguments. Anything
+ * longer or differently cased is ordinary input for the session.
+ * @param text - the submitted editor text.
+ */
+export function isLocalExit(text: string): boolean {
+  return text === '/q' || text === '/quit' || text === '/exit' || text === '/bye';
+}
+
+/** What the line sender does with one submitted text. */
+export type LineAction = { readonly kind: 'exit' } | { readonly kind: 'send'; readonly text: string };
+
+/**
+ * Decides whether a submitted line is forwarder-local or belongs to the session.
+ * The exit commands must never reach the socket as a `line` frame.
+ * @param text - the submitted editor text.
+ */
+export function lineAction(text: string): LineAction {
+  return isLocalExit(text) ? { kind: 'exit' } : { kind: 'send', text };
+}
+
+/** What one Ctrl+C press does, given the editor and the previous press. */
+export type CtrlCAction = 'clear' | 'hint' | 'exit';
+
+/**
+ * The Ctrl+C convention: with text in the editor it clears that text; on an
+ * empty editor the first press shows a hint and a second one inside
+ * {@link CTRL_C_WINDOW_MS} leaves. It never touches the running turn.
+ * @param input - editor state, now, and the previous hint's timestamp.
+ */
+export function ctrlCAction(input: {
+  readonly editorEmpty: boolean;
+  readonly now: number;
+  readonly last: number | undefined;
+}): CtrlCAction {
+  if (!input.editorEmpty) return 'clear';
+  if (input.last !== undefined && input.now - input.last <= CTRL_C_WINDOW_MS) return 'exit';
+  return 'hint';
+}
+
 /** One attach surface: `tui` owns stdout, `line` is today's append-only path. */
 export function chooseSurface(input: {
   readonly stdinTTY: boolean;
@@ -236,6 +282,7 @@ export function providerFor(catalog: Catalog, basePath: string): CombinedAutocom
 /** What one input sequence means to the surface, if anything. */
 export type KeyAction =
   | { readonly kind: 'cancel' }
+  | { readonly kind: 'ctrl-c' }
   | { readonly kind: 'exit' }
   | { readonly kind: 'page'; readonly delta: number }
   | { readonly kind: 'line'; readonly delta: number }
@@ -253,10 +300,12 @@ export function keyAction(data: string, editorEmpty: boolean): KeyAction | undef
   // `matchesKey` cannot tell them apart. Acting on a release would scroll a
   // second time on PageUp/PageDown and send a second `/cancel` on Ctrl+C.
   if (isKeyRelease(data)) return undefined;
-  // Ctrl+C cancels the running turn instead of leaving the attach; Ctrl+D is
-  // the way out. Both are editor bindings by default, so they land here first.
-  if (matchesKey(data, 'ctrl+c')) return { kind: 'cancel' };
+  // Ctrl+C is context-sensitive and handled by the surface (clear, hint, exit);
+  // Esc cancels the running turn, and Ctrl+D leaves. All are editor bindings by
+  // default, so they land here first.
+  if (matchesKey(data, 'ctrl+c')) return { kind: 'ctrl-c' };
   if (matchesKey(data, 'ctrl+d')) return { kind: 'exit' };
+  if (matchesKey(data, 'escape')) return { kind: 'cancel' };
   if (matchesKey(data, 'pageUp')) return { kind: 'page', delta: -1 };
   if (matchesKey(data, 'pageDown')) return { kind: 'page', delta: 1 };
   if (!editorEmpty) return undefined;
@@ -307,6 +356,7 @@ function stateToken(state: ProgramState): Token {
 /** Session, state and turn, on one reverse-video bar above the editor. */
 export class StatusLine {
   private status: Status = {};
+  private hint: string | undefined;
   private readonly theme: Theme;
 
   constructor(theme: Theme = PLAIN) {
@@ -317,11 +367,22 @@ export class StatusLine {
     this.status = { ...this.status, ...next };
   }
 
+  /** Shows a transient hint in the bar; `undefined` clears it. */
+  setHint(hint: string | undefined): void {
+    this.hint = hint;
+  }
+
+  /** Whether a transient hint is currently shown. */
+  hasHint(): boolean {
+    return this.hint !== undefined;
+  }
+
   render(width: number): string {
     const w = Math.max(1, Math.floor(width));
     const parts = [this.status.session ?? 'dsh-sup'];
     if (this.status.state !== undefined) parts.push(this.theme.fg(stateToken(this.status.state), this.status.state));
     if (this.status.turn !== undefined) parts.push(`turn ${String(this.status.turn)}`);
+    if (this.hint !== undefined) parts.push(this.theme.dim(this.hint));
     const text = parts.join(' · ');
     // The bar owns the whole row: pad first, then invert across the width.
     const padded = text + ' '.repeat(Math.max(0, w - visibleWidth(text)));
@@ -832,15 +893,57 @@ export function startTui(options: StartTuiOptions): Surface {
     tui.stop();
   };
 
+  /** The Ctrl+C hint is transient: any other key, or the window, clears it. */
+  let hintTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastCtrlC: number | undefined;
+  const clearHint = (): void => {
+    if (hintTimer !== undefined) {
+      clearTimeout(hintTimer);
+      hintTimer = undefined;
+    }
+    if (status.hasHint()) {
+      status.setHint(undefined);
+      tui.requestRender();
+    }
+    lastCtrlC = undefined;
+  };
+  const showHint = (): void => {
+    if (hintTimer !== undefined) clearTimeout(hintTimer);
+    status.setHint(CTRL_C_HINT);
+    tui.requestRender();
+    hintTimer = setTimeout(() => {
+      hintTimer = undefined;
+      status.setHint(undefined);
+      tui.requestRender();
+    }, CTRL_C_WINDOW_MS);
+  };
+
   tui.addChild(shell);
   tui.setFocus(editor);
   tui.addInputListener((data: string) => {
     const action = keyAction(data, editor.getText() === '');
-    if (action === undefined) return undefined;
+    if (action === undefined) {
+      // A printable key or a release: the hint no longer applies.
+      if (lastCtrlC !== undefined) clearHint();
+      return undefined;
+    }
+    if (action.kind !== 'ctrl-c') clearHint();
     switch (action.kind) {
       case 'cancel':
         options.sendLine('/cancel');
         break;
+      case 'ctrl-c': {
+        const next = ctrlCAction({ editorEmpty: editor.getText() === '', now: Date.now(), last: lastCtrlC });
+        if (next === 'clear') {
+          editor.setText('');
+        } else if (next === 'hint') {
+          lastCtrlC = Date.now();
+          showHint();
+        } else {
+          options.onExit();
+        }
+        break;
+      }
       case 'exit':
         options.onExit();
         break;

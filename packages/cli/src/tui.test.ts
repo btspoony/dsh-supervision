@@ -12,7 +12,18 @@ import { CombinedAutocompleteProvider, Editor, TuiAltScreen, visibleWidth, type 
 import { renderMirror } from 'dsh-supervision-protocol';
 import { routeFrame } from './route.js';
 import { PLAIN, createTheme } from './theme.js';
-import { NO_CATALOG, autocompleteCatalog, catalogOf, fdBinary, providerFor, type Catalog } from './tui.js';
+import {
+  CTRL_C_WINDOW_MS,
+  NO_CATALOG,
+  autocompleteCatalog,
+  catalogOf,
+  ctrlCAction,
+  fdBinary,
+  isLocalExit,
+  lineAction,
+  providerFor,
+  type Catalog,
+} from './tui.js';
 import {
   FOLLOWING,
   Shell,
@@ -104,8 +115,10 @@ test('an echo status line updates state and turn; prose does not', () => {
   assert.equal(echoStatus('[turn 3] frobnicating'), undefined);
 });
 test('keys map to surface actions, arrows only with an empty editor', () => {
-  assert.deepEqual(keyAction('\x03', false), { kind: 'cancel' });
+  assert.deepEqual(keyAction('\x03', false), { kind: 'ctrl-c' });
   assert.deepEqual(keyAction('\x04', false), { kind: 'exit' });
+  assert.deepEqual(keyAction('\x1b', false), { kind: 'cancel' });
+  assert.deepEqual(keyAction('\x1b', true), { kind: 'cancel' });
   assert.deepEqual(keyAction('\x1b[5~', false), { kind: 'page', delta: -1 });
   assert.deepEqual(keyAction('\x1b[6~', false), { kind: 'page', delta: 1 });
   assert.deepEqual(keyAction('\x1b[A', true), { kind: 'line', delta: -1 });
@@ -136,7 +149,7 @@ test('a key release never acts: no second scroll, no second /cancel, no exit', (
   // The matching press sequences still do.
   assert.deepEqual(keyAction('\x1b[5;1~', true), { kind: 'page', delta: -1 });
   assert.deepEqual(keyAction('\x1b[6;1~', true), { kind: 'page', delta: 1 });
-  assert.deepEqual(keyAction('\x03', true), { kind: 'cancel' });
+  assert.deepEqual(keyAction('\x03', true), { kind: 'ctrl-c' });
   assert.deepEqual(keyAction('\x04', true), { kind: 'exit' });
   assert.deepEqual(keyAction('\x1b[5~', true), { kind: 'page', delta: -1 });
   assert.deepEqual(keyAction('\x1b[6~', true), { kind: 'page', delta: 1 });
@@ -717,4 +730,35 @@ test('a catalog frame never reaches either sink', () => {
   const frame = { t: 'catalog', skills: SAMPLE.skills, commands: SAMPLE.commands } as const;
   assert.deepEqual(routeFrame(frame as never, true), {});
   assert.deepEqual(routeFrame(frame as never, false), {});
+});
+test('only the exact lowercase exit commands are forwarder-local', () => {
+  for (const command of ['/q', '/quit', '/exit', '/bye']) {
+    assert.equal(isLocalExit(command), true, command);
+    assert.deepEqual(lineAction(command), { kind: 'exit' }, command);
+  }
+  for (const text of ['/q now', '/quiet', '/Q', '/EXIT', ' /q', '/bye all', '/quitter', 'hello']) {
+    assert.equal(isLocalExit(text), false, text);
+    assert.deepEqual(lineAction(text), { kind: 'send', text }, text);
+  }
+});
+
+test('Ctrl+C clears typed text, hints when empty, and exits on a second press', () => {
+  assert.equal(ctrlCAction({ editorEmpty: false, now: 1000, last: undefined }), 'clear');
+  assert.equal(ctrlCAction({ editorEmpty: false, now: 1000, last: 999 }), 'clear', 'text always wins over the window');
+  assert.equal(ctrlCAction({ editorEmpty: true, now: 1000, last: undefined }), 'hint');
+  assert.equal(ctrlCAction({ editorEmpty: true, now: 1000, last: 1000 }), 'exit');
+  assert.equal(ctrlCAction({ editorEmpty: true, now: 1000, last: 1000 - CTRL_C_WINDOW_MS }), 'exit');
+  assert.equal(ctrlCAction({ editorEmpty: true, now: 1000, last: 1000 - CTRL_C_WINDOW_MS - 1 }), 'hint');
+});
+
+test('the status bar shows the transient hint only while it is set', () => {
+  const bar = new StatusLine();
+  bar.set({ session: 'session-1', state: 'idle', turn: 2 });
+  assert.doesNotMatch(bar.render(80), /Ctrl\+C again/);
+  bar.setHint('Ctrl+C again to exit');
+  assert.match(bar.render(80), /Ctrl\+C again to exit/);
+  assert.equal(bar.hasHint(), true);
+  bar.setHint(undefined);
+  assert.equal(bar.hasHint(), false);
+  assert.doesNotMatch(bar.render(80), /Ctrl\+C again/);
 });

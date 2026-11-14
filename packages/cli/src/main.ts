@@ -6,7 +6,7 @@ import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { routeFrame } from './route.js';
 import { skillText, version } from './skill.js';
-import { catalogOf, chooseSurface, echoStatus, oscStatus, startTui, type Surface } from './tui.js';
+import { catalogOf, chooseSurface, echoStatus, lineAction, oscStatus, startTui, type Surface } from './tui.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
@@ -132,10 +132,25 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
      */
     let sending = 0;
 
+    /**
+     * Leaves the forwarder locally: the backend hears `bye` (so it can drop the
+     * bridge), the surface restores the screen, and the process exits 0.
+     */
+    const localExit = (): void => {
+      connection.send({ t: 'bye' });
+      settle(EXIT.ok);
+    };
+
     /** Sends one line; a frame this process refused ends the bridge without blaming the backend. */
     const sendLine = (text: string): void => {
-      sending = Buffer.byteLength(text, 'utf8');
-      connection.send({ t: 'line', text });
+      const action = lineAction(text);
+      if (action.kind === 'exit') {
+        // Forwarder-local commands never reach the socket as a line.
+        localExit();
+        return;
+      }
+      sending = Buffer.byteLength(action.text, 'utf8');
+      connection.send({ t: 'line', text: action.text });
     };
 
     const connection: Connection = connect(socket, hello, {
@@ -187,7 +202,7 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
               // A new session's hello carries its directory; an attach has no
               // cwd on the wire, so @file falls back to this process's directory.
               basePath: 'new' in hello ? hello.new.cwd : process.cwd(),
-              onExit: () => { settle(EXIT.ok); },
+              onExit: localExit,
             });
             surface.setStatus({ session: frame.session, state: frame.state, turn: frame.turn });
           } else {

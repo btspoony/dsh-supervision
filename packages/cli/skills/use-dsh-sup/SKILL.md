@@ -69,7 +69,8 @@ the editor is framed in the accent colour. `NO_COLOR`, a non-terminal stdout or
 |---|---|
 | `Enter` | send the editor's text as one operator line |
 | `Shift+Enter` | newline in the editor, when the terminal reports the modifier (modifyOtherKeys or Kitty keyboard protocol); otherwise it submits like `Enter` |
-| `Ctrl+C` | send `/cancel` (ends the running turn, keeps the attach) |
+| `Ctrl+C` | clear what you typed; on an empty editor a second press within 1.5 s leaves the attach |
+| `Esc` | send `/cancel` (ends the running turn, keeps the attach) |
 | `Ctrl+D` | leave the attach and restore the terminal |
 | `PageUp` / `PageDown` | scroll the transcript one page |
 | `↑` / `↓` | scroll one line, while the editor is empty |
@@ -82,6 +83,11 @@ and the host's slash commands as `/name`; Tab/Enter accepts. Accepting
 plugin injects that skill's body. The catalog frame never reaches stdout or
 `/dev/tty`; `--no-tui` ignores it. `@file` completion resolves against the
 session's directory when `fd` is installed.
+
+`/q`, `/quit`, `/exit` and `/bye` leave the attach from either surface: the
+forwarder sends `bye`, restores the screen and exits 0, and the line never reaches
+the session. In the TUI, `Ctrl+D` also leaves, `Esc` sends `/cancel`, and Ctrl+C
+clears the editor (twice on an empty editor within 1.5 s leaves).
 
 Scrolled back, the last row shows `↓ N new` for entries that arrived meanwhile;
 reaching the bottom resumes following. `--no-tui`, or a redirected stdout, keeps
