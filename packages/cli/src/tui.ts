@@ -8,19 +8,25 @@
  */
 
 import {
+  Box,
   Editor,
+  Markdown,
   ProcessTerminal,
+  Spacer,
   TuiAltScreen,
   getKeybindings,
   isKeyRelease,
   matchesKey,
+  sliceByColumn,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
   type Component,
   type EditorTheme,
   type Terminal,
 } from '@earendil-works/pi-tui';
-import { isProgramState, renderMirror, type MirrorItem, type ProgramState } from 'dsh-supervision-protocol';
+import { isProgramState, stripControls, type MirrorItem, type ProgramState } from 'dsh-supervision-protocol';
+import { PLAIN, markdownTheme, themeFor, type Theme, type Token } from './theme.js';
 
 /** Everything the status line knows; every field but `session` updates later. */
 export interface Status {
@@ -176,30 +182,65 @@ export function keyAction(data: string, editorEmpty: boolean): KeyAction | undef
   return undefined;
 }
 
-export const THEME: EditorTheme = {
-  borderColor: (text: string): string => text,
-  selectList: {
-    selectedPrefix: (text: string): string => text,
-    selectedText: (text: string): string => text,
-    description: (text: string): string => text,
-    scrollInfo: (text: string): string => text,
-    noMatch: (text: string): string => text,
-  },
-};
+/**
+ * The editor frame in one theme: the accent border marks where typing goes, so
+ * input reads as a different region from the transcript above it.
+ * @param theme - the surface's theme.
+ */
+export function editorTheme(theme: Theme): EditorTheme {
+  return {
+    borderColor: (text: string): string => theme.fg('accent', text),
+    selectList: {
+      selectedPrefix: (text: string): string => theme.fg('accent', text),
+      selectedText: (text: string): string => theme.bold(text),
+      description: (text: string): string => theme.dim(text),
+      scrollInfo: (text: string): string => theme.dim(text),
+      noMatch: (text: string): string => theme.dim(text),
+    },
+  };
+}
 
-/** Session, state and turn, on one line above the editor. */
+/** The plain editor frame, for callers that build a shell without a terminal. */
+export const THEME: EditorTheme = editorTheme(PLAIN);
+
+/** The colour a state segment carries inside the bar. */
+function stateToken(state: ProgramState): Token {
+  switch (state) {
+    case 'working':
+      return 'accent';
+    case 'done':
+      return 'success';
+    case 'blocked':
+      return 'warning';
+    case 'error':
+      return 'error';
+    case 'idle':
+      return 'muted';
+  }
+}
+
+/** Session, state and turn, on one reverse-video bar above the editor. */
 export class StatusLine {
   private status: Status = {};
+  private readonly theme: Theme;
+
+  constructor(theme: Theme = PLAIN) {
+    this.theme = theme;
+  }
 
   set(next: Status): void {
     this.status = { ...this.status, ...next };
   }
 
   render(width: number): string {
+    const w = Math.max(1, Math.floor(width));
     const parts = [this.status.session ?? 'dsh-sup'];
-    if (this.status.state !== undefined) parts.push(this.status.state);
+    if (this.status.state !== undefined) parts.push(this.theme.fg(stateToken(this.status.state), this.status.state));
     if (this.status.turn !== undefined) parts.push(`turn ${String(this.status.turn)}`);
-    return truncateToWidth(parts.join(' · '), width);
+    const text = parts.join(' · ');
+    // The bar owns the whole row: pad first, then invert across the width.
+    const padded = text + ' '.repeat(Math.max(0, w - visibleWidth(text)));
+    return this.theme.color ? clipStyled(this.theme.bar(padded), w) : truncatePlain(padded, w);
   }
 }
 
@@ -218,23 +259,25 @@ export class TranscriptView implements Component {
   /** Width the flattened lines are wrapped at; a different render rewraps all. */
   private width: number;
   private readonly wrapEntry: (entry: MirrorItem | string, width: number) => string[];
+  /** The theme the chrome (the follow marker) draws with. */
+  private readonly theme: Theme;
 
   /**
-   * @param wrapEntry - one entry's lines; injectable so a test can count calls.
-   * @param width - the width to wrap at until a render names the real one.
+   * @param options - entry renderer injection (for call-counting tests), the
+   *   wrap width before the first render, and the theme the entries draw with.
    */
-  constructor(
-    wrapEntry: (entry: MirrorItem | string, width: number) => string[] = renderEntry,
-    width = 80,
-  ) {
-    this.wrapEntry = wrapEntry;
-    this.width = Math.max(1, Math.floor(width));
+  constructor(options: TranscriptOptions = {}) {
+    const theme = options.theme ?? PLAIN;
+    this.theme = theme;
+    this.width = Math.max(1, Math.floor(options.width ?? 80));
+    this.wrapEntry = options.wrapEntry ?? ((entry, width) => renderEntry(entry, width, theme));
   }
 
   push(entry: MirrorItem | string): void {
+    const block = this.block(this.entries.length, entry);
     this.entries.push(entry);
     // Only the new entry is wrapped; the history stays as the last frame left it.
-    append(this.flat, this.wrapEntry(entry, this.width));
+    append(this.flat, block);
     this.scrollState = afterAppend(this.scrollState, 1, this.flat.length, this.height);
   }
 
@@ -271,7 +314,7 @@ export class TranscriptView implements Component {
     const rows = marker === undefined ? this.height : this.height - 1;
     const visible = this.flat.slice(top, top + rows);
     while (visible.length < rows) visible.unshift('');
-    if (marker !== undefined) visible.push(truncateToWidth(marker, w));
+    if (marker !== undefined) visible.push(this.theme.color ? clipStyled(marker, w) : truncatePlain(marker, w));
     return visible;
   }
 
@@ -286,13 +329,279 @@ export class TranscriptView implements Component {
   private rewrap(width: number): void {
     this.width = width;
     this.flat = [];
-    for (const entry of this.entries) append(this.flat, this.wrapEntry(entry, width));
+    for (const [index, entry] of this.entries.entries()) append(this.flat, this.block(index, entry));
+  }
+
+  /**
+   * A block entry is separated from what precedes it, so a reply never starts
+   * flush against the previous one; echo lines stay dense.
+   */
+  private block(index: number, entry: MirrorItem | string): string[] {
+    const lines = this.wrapEntry(entry, this.width);
+    if (index === 0 || typeof entry === 'string' || lines.length === 0) return lines;
+    return [...SPACER.render(this.width), ...lines];
   }
 }
 
-/** One entry's lines at a width; the only place an entry is rendered. */
-function renderEntry(entry: MirrorItem | string, width: number): string[] {
-  return fitLines(typeof entry === 'string' ? entry : renderMirror(entry, width), width);
+/** A blank row between block entries; one shared instance is enough. */
+const SPACER = new Spacer(1);
+
+/** Prefixes a child's first line with a mark, keeping the child inside `width`. */
+class Gutter implements Component {
+  private readonly child: Component;
+  private readonly mark: string;
+
+  constructor(child: Component, mark: string) {
+    this.child = child;
+    this.mark = mark;
+  }
+
+  render(width: number): string[] {
+    const w = Math.max(1, Math.floor(width));
+    const markWidth = visibleWidth(this.mark);
+    // Below the mark's own width there is no room for a gutter; the text wins.
+    if (markWidth === 0 || markWidth >= w) return this.child.render(w);
+    const mark = this.mark;
+    const blank = ' '.repeat(markWidth);
+    const inner = this.child.render(w - markWidth);
+    if (inner.length === 0) return [mark];
+    return inner.map((line, index) => `${index === 0 ? mark : blank}${line}`);
+  }
+
+  invalidate(): void {
+    this.child.invalidate();
+  }
+}
+
+/**
+ * The user's own line: a tinted block with a gutter, so the thing a person
+ * typed never reads like model output.
+ */
+function userEntry(text: string, width: number, theme: Theme): string[] {
+  const bg = (line: string): string => theme.bg('userBg', line);
+  const body = new Markdown(stripControls(text, '\n\t'), 0, 0, markdownTheme(theme), {
+    color: (line: string): string => theme.fg('userFg', line),
+    bgColor: bg,
+  });
+  // Padding is a luxury the narrowest terminals cannot afford: one column of
+  // padding on both sides of a 1-column viewport would leave no text at all.
+  const box = new Box(width >= 3 ? 1 : 0, 0, bg);
+  box.addChild(new Gutter(body, theme.fg('accent', '❯ ')));
+  return box.render(width);
+}
+
+/** Thousands separated, so a large step reads at a glance. */
+function count(value: number): string {
+  return value.toLocaleString('en-US');
+}
+
+/** The usage footer's text, shared by both rendering paths. */
+function usageText(usage: {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens?: number;
+}): string {
+  const cache = usage.cacheReadTokens;
+  return `⟦↑${count(usage.inputTokens)} ↓${count(usage.outputTokens)}${cache === undefined ? '' : ` R${count(cache)}`}⟧`;
+}
+
+/** Right-aligns one plain line; a line wider than the row is left alone. */
+function rightAlign(text: string, width: number): string {
+  return ' '.repeat(Math.max(0, width - visibleWidth(text))) + text;
+}
+
+/** The token usage footer: dim, right-aligned, the same content as before. */
+function usageLine(
+  usage: { readonly inputTokens: number; readonly outputTokens: number; readonly cacheReadTokens?: number },
+  width: number,
+  theme: Theme,
+): string {
+  return theme.dim(rightAlign(usageText(usage), width));
+}
+
+/** Assistant prose: dim reasoning, markdown body, dim usage footer. */
+function assistantEntry(item: Extract<MirrorItem, { k: 'assistant' }>, width: number, theme: Theme): string[] {
+  const lines: string[] = [];
+  const reasoning = stripControls(item.reasoning ?? '', '\n\t').split('\n')[0]?.trim() ?? '';
+  if (reasoning !== '') lines.push(...fitLines(theme.dim(`· ${reasoning}`), width));
+  const text = stripControls(item.text ?? '', '\n\t');
+  if (text.trim() !== '') lines.push(...new Markdown(text, 0, 0, markdownTheme(theme)).render(width));
+  // Its own line: appending to a full-width body line would truncate the marker.
+  if (item.interrupted === true) lines.push(theme.dim('(interrupted)'));
+  if (item.usage !== undefined) lines.push(usageLine(item.usage, width, theme));
+  return lines;
+}
+
+/** Argument keys worth one status line, in the order a reader wants them. */
+const SUMMARY_KEYS = ['description', 'command', 'path', 'query', 'pattern'] as const;
+
+/** The first useful argument a tool call carries, or the head of the raw args. */
+function summarize(args: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(args);
+  } catch {
+    parsed = undefined;
+  }
+  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    const record = parsed as Record<string, unknown>;
+    for (const key of SUMMARY_KEYS) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim() !== '') return value.split('\n')[0]?.trim() ?? '';
+    }
+  }
+  return args.split('\n')[0]?.trim() ?? '';
+}
+
+/** The pieces of one tool call, shared by both rendering paths. */
+interface ToolParts {
+  readonly glyph: string;
+  readonly token: Token;
+  readonly bg: Token;
+  readonly name: string;
+  readonly summary: string;
+  readonly meta: string;
+  readonly detail: string;
+}
+
+function toolParts(item: Extract<MirrorItem, { k: 'tool' }>): ToolParts {
+  const look =
+    item.state === 'start'
+      ? { glyph: '⏳', token: 'warning' as const, bg: 'toolBgPending' as const }
+      : item.state === 'ok'
+        ? { glyph: '✔', token: 'success' as const, bg: 'toolBgOk' as const }
+        : { glyph: '✘', token: 'error' as const, bg: 'toolBgError' as const };
+  return {
+    ...look,
+    name: stripControls(item.name),
+    summary: summarize(stripControls(item.args, '\n\t')),
+    meta: item.state !== 'start' && item.ms !== undefined ? ` ⟦${String(item.ms)}ms⟧` : '',
+    detail: stripControls(item.detail ?? '', '\n\t').split('\n')[0]?.trim() ?? '',
+  };
+}
+
+/** A tool call: a coloured status band, then the dim detail line. */
+function toolEntry(item: Extract<MirrorItem, { k: 'tool' }>, width: number, theme: Theme): string[] {
+  const parts = toolParts(item);
+  const head = `${theme.fg(parts.token, parts.glyph)} ${theme.bold(parts.name)}${parts.summary === '' ? '' : theme.dim(`: ${parts.summary}`)}${parts.meta === '' ? '' : theme.dim(parts.meta)}`;
+  const headWidth = visibleWidth(head);
+  const fitted = headWidth > width ? sliceByColumn(head, 0, width, true) : head;
+  const lines = [theme.bg(parts.bg, fitted + ' '.repeat(Math.max(0, width - Math.min(headWidth, width))))];
+  if (parts.detail !== '') lines.push(...fitLines(theme.dim(`  └─ ${parts.detail}`), width));
+  return lines;
+}
+
+/** An echo or other system line: dim, and small enough to stay dense. */
+function systemEntry(text: string, width: number, theme: Theme): string[] {
+  return fitLines(text, width).map((line) => theme.dim(line));
+}
+
+/**
+ * Wraps plain text to `width` columns. `wrapTextWithAnsi` only preserves escape
+ * sequences, so plain input comes back plain — which the ANSI-aware truncation
+ * helper below does not: its truncating branch appends a reset.
+ */
+function wrapPlain(text: string, width: number): string[] {
+  const w = Math.max(1, Math.floor(width));
+  const lines: string[] = [];
+  for (const source of text.split('\n')) {
+    const wrapped = wrapTextWithAnsi(source, w);
+    if (wrapped.length === 0) lines.push('');
+    else lines.push(...wrapped);
+  }
+  return lines;
+}
+
+/**
+ * Fits a styled line to `width` by slicing visible columns. `truncateToWidth`
+ * replaces an overflowing line with an ellipsis, which loses the content; a
+ * slice keeps it and appends one reset for whatever style was still open.
+ */
+function clipStyled(line: string, width: number): string {
+  if (visibleWidth(line) <= width) return line;
+  return `${sliceByColumn(line, 0, width, true)}\x1b[0m`;
+}
+
+/** Truncates to `width` visible columns by code point; adds no escape sequence. */
+function truncatePlain(line: string, width: number): string {
+  const w = Math.max(1, Math.floor(width));
+  if (visibleWidth(line) <= w) return line;
+  let out = '';
+  for (const char of line) {
+    if (visibleWidth(out + char) > w) break;
+    out += char;
+  }
+  return out;
+}
+
+/**
+ * The plain-theme renderer: same information as the coloured blocks, no SGR and
+ * no OSC. It deliberately avoids `Box`, `Markdown` and `truncateToWidth`, each
+ * of which can emit styling even when every theme function is an identity.
+ */
+function plainEntry(entry: MirrorItem | string, width: number): string[] {
+  if (typeof entry === 'string') return wrapPlain(entry, width);
+  switch (entry.k) {
+    case 'user': {
+      const mark = '❯ ';
+      const markWidth = Math.min(visibleWidth(mark), Math.max(0, width - 1));
+      const body = wrapPlain(stripControls(entry.text, '\n\t'), Math.max(1, width - markWidth));
+      if (markWidth === 0) return body;
+      const head = truncatePlain(mark, markWidth);
+      const blank = ' '.repeat(markWidth);
+      return body.map((line, index) => `${index === 0 ? head : blank}${line}`);
+    }
+    case 'assistant': {
+      const lines: string[] = [];
+      const reasoning = stripControls(entry.reasoning ?? '', '\n\t').split('\n')[0]?.trim() ?? '';
+      if (reasoning !== '') lines.push(...wrapPlain(`· ${reasoning}`, width));
+      const text = stripControls(entry.text ?? '', '\n\t');
+      if (text.trim() !== '') lines.push(...wrapPlain(text, width));
+      if (entry.interrupted === true) lines.push('(interrupted)');
+      if (entry.usage !== undefined) lines.push(rightAlign(usageText(entry.usage), width));
+      return lines;
+    }
+    case 'tool': {
+      const parts = toolParts(entry);
+      const head = `${parts.glyph} ${parts.name}${parts.summary === '' ? '' : `: ${parts.summary}`}${parts.meta}`;
+      const lines = wrapPlain(head, width);
+      if (parts.detail !== '') lines.push(...wrapPlain(`  └─ ${parts.detail}`, width));
+      return lines;
+    }
+  }
+}
+
+/**
+ * One entry's lines at a width, fully styled: user block, assistant markdown,
+ * tool band or dim system line.
+ * @param entry - a mirror item, or an echo line (a string).
+ * @param width - the viewport width; every line is truncated to it.
+ * @param theme - the surface theme; plain by default, so output stays byte-clean.
+ */
+export function renderEntry(entry: MirrorItem | string, width: number, theme: Theme = PLAIN): string[] {
+  const w = Math.max(1, Math.floor(width));
+  // The plain path must stay byte-clean: pi-tui's truncation appends a reset and
+  // its Markdown renders links through OSC 8, so neither is used without colour.
+  if (!theme.color) return plainEntry(entry, w).map((line) => truncatePlain(line, w));
+  const lines =
+    typeof entry === 'string'
+      ? systemEntry(entry, w, theme)
+      : entry.k === 'user'
+        ? userEntry(entry.text, w, theme)
+        : entry.k === 'assistant'
+          ? assistantEntry(entry, w, theme)
+          : toolEntry(entry, w, theme);
+  return lines.map((line) => clipStyled(line, w));
+}
+
+/** Entry renderer injection for tests plus the drawing options. */
+export interface TranscriptOptions {
+  /** Width entries wrap at until a render names the real one. */
+  readonly width?: number;
+  /** The theme entries draw with; plain when omitted. */
+  readonly theme?: Theme;
+  /** Replaces the themed renderer, e.g. to count calls without a terminal. */
+  readonly wrapEntry?: (entry: MirrorItem | string, width: number) => string[];
 }
 
 /** Appends in place; a spread would give a huge block one call frame per line. */
@@ -408,9 +717,10 @@ export function startTui(options: StartTuiOptions): Surface {
   // scrollback while attached. Mouse capture stays off — the plan has no mouse
   // support, and leaving it on would steal the terminal's own selection.
   const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
-  const transcript = new TranscriptView();
-  const status = new StatusLine();
-  const editor = new Editor(tui, THEME);
+  const theme = themeFor();
+  const transcript = new TranscriptView({ theme });
+  const status = new StatusLine(theme);
+  const editor = new Editor(tui, editorTheme(theme));
   const shell = new Shell(terminal, transcript, editor, status, options.width ?? 80);
 
   editor.onSubmit = (text: string): void => {
