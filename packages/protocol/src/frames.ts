@@ -6,13 +6,25 @@
  * makes one frame mean one thing.
  */
 
-import { isProgramState } from './osc.js'
+import { isProgramState, stripControls } from './osc.js'
 import type { ProgramState } from './osc.js'
 
 /** One frame, newline included, never larger than this. */
 export const MAX_FRAME = 64 * 1024
 /** The only protocol version either side speaks. */
-export const PROTO = 1
+export const PROTO = 2
+
+// Caps a mirror frame's strings so one assistant block still encodes. Each is a
+// UTF-8 byte budget, not a character count: JSON escaping and multibyte text
+// both grow on the wire, so `.length` would not bound the frame. The codec never
+// truncates — only a whole frame over `MAX_FRAME` throws — so staying under these
+// is the caller's duty, and `MAX_FRAME` is the hard limit on the wire.
+export const MAX_ITEM_TEXT = 16 * 1024
+export const MAX_ITEM_REASONING = 1024
+export const MAX_ITEM_ARGS = 512
+export const MAX_ITEM_DETAIL = 2048
+export const MAX_ITEM_NAME = 64
+export const MAX_ITEM_CALL_ID = 96
 
 export type ErrorCode =
   | 'busy'
@@ -52,11 +64,37 @@ export type Welcome = {
   readonly turn: number
 }
 
+/** Token counts as the host reports them on one finished assistant step. */
+type MirrorUsage = { readonly inputTokens: number; readonly outputTokens: number; readonly cacheReadTokens?: number }
+
+/** One human-facing transcript item; the machine surface never reads it. */
+export type MirrorItem =
+  | { readonly k: 'user'; readonly text: string }
+  | {
+      readonly k: 'assistant'
+      readonly text?: string
+      readonly reasoning?: string
+      readonly usage?: MirrorUsage
+      readonly interrupted?: boolean
+      readonly turn: number
+    }
+  | {
+      readonly k: 'tool'
+      readonly callId: string
+      readonly name: string
+      readonly args: string
+      readonly state: 'start' | 'ok' | 'error'
+      readonly detail?: string
+      readonly ms?: number
+      readonly turn: number
+    }
+
 /** Everything the plugin may write: the server half of the protocol. */
 export type OutFrame =
   | Welcome
   | { readonly t: 'osc'; readonly data: string }
   | { readonly t: 'echo'; readonly text: string }
+  | { readonly t: 'mirror'; readonly item: MirrorItem }
   | { readonly t: 'sessions'; readonly items: readonly SessionItem[] }
   | { readonly t: 'error'; readonly code: ErrorCode; readonly message: string }
   | { readonly t: 'bye'; readonly reason: string }
@@ -170,7 +208,9 @@ export function decodeChunk(rest: string, chunk: string): Decoded {
     const frame = parseOutFrame(line)
     if (frame === undefined) {
       const shown = line.length > 60 ? `${line.slice(0, 60)}…` : line
-      return { ok: false, reason: `invalid frame: ${shown}` }
+      // The excerpt is peer bytes on their way to the operator's stderr, so it
+      // is stripped like any other rendered text first.
+      return { ok: false, reason: `invalid frame: ${stripControls(shown)}` }
     }
     frames.push(frame)
   }
@@ -207,6 +247,8 @@ function parseOutFrame(line: string): OutFrame | undefined {
     }
     case 'sessions':
       return parseSessions(parsed['items'])
+    case 'mirror':
+      return parseMirror(parsed['item'])
     case 'error': {
       const code = parsed['code']
       const message = parsed['message']
@@ -216,6 +258,77 @@ function parseOutFrame(line: string): OutFrame | undefined {
     case 'bye': {
       const reason = parsed['reason']
       return typeof reason === 'string' ? { t: 'bye', reason } : undefined
+    }
+    default:
+      return undefined
+  }
+}
+
+/** A string field is either absent or a string; `undefined` means malformed. */
+function optString(value: unknown): string | undefined | null {
+  if (value === undefined) return undefined
+  return typeof value === 'string' ? value : null
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function parseUsage(value: unknown): MirrorUsage | undefined | null {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) return null
+  const { inputTokens, outputTokens, cacheReadTokens } = value
+  if (!isCount(inputTokens) || !isCount(outputTokens)) return null
+  if (cacheReadTokens === undefined) return { inputTokens, outputTokens }
+  return isCount(cacheReadTokens) ? { inputTokens, outputTokens, cacheReadTokens } : null
+}
+
+function parseMirror(value: unknown): OutFrame | undefined {
+  if (!isRecord(value)) return undefined
+  const turn = value['turn']
+  switch (value['k']) {
+    case 'user': {
+      const text = value['text']
+      return typeof text === 'string' ? { t: 'mirror', item: { k: 'user', text } } : undefined
+    }
+    case 'assistant': {
+      if (!isCount(turn)) return undefined
+      const text = optString(value['text'])
+      const reasoning = optString(value['reasoning'])
+      const usage = parseUsage(value['usage'])
+      const interrupted = value['interrupted']
+      if (text === null || reasoning === null || usage === null) return undefined
+      if (interrupted !== undefined && typeof interrupted !== 'boolean') return undefined
+      const item: MirrorItem = {
+        k: 'assistant',
+        turn,
+        ...(text === undefined ? {} : { text }),
+        ...(reasoning === undefined ? {} : { reasoning }),
+        ...(usage === undefined ? {} : { usage }),
+        ...(interrupted === undefined ? {} : { interrupted }),
+      }
+      return { t: 'mirror', item }
+    }
+    case 'tool': {
+      const { callId, name, args, state } = value
+      if (typeof callId !== 'string' || callId === '' || typeof name !== 'string' || name === '') return undefined
+      if (typeof args !== 'string' || !isCount(turn)) return undefined
+      if (state !== 'start' && state !== 'ok' && state !== 'error') return undefined
+      const detail = optString(value['detail'])
+      const ms = value['ms']
+      if (detail === null) return undefined
+      if (ms !== undefined && !isCount(ms)) return undefined
+      const item: MirrorItem = {
+        k: 'tool',
+        callId,
+        name,
+        args,
+        state,
+        turn,
+        ...(detail === undefined ? {} : { detail }),
+        ...(ms === undefined ? {} : { ms }),
+      }
+      return { t: 'mirror', item }
     }
     default:
       return undefined

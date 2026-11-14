@@ -5,7 +5,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import type { SessionItem } from 'dsh-supervision-protocol';
+import { PROTO, type SessionItem } from 'dsh-supervision-protocol';
 import { EXIT } from './exit.js';
 
 const MAIN = fileURLToPath(new URL('./main.js', import.meta.url));
@@ -81,7 +81,7 @@ function list(
   backends.forEach((backend, index) => {
     writeFileSync(
       join(registry, `${String(process.pid)}-0000000${String(index)}.json`),
-      JSON.stringify({ proto: 1, pid: process.pid, socket: backend.socket, startedAt: 1, dshVersion: 'x' }),
+      JSON.stringify({ proto: PROTO, pid: process.pid, socket: backend.socket, startedAt: 1, dshVersion: 'x' }),
     );
   });
 

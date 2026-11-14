@@ -130,7 +130,7 @@ function packageVersion(): string {
   return (JSON.parse(readFileSync(manifestUrl, 'utf8')) as { version: string }).version
 }
 
-function isSkillsLike(value: unknown): value is SkillsLike {
+export function isSkillsLike(value: unknown): value is SkillsLike {
   return (
     typeof value === 'object' &&
     value !== null &&

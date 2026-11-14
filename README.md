@@ -60,7 +60,7 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 Backends are found through `$DSH_HOME/supervision` (`~/.dsh/supervision` when `DSH_HOME` is unset). A bridge needs exactly one live backend; with several, the refusal names each candidate's `pid` and socket, and `--pid` picks one. `--cwd` applies to `new` and `list` only; `list` without it shows every session, with the CWD column naming where each one lives.
 
-The bridge reads stdin in the terminal's own line mode — it never enters raw mode — so `Ctrl+C`, `Ctrl+Z`, `Ctrl+\`, input echo and line editing keep working as they do without the plugin. `Ctrl+S`/`Ctrl+Q` stay the terminal driver's flow control: on the `/dev/tty` surface a paused terminal holds the bridge's records in an ordered queue instead of blocking the host, and they flush on resume. The stdout fallback (no controlling terminal) keeps a synchronous write, so there a paused terminal still stalls it. Operator input is read a line at a time, after Enter; the line discipline caps one line at its `MAX_CANON` (4 KB on Linux, 1 KB on macOS), so a much longer paste reaches the agent truncated.
+The bridge reads stdin in the terminal's own line mode — it never enters raw mode — so `Ctrl+C`, `Ctrl+Z`, `Ctrl+\`, input echo and line editing keep working as they do without the plugin. `Ctrl+S`/`Ctrl+Q` stay the terminal driver's flow control: on the `/dev/tty` surface a paused terminal holds the bridge's records in an ordered queue instead of blocking the host, and they flush on resume. The stdout fallback (no controlling terminal) keeps a synchronous write, so there a paused terminal still stalls it. Operator input is read a line at a time, after Enter; the line discipline caps one line at its `MAX_CANON` (4 KB on Linux, 1 KB on macOS), so a much longer paste reaches the agent truncated. In a terminal, an attach also shows the conversation as it happens — the operator's messages, the assistant's replies and its tool calls print on that terminal's stdout — while a redirected stdout stays machine-clean (see [How it reports](#how-it-reports)).
 
 **Empty sessions stay out of the web UI.** A session created here is attached to its project, but the DSH sidebar lists a session only after its first message. Until then it exists in `dsh-sup list` and on the bridge, with no row under the project. Send one line from the terminal (or attach and steer) and it appears.
 
@@ -82,6 +82,8 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 While a session is bridged the GUI shows a supervision banner above the composer — `Supervised from <terminal> (pid <n>) · approvals are answered there` — with a **Take back control** button. It posts to the reclaim route; the bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
 
+The same state is visible before opening the session: its sidebar row gets a heavy blue outline and a whale-tail badge, so a supervised session cannot be mistaken for one that is yours to type into. Opening it puts a guard over the composer (`Supervised from dsh-sup — this composer is covered.`) and makes the editor `inert`, so neither the pointer nor an already-focused caret can type into it. The **Unlock** button posts the reclaim; only a confirmed release removes the guard, so a refused unlock leaves it in place.
+
 ### Agent skill
 
 The plugin ships a `use-dsh-supervision` skill, so the agent inside a supervised session knows it needs the same-version `dsh-sup` forwarder, checks it with `dsh-sup --version`, and offers the install only after the user agrees. `dsh-sup --skill` prints the forwarder's full manual.
@@ -94,12 +96,24 @@ One `dsh web` process owns one session tree; the plugin mounts in it and opens i
 dsh web (the process you already run)
 └── dsh-supervision plugin
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
-      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo lines ──▶ supervisor (reads OSC 7501)
+      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo + mirror lines ──▶ supervisor (reads OSC 7501)
       └── in-process tty   (added when DSH_SUP_TERMINAL_ID or HC_TERMINAL_ID is set)
-            └── OSC 7501 written to this process's own /dev/tty
+            └── OSC 7501 records and mirror lines written to this process's own /dev/tty
 ```
 
 **Activation.** The plugin always opens its socket discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `DSH_SUP_TERMINAL_ID` non-empty (or herdr-core's `HC_TERMINAL_ID`) the process also supervises the terminal it runs in: the same records go to its own `/dev/tty`, while the socket stays open for a `dsh-sup` elsewhere. A session still has exactly one bridge across both surfaces, so a second attach is refused as `busy`. If the terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and keeps the socket surface.
+
+**Transcript output.** The bridge also forwards the conversation itself. A `mirror` frame carries one item — an operator message, an assistant reply (with a `⟦↑in ↓out⟧` usage line whenever the adapter reported token usage), or a tool call — and the forwarder writes it as append-only lines: no colour, no markdown, no spinner, no alternate screen, no line ever rewritten, and nothing from before the attach replayed. OSC 7501 records keep going to `/dev/tty`, so a real supervisor still reads the machine surface; the transcript lines go to stdout, and only when stdout is a TTY, so `dsh-sup … | tee log` stays machine-clean. `echo` lines reach exactly one sink: stdout when the operator has a TTY, `/dev/tty` otherwise.
+
+```text
+❯ implement the mirror
+· One assistant/message per step; no deltas to stream.
+The mirror prints finished blocks, one line at a time.
+⟦↑1,234 ↓340 R900⟧
+⏳ bash: List the protocol package
+✔ bash: List the protocol package ⟦12ms⟧
+  └─ packages/protocol/src
+```
 
 ## For implementers & agents
 
@@ -122,12 +136,12 @@ This half is reference material for implementers and coding agents; if you only 
 
 The facts a supervisor needs, all of them on this repository's wire:
 
-**Socket and registry.** One Unix socket per `dsh web` process, mode `0600`, at `$DSH_HOME/supervision/<pid>-<8hex>.sock`, next to a `<pid>-<8hex>.json` entry `{proto, pid, socket, startedAt, dshVersion}` written atomically and mode `0600`. A session has exactly one bridge: a second connection claiming it is refused with `error` code `busy` and closed. Frames are NDJSON, `PROTO` is `1`, one frame is at most 64 KiB; the forwarder splits its own stdin on `\r`, `\n` or `\r\n` and sends one `line` frame per input line.
+**Socket and registry.** One Unix socket per `dsh web` process, mode `0600`, at `$DSH_HOME/supervision/<pid>-<8hex>.sock`, next to a `<pid>-<8hex>.json` entry `{proto, pid, socket, startedAt, dshVersion}` written atomically and mode `0600`. A session has exactly one bridge: a second connection claiming it is refused with `error` code `busy` and closed. Frames are NDJSON, `PROTO` is `2`, one frame is at most 64 KiB; the forwarder splits its own stdin on `\r`, `\n` or `\r\n` and sends one `line` frame per input line.
 
 | Direction | Frames |
 |---|---|
 | forwarder → plugin | `hello` (`attach` a session, `new {cwd}`, or bare), `line {text}`, `list {cwd?}`, `bye` |
-| plugin → forwarder | `welcome`, `osc {data}`, `echo {text}`, `sessions {items}`, `error {code, message}`, `bye {reason}` |
+| plugin → forwarder | `welcome`, `osc {data}`, `echo {text}`, `mirror {item}` (`item.k` is `user`, `assistant` or `tool`), `sessions {items}`, `error {code, message}`, `bye {reason}` |
 
 `error.code` is one of `busy`, `unknown-session`, `create-failed`, `locked`, `protocol`, `internal`.
 

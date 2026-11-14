@@ -60,7 +60,7 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 后端通过 `$DSH_HOME/supervision` 发现（`DSH_HOME` 未设置时是 `~/.dsh/supervision`）。建立桥接恰好需要一个存活后端；有多个时拒绝信息会列出每个候选的 `pid` 与套接口，用 `--pid` 选定一个。`--cwd` 只对 `new` 和 `list` 生效；`list` 不带它时列出全部会话，CWD 列说明每个会话在哪个目录。
 
-桥接期间 stdin 仍走终端自己的行模式——插件从不进入 raw 模式——因此 `Ctrl+C`、`Ctrl+Z`、`Ctrl+\`、输入回显与行编辑都和没装插件时一样。`Ctrl+S`/`Ctrl+Q` 仍由终端驱动做流控：走 `/dev/tty` 时终端暂停会让桥接记录进入有序队列，不阻塞宿主，恢复后照常写出；没有控制终端而退回 stdout 时仍是同步写，暂停仍会卡住它。操作者的输入按行读取，回车后生效；行规程会按 `MAX_CANON` 限制单行长度（Linux 4 KB、macOS 1 KB），超长的粘贴到达 agent 时会被截断。
+桥接期间 stdin 仍走终端自己的行模式——插件从不进入 raw 模式——因此 `Ctrl+C`、`Ctrl+Z`、`Ctrl+\`、输入回显与行编辑都和没装插件时一样。`Ctrl+S`/`Ctrl+Q` 仍由终端驱动做流控：走 `/dev/tty` 时终端暂停会让桥接记录进入有序队列，不阻塞宿主，恢复后照常写出；没有控制终端而退回 stdout 时仍是同步写，暂停仍会卡住它。操作者的输入按行读取，回车后生效；行规程会按 `MAX_CANON` 限制单行长度（Linux 4 KB、macOS 1 KB），超长的粘贴到达 agent 时会被截断。在终端里 attach 时，对话本身也会一并显示——操作者的消息、助手的回复与工具调用都在发生时就打到该终端的 stdout 上——而 stdout 被重定向时这类行不会出现（见[如何上报](#如何上报)）。
 
 **空会话不会出现在 Web UI 列表。** 这里创建的会话已经挂到对应项目，但 DSH 侧边栏只列出发过第一条消息的会话；在那之前它只存在于 `dsh-sup list` 与桥接上，项目下没有条目。从终端发一行（或 attach 后 steer）它就会出现。
 
@@ -82,6 +82,8 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 只要会话处于桥接状态，GUI 输入框上方就会出现监督横幅——`Supervised from <terminal> (pid <n>) · approvals are answered there`——旁边是「Take back control」按钮。它请求回收路由；桥接被丢弃，监督方收到清除记录，`dsh-sup` 转发器以 `0` 退出。
 
+不用打开会话也能看出来：侧边栏里被接管的会话行带一圈醒目的蓝色描边和鲸鱼尾巴徽标，不会被误当成可以随手输入自己的会话。点进去后输入框会被一层遮罩盖住（`Supervised from dsh-sup — this composer is covered.`），编辑器被置为 `inert`，鼠标点不进去、已经聚焦的光标也打不了字。「Unlock」按钮发起回收；只有确认释放成功才会撤掉遮罩，被拒绝的解锁会保留遮罩。
+
 ### 给 agent 的技能
 
 插件自带 `use-dsh-supervision` 技能：被监督会话里的 agent 因此知道需要同版本的 `dsh-sup` 转发器，会用 `dsh-sup --version` 核对，并在用户同意后才提出安装。`dsh-sup --skill` 会打印转发器的完整手册。
@@ -94,12 +96,24 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 dsh web (the process you already run)
 └── dsh-supervision plugin
       ├── control socket   $DSH_HOME/supervision/<pid>-<8hex>.sock   (0600)
-      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo lines ──▶ supervisor (reads OSC 7501)
+      │     └── dsh-sup in the supervisor's PTY ── OSC 7501 + echo + mirror lines ──▶ supervisor (reads OSC 7501)
       └── in-process tty   (added when DSH_SUP_TERMINAL_ID or HC_TERMINAL_ID is set)
-            └── OSC 7501 written to this process's own /dev/tty
+            └── OSC 7501 records and mirror lines written to this process's own /dev/tty
 ```
 
 **挂载规则。**插件总是先把套接口发现面打开——监听器、`0600` 套接口，以及指向它的 `<pid>-<8hex>.json` 注册表条目——这样转发器才有东西可连。效果层（会话监听、OSC 上报、echo 行、stdin 处理）按桥接打开，"有一条桥接"和"有转发器已连接"是同一件事。因此一个只开 GUI 的 `dsh web` 只暴露一个不干活的套接口，别的什么都没有。当 `DSH_SUP_TERMINAL_ID` 非空（或 herdr-core 的 `HC_TERMINAL_ID` 非空）时，进程同时监督自己所在的终端：同样的记录写到自己的 `/dev/tty`，套接口仍然为别处的 `dsh-sup` 开着。一个会话在两条通路上仍只有一条桥接，第二个认领者会收到 `busy`。如果终端打不开——既没有 `/dev/tty`、stdout 也不是 TTY，或者 stdin 不是终端——插件把原因写到 stderr，并保留套接口这条路。
+
+**对话输出。**桥接也会把对话本身转发出来。一条 `mirror` 帧携带一个条目——操作者的一句话、一条助手回复（适配器上报了 token 用量时才多一行 `⟦↑in ↓out⟧`）、或一次工具调用——转发器把它写成只追加的行：无颜色、无 markdown、无 spinner、不切备用屏，写出的行从不重写，attach 之前的内容也不回放。OSC 7501 记录照旧写到 `/dev/tty`，真正的 supervisor 读的仍是这个机器面；对话行写到 stdout，且只在 stdout 是 TTY 时写，所以 `dsh-sup … | tee log` 写出的文件依然干净。`echo` 行只去一个去处：操作者有 TTY 时是 stdout，否则是 `/dev/tty`。
+
+```text
+❯ 把 mirror 实现出来
+· 每个 step 只有一条 assistant/message，没有增量可流。
+mirror 打印的是写好的整块，一次一行。
+⟦↑1,234 ↓340 R900⟧
+⏳ bash: 列出 protocol 包
+✔ bash: 列出 protocol 包 ⟦12ms⟧
+  └─ packages/protocol/src
+```
 
 ## 写给实现者与 agent
 
@@ -122,12 +136,12 @@ dsh web (the process you already run)
 
 监督方需要的全部事实，都在这套线上：
 
-**套接口与注册表。**每个 `dsh web` 进程一个 Unix 套接口，权限 `0600`，位于 `$DSH_HOME/supervision/<pid>-<8hex>.sock`，旁边是原子写入、同样 `0600` 的 `<pid>-<8hex>.json` 条目 `{proto, pid, socket, startedAt, dshVersion}`。一个会话只有一条桥接：第二个连接来认领时会被以 `error` 码 `busy` 拒绝并关闭。帧是 NDJSON，`PROTO` 为 `1`，单帧最大 64 KiB。
+**套接口与注册表。**每个 `dsh web` 进程一个 Unix 套接口，权限 `0600`，位于 `$DSH_HOME/supervision/<pid>-<8hex>.sock`，旁边是原子写入、同样 `0600` 的 `<pid>-<8hex>.json` 条目 `{proto, pid, socket, startedAt, dshVersion}`。一个会话只有一条桥接：第二个连接来认领时会被以 `error` 码 `busy` 拒绝并关闭。帧是 NDJSON，`PROTO` 为 `2`，单帧最大 64 KiB。
 
 | 方向 | 帧 |
 |---|---|
 | 转发器 → 插件 | `hello`（`attach` 某会话、`new {cwd}`，或不带目标）、`line {text}`（按 stdin 的 `\r`、`\n` 或 `\r\n` 切行）、`list {cwd?}`、`bye` |
-| 插件 → 转发器 | `welcome`、`osc {data}`、`echo {text}`、`sessions {items}`、`error {code, message}`、`bye {reason}` |
+| 插件 → 转发器 | `welcome`、`osc {data}`、`echo {text}`、`mirror {item}`（`item.k` 为 `user`、`assistant` 或 `tool`）、`sessions {items}`、`error {code, message}`、`bye {reason}` |
 
 `error.code` 取 `busy`、`unknown-session`、`create-failed`、`locked`、`protocol`、`internal` 之一。
 

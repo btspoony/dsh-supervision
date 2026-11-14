@@ -8,6 +8,7 @@
 
 import type { ReactElement } from 'react'
 import { Banner } from './BannerView.js'
+import { watch } from './dom.js'
 
 /** One slot registration, reduced to the calls this plugin makes. */
 interface SlotRegistrar {
@@ -40,4 +41,7 @@ export function apply(ctx: ClientContext): void {
     order: 10,
     inject: (sessionId: string) => ({ sessionId }),
   }, Banner))
+  // The banner says who holds the session; the decoration makes it visible in
+  // the sidebar and locks the composer until the operator takes control back.
+  if (typeof document !== 'undefined') watch(document)
 }

@@ -131,6 +131,38 @@ test('encodeReport never returns an empty field', () => {
   assert.equal(encodeReport({ state: 'idle', app: '' }), `${ESC}]7501;state=idle${ST}`)
 })
 
+test('encodeReport caps title and msg in bytes, so multibyte text still fits', () => {
+  // Both fields are byte budgets: these values are under their caps in
+  // characters but far over them in UTF-8, which is what herdr-core counts.
+  const sequence = encodeReport({ state: 'working', title: '字'.repeat(400), msg: 'é'.repeat(4000) })
+  const decode = (key: string): string => Buffer.from(value(sequence, key), 'base64').toString('utf8')
+  const title = decode('title')
+  const msg = decode('msg')
+  assert.ok(Buffer.byteLength(title, 'utf8') <= 192, 'title is a 192-byte budget')
+  assert.ok(Buffer.byteLength(msg, 'utf8') <= 2048, 'msg is a 2048-byte budget')
+  assert.ok(value(sequence, 'title').length <= 256, 'base64 title stays under its cap')
+  assert.ok(value(sequence, 'msg').length <= 2732, 'base64 msg stays under its cap')
+  assert.ok(Buffer.byteLength(sequence, 'utf8') < 4096)
+  assert.equal(title, '字'.repeat(64), 'no code point is split')
+})
+
+test('encodeReport keeps ASCII output byte-identical', () => {
+  assert.equal(
+    encodeReport({ state: 'idle', app: 'dsh', title: 'repo', msg: 'ready' }),
+    `${ESC}]7501;state=idle:app=dsh:title=cmVwbw==:msg=cmVhZHk=${ST}`,
+  )
+})
+
+test('a report with both fields at their caps still lands under the frame limit', () => {
+  // The byte caps are what make the whole-sequence check a backstop rather than
+  // a dropping rule: 256 + 2732 base64 characters plus the words never reach
+  // herdr-core's 4096-byte frame.
+  const sequence = encodeReport({ state: 'working', app: 'a'.repeat(64), title: 'x'.repeat(192), msg: 'y'.repeat(2048) })
+  assert.ok(Buffer.byteLength(sequence, 'utf8') < 4096)
+  assert.equal(value(sequence, 'title'), Buffer.from('x'.repeat(192), 'utf8').toString('base64'))
+  assert.equal(value(sequence, 'msg'), Buffer.from('y'.repeat(2048), 'utf8').toString('base64'))
+})
+
 test('clear addresses the root and, given an id, one child subtree', () => {
   assert.equal(clearProgramStatus(), `${ESC}]7501;state=clear${ST}`)
   assert.equal(clearProgramStatus('sub/session-1'), `${ESC}]7501;state=clear:id=sub/session-1${ST}`)
