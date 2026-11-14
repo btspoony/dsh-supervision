@@ -6,7 +6,7 @@ import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { routeFrame } from './route.js';
 import { skillText, version } from './skill.js';
-import { chooseSurface, echoStatus, restoreOnExit, startTui, type Surface } from './tui.js';
+import { chooseSurface, echoStatus, startTui, type Surface } from './tui.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
@@ -170,9 +170,6 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
           if (useTui) {
             surface = startTui({ title, sendLine, width: process.stdout.columns, onExit: () => { settle(EXIT.ok); } });
             surface.setStatus({ session: frame.session, state: frame.state, turn: frame.turn });
-            // A kill or a throw exits without reaching `settle`, and the raw
-            // mode, hidden cursor and bracketed paste would outlive us.
-            restoreOnExit(closeSurface);
           } else {
             pump(sendLine);
           }

@@ -54,7 +54,9 @@ read.
 When stdin and stdout are both terminals, an attach opens a full-screen surface:
 a scrollable transcript of those blocks, a multi-line editor for the next
 operator line, and a status line with the session id, state and turn. Everything
-forwarded stays in the transcript, so scrolling back reaches the whole attach.
+forwarded stays in the transcript, so scrolling back reaches the whole attach. The
+surface takes over the alternate screen; terminal scrollback is not written, and
+the last frame returns to the normal screen on exit.
 
 | Key | Effect |
 |---|---|

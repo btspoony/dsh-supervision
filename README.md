@@ -70,7 +70,10 @@ When stdin and stdout are both terminals, an attach opens a full-screen surface
 instead of appending lines: the conversation in a scrollable transcript viewport,
 a multi-line editor for the next operator line, and a status line carrying the
 session id, the reported state and the turn. Everything the bridge forwards stays
-in the transcript, so scrolling back reaches the whole attach.
+in the transcript, so scrolling back reaches the whole attach. The surface
+takes over the terminal's alternate screen while attached: terminal scrollback is
+not written, the TUI viewport is the history, and the last frame is printed back
+on the normal screen when the attach ends.
 
 | Key | Effect |
 |---|---|

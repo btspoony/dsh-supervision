@@ -10,7 +10,8 @@
 import {
   Editor,
   ProcessTerminal,
-  TuiMainScreen,
+  TuiAltScreen,
+  getKeybindings,
   matchesKey,
   truncateToWidth,
   wrapTextWithAnsi,
@@ -309,10 +310,9 @@ class Shell implements Component {
 
 /**
  * Registers the surface's synchronous restore on the exit paths the CLI does
- * not own. Without it a signal or a throw leaves the tty in raw mode, the
- * cursor hidden and bracketed paste on. SIGINT is deliberately left alone: in
- * raw mode Ctrl+C is a byte, and the Editor owns it. `stop` is idempotent, so
- * a double restore is harmless.
+ * not own. Without it a signal or a throw leaves the tty in the alternate
+ * screen, raw mode, cursor hidden and bracketed paste on. Call it only once the
+ * surface owns the tty. `stop` is expected to be idempotent.
  * @param stop - the surface's own restore, already guarded against a dead screen.
  */
 export function restoreOnExit(stop: () => void): void {
@@ -338,6 +338,14 @@ export function restoreOnExit(stop: () => void): void {
     restore();
     process.stderr.write(`${error.stack ?? error.message}\n`);
     process.exit(1);
+  });
+  // An external `kill -INT` never becomes a byte, and Node's default SIGINT
+  // path runs no JavaScript cleanup. Restore, then re-raise the same signal so
+  // the process still dies with the default status (130). In-TUI Ctrl+C is a
+  // 0x03 byte handled by the Editor and never reaches this handler.
+  process.once('SIGINT', () => {
+    restore();
+    process.kill(process.pid, 'SIGINT');
   });
 }
 
@@ -366,7 +374,10 @@ export interface StartTuiOptions {
  */
 export function startTui(options: StartTuiOptions): Surface {
   const terminal = new ProcessTerminal();
-  const tui = new TuiMainScreen(terminal);
+  // Full-screen (alternate screen): the transcript viewport replaces terminal
+  // scrollback while attached. Mouse capture stays off — the plan has no mouse
+  // support, and leaving it on would steal the terminal's own selection.
+  const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
   const transcript = new TranscriptView();
   const status = new StatusLine();
   const editor = new Editor(tui, THEME);
@@ -375,6 +386,14 @@ export function startTui(options: StartTuiOptions): Surface {
   editor.onSubmit = (text: string): void => {
     if (text.trim() === '') return;
     options.sendLine(text);
+  };
+
+  /** One restore: `TuiAltScreen.stop` is not itself guarded, so guard it here. */
+  let stopped = false;
+  const stop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    tui.stop();
   };
 
   tui.addChild(shell);
@@ -405,7 +424,20 @@ export function startTui(options: StartTuiOptions): Surface {
     return { consume: true };
   });
 
+  // The alternate-screen renderer registers its own viewport listener first and
+  // would consume PageUp/PageDown; this surface owns the transcript viewport, so
+  // those two bindings are released back to `keyAction`.
+  const bindings = getKeybindings();
+  bindings.setUserBindings({
+    ...bindings.getUserBindings(),
+    'tui.altScreen.pageUp': [],
+    'tui.altScreen.pageDown': [],
+  });
+
   tui.start();
+  // Registered only now that the surface owns the tty: nothing may restore a
+  // screen that was never entered. The guard is idempotent because `stop` is.
+  restoreOnExit(stop);
   if (options.title !== '') terminal.setTitle(`dsh-sup · ${options.title}`);
 
   return {
@@ -417,8 +449,6 @@ export function startTui(options: StartTuiOptions): Surface {
       status.set(next);
       tui.requestRender();
     },
-    stop: (): void => {
-      tui.stop();
-    },
+    stop,
   };
 }

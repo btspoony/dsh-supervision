@@ -179,31 +179,65 @@ test('a resize that brings the bottom back in view clears the marker', () => {
   assert.doesNotMatch(view.render(40).join('\n'), /\u2193/);
 });
 
-test('restoreOnExit leaves SIGINT to the editor and wires the other exits', () => {
-  // One event name at a time: `process.listeners` is overloaded per event.
-  const listenersOf = (event: string): ((...args: unknown[]) => void)[] =>
-    process.listeners(event as 'exit') as ((...args: unknown[]) => void)[];
-  const events = ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP', 'uncaughtException'];
-  const before = new Map(events.map((event) => [event, listenersOf(event)]));
-  restoreOnExit(() => {});
+/** Every exit-path event the guard owns. */
+const GUARDED = ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP', 'uncaughtException'] as const;
+
+/** One event name at a time: `process.listeners` is overloaded per event. */
+function listenersOf(event: string): ((...args: unknown[]) => void)[] {
+  return process.listeners(event as 'exit') as ((...args: unknown[]) => void)[];
+}
+
+/** Runs `body` with the guard installed, then removes only the listeners it added. */
+function withGuard(stop: () => void, body: () => void): void {
+  const before = new Map(GUARDED.map((event) => [event, listenersOf(event)]));
+  restoreOnExit(stop);
   try {
-    assert.deepEqual(listenersOf('SIGINT'), before.get('SIGINT'), 'Ctrl+C is a byte, not a signal');
-    for (const event of ['exit', 'SIGTERM', 'SIGHUP', 'uncaughtException']) {
-      assert.ok(listenersOf(event).length > (before.get(event)?.length ?? 0), `${event} is guarded`);
-    }
+    body();
   } finally {
-    // Hand the runner back its own processes: only remove what this test added.
-    for (const event of events) {
+    for (const event of GUARDED) {
       for (const listener of listenersOf(event)) {
         if (!(before.get(event) ?? []).includes(listener)) process.removeListener(event, listener);
       }
     }
   }
+}
+
+test('restoreOnExit wires every exit path, SIGINT included', () => {
+  withGuard(() => {}, () => {
+    for (const event of GUARDED) {
+      assert.ok(listenersOf(event).length > 0, `${event} is guarded`);
+    }
+  });
+});
+
+test('an external SIGINT restores once, then re-raises the default signal', () => {
+  const savedKill = process.kill;
+  const killed: [number, string][] = [];
+  let stopped = 0;
+  // The re-raise is recorded rather than delivered, so the runner survives it.
+  process.kill = ((pid: number, signal?: string | number) => {
+    killed.push([pid, String(signal)]);
+    return true;
+  }) as typeof process.kill;
+  try {
+    withGuard(() => {
+      stopped += 1;
+    }, () => {
+      assert.ok(listenersOf('SIGINT').length > 0, 'SIGINT is guarded');
+      // `emit` runs the registered `once` wrapper, exactly as the signal would,
+      // so the self-removal before the re-raise is part of what is observed.
+      process.emit('SIGINT');
+      assert.equal(listenersOf('SIGINT').length, 0, 'the handler removes itself before re-raising');
+    });
+  } finally {
+    process.kill = savedKill;
+  }
+  assert.equal(stopped, 1, 'the restore ran exactly once');
+  assert.deepEqual(killed, [[process.pid, 'SIGINT']], 'the default signal is re-raised, so the status stays 130');
 });
 
 test('SIGTERM restores the surface before the process exits', () => {
   const savedExit = process.exit;
-  const savedSigterm = process.listeners('SIGTERM');
   const exited: number[] = [];
   let stopped = 0;
   // The stub records the status and unwinds instead of killing the runner.
@@ -212,17 +246,15 @@ test('SIGTERM restores the surface before the process exits', () => {
     throw new Error('process.exit');
   }) as typeof process.exit;
   try {
-    restoreOnExit(() => {
+    withGuard(() => {
       stopped += 1;
+    }, () => {
+      const handler = listenersOf('SIGTERM').at(-1) as (() => void) | undefined;
+      assert.ok(handler !== undefined, 'SIGTERM is guarded');
+      assert.throws(() => { handler(); }, /process\.exit/);
     });
-    const handler = process.listeners('SIGTERM').at(-1) as (() => void) | undefined;
-    assert.ok(handler !== undefined, 'SIGTERM is guarded');
-    assert.throws(() => { handler(); }, /process\.exit/);
   } finally {
     process.exit = savedExit;
-    for (const listener of process.listeners('SIGTERM')) {
-      if (!savedSigterm.includes(listener)) process.removeListener('SIGTERM', listener);
-    }
   }
   assert.equal(stopped, 1, 'the restore ran before the exit');
   assert.deepEqual(exited, [143], 'a killed attach keeps its signal status');
