@@ -60,9 +60,27 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 后端通过 `$DSH_HOME/supervision` 发现（`DSH_HOME` 未设置时是 `~/.dsh/supervision`）。建立桥接恰好需要一个存活后端；有多个时拒绝信息会列出每个候选的 `pid` 与套接口，用 `--pid` 选定一个。`--cwd` 只对 `new` 和 `list` 生效；`list` 不带它时列出全部会话，CWD 列说明每个会话在哪个目录。
 
-桥接期间 stdin 仍走终端自己的行模式——插件从不进入 raw 模式——因此 `Ctrl+C`、`Ctrl+Z`、`Ctrl+\`、输入回显与行编辑都和没装插件时一样。`Ctrl+S`/`Ctrl+Q` 仍由终端驱动做流控：走 `/dev/tty` 时终端暂停会让桥接记录进入有序队列，不阻塞宿主，恢复后照常写出；没有控制终端而退回 stdout 时仍是同步写，暂停仍会卡住它。操作者的输入按行读取，回车后生效；行规程会按 `MAX_CANON` 限制单行长度（Linux 4 KB、macOS 1 KB），超长的粘贴到达 agent 时会被截断。在终端里 attach 时，对话本身也会一并显示——操作者的消息、助手的回复与工具调用都在发生时就打到该终端的 stdout 上——而 stdout 被重定向时这类行不会出现（见[如何上报](#如何上报)）。
+带 `--no-tui`，或 stdin/stdout 有一个不是终端时，桥接期间 stdin 仍走终端自己的行模式——插件从不进入 raw 模式——因此 `Ctrl+C`、`Ctrl+Z`、`Ctrl+\`、输入回显与行编辑都和没装插件时一样。`Ctrl+S`/`Ctrl+Q` 仍由终端驱动做流控：走 `/dev/tty` 时终端暂停会让桥接记录进入有序队列，不阻塞宿主，恢复后照常写出；没有控制终端而退回 stdout 时仍是同步写，暂停仍会卡住它。操作者的输入按行读取，回车后生效；行规程会按 `MAX_CANON` 限制单行长度（Linux 4 KB、macOS 1 KB），超长的粘贴到达 agent 时会被截断。在终端里 attach 时会打开全屏的[交互面](#交互面)；stdout 被重定向时仍只输出纯行（见[如何上报](#如何上报)）。
 
 **空会话不会出现在 Web UI 列表。** 这里创建的会话已经挂到对应项目，但 DSH 侧边栏只列出发过第一条消息的会话；在那之前它只存在于 `dsh-sup list` 与桥接上，项目下没有条目。从终端发一行（或 attach 后 steer）它就会出现。
+
+### 交互面
+
+stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行追加：对话放在可滚动的 transcript 视口里，下面是多行编辑器，最下面一行状态栏显示会话 id、状态与 turn。桥接转发过的内容都留在 transcript 中，向上滚动就能看全。attach 期间交互面占用终端的备用屏：不写终端回滚缓冲，历史就是 TUI 自己的视口；结束 attach 时最后一帧会打回正常屏幕。
+
+| 按键 | 作用 |
+|---|---|
+| `Enter` | 把编辑器内容作为一行操作者输入发出 |
+| `Shift+Enter` | 在编辑器中换行，前提是终端能上报该修饰键（modifyOtherKeys 或 Kitty 键盘协议）；否则它和 `Enter` 一样提交 |
+| `Ctrl+C` | 发送 `/cancel`，结束当前 turn，不退出 attach |
+| `Ctrl+D` | 退出 attach，先恢复终端 |
+| `PageUp` / `PageDown` | transcript 上下翻一页 |
+| `↑` / `↓` | 编辑器为空时上下滚一行 |
+| `Home` / `End` | 跳到最早一行 / 回到最新（编辑器为空时） |
+
+向上滚动后，最后一行会显示 `↓ N new`，统计期间新到的条目；滚回底部就恢复跟随。界面的绘制使用 [`@earendil-works/pi-tui`](https://github.com/earendil-works/pi)。
+
+`--no-tui` 在终端上也保留只追加的行模式表面；stdout 被重定向时永远走行模式，所以 `dsh-sup … | tee log` 写出的文件依然干净。
 
 ### 应答审批
 
@@ -103,7 +121,7 @@ dsh web (the process you already run)
 
 **挂载规则。**插件总是先把套接口发现面打开——监听器、`0600` 套接口，以及指向它的 `<pid>-<8hex>.json` 注册表条目——这样转发器才有东西可连。效果层（会话监听、OSC 上报、echo 行、stdin 处理）按桥接打开，"有一条桥接"和"有转发器已连接"是同一件事。因此一个只开 GUI 的 `dsh web` 只暴露一个不干活的套接口，别的什么都没有。当 `DSH_SUP_TERMINAL_ID` 非空（或 herdr-core 的 `HC_TERMINAL_ID` 非空）时，进程同时监督自己所在的终端：同样的记录写到自己的 `/dev/tty`，套接口仍然为别处的 `dsh-sup` 开着。一个会话在两条通路上仍只有一条桥接，第二个认领者会收到 `busy`。如果终端打不开——既没有 `/dev/tty`、stdout 也不是 TTY，或者 stdin 不是终端——插件把原因写到 stderr，并保留套接口这条路。
 
-**对话输出。**桥接也会把对话本身转发出来。一条 `mirror` 帧携带一个条目——操作者的一句话、一条助手回复（适配器上报了 token 用量时才多一行 `⟦↑in ↓out⟧`）、或一次工具调用——转发器把它写成只追加的行：无颜色、无 markdown、无 spinner、不切备用屏，写出的行从不重写，attach 之前的内容也不回放。OSC 7501 记录照旧写到 `/dev/tty`，真正的 supervisor 读的仍是这个机器面；对话行写到 stdout，且只在 stdout 是 TTY 时写，所以 `dsh-sup … | tee log` 写出的文件依然干净。`echo` 行只去一个去处：操作者有 TTY 时是 stdout，否则是 `/dev/tty`。
+**对话输出。**桥接也会把对话本身转发出来。一条 `mirror` 帧携带一个条目——操作者的一句话、一条助手回复（适配器上报了 token 用量时才多一行 `⟦↑in ↓out⟧`）、或一次工具调用——转发器按人看的形态呈现它：行模式下是只追加的行（无颜色、无 markdown、无 spinner、不切备用屏，写出的行从不重写），全屏 attach 下则画进 transcript 视口。attach 会先把该会话持久化日志中最近 200 个条目当作普通 `mirror` 帧回放，被截断（`history: showing last 200 items`）或日志读不到时用一行 `echo` 说明。OSC 7501 记录照旧写到 `/dev/tty`，真正的 supervisor 读的仍是这个机器面；行模式输出写到 stdout，且只在 stdout 是 TTY 时写，所以 `dsh-sup … | tee log` 写出的文件依然干净，而全屏交互面只在 stdin 与 stdout 都是终端时才有。`echo` 行只去一个去处：行模式下操作者有 TTY 时是 stdout，全屏 attach 下是 transcript 视口，否则是 `/dev/tty`。
 
 ```text
 ❯ 把 mirror 实现出来

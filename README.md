@@ -60,9 +60,38 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 Backends are found through `$DSH_HOME/supervision` (`~/.dsh/supervision` when `DSH_HOME` is unset). A bridge needs exactly one live backend; with several, the refusal names each candidate's `pid` and socket, and `--pid` picks one. `--cwd` applies to `new` and `list` only; `list` without it shows every session, with the CWD column naming where each one lives.
 
-The bridge reads stdin in the terminal's own line mode — it never enters raw mode — so `Ctrl+C`, `Ctrl+Z`, `Ctrl+\`, input echo and line editing keep working as they do without the plugin. `Ctrl+S`/`Ctrl+Q` stay the terminal driver's flow control: on the `/dev/tty` surface a paused terminal holds the bridge's records in an ordered queue instead of blocking the host, and they flush on resume. The stdout fallback (no controlling terminal) keeps a synchronous write, so there a paused terminal still stalls it. Operator input is read a line at a time, after Enter; the line discipline caps one line at its `MAX_CANON` (4 KB on Linux, 1 KB on macOS), so a much longer paste reaches the agent truncated. In a terminal, an attach also shows the conversation as it happens — the operator's messages, the assistant's replies and its tool calls print on that terminal's stdout — while a redirected stdout stays machine-clean (see [How it reports](#how-it-reports)).
+With `--no-tui`, or when stdin or stdout is not a terminal, the bridge reads stdin in the terminal's own line mode — it never enters raw mode — so `Ctrl+C`, `Ctrl+Z`, `Ctrl+\`, input echo and line editing keep working as they do without the plugin. `Ctrl+S`/`Ctrl+Q` stay the terminal driver's flow control: on the `/dev/tty` surface a paused terminal holds the bridge's records in an ordered queue instead of blocking the host, and they flush on resume. The stdout fallback (no controlling terminal) keeps a synchronous write, so there a paused terminal still stalls it. Operator input is read a line at a time, after Enter; the line discipline caps one line at its `MAX_CANON` (4 KB on Linux, 1 KB on macOS), so a much longer paste reaches the agent truncated. In a terminal, an attach opens the full-screen [attach surface](#attach-surface); a redirected stdout stays machine-clean (see [How it reports](#how-it-reports)).
 
 **Empty sessions stay out of the web UI.** A session created here is attached to its project, but the DSH sidebar lists a session only after its first message. Until then it exists in `dsh-sup list` and on the bridge, with no row under the project. Send one line from the terminal (or attach and steer) and it appears.
+
+### Attach surface
+
+When stdin and stdout are both terminals, an attach opens a full-screen surface
+instead of appending lines: the conversation in a scrollable transcript viewport,
+a multi-line editor for the next operator line, and a status line carrying the
+session id, the reported state and the turn. Everything the bridge forwards stays
+in the transcript, so scrolling back reaches the whole attach. The surface
+takes over the terminal's alternate screen while attached: terminal scrollback is
+not written, the TUI viewport is the history, and the last frame is printed back
+on the normal screen when the attach ends.
+
+| Key | Effect |
+|---|---|
+| `Enter` | send the editor's text as one operator line |
+| `Shift+Enter` | start a new line in the editor, when the terminal reports the modifier (modifyOtherKeys or the Kitty keyboard protocol); otherwise it submits like `Enter` |
+| `Ctrl+C` | send `/cancel` — ends the running turn and keeps the attach |
+| `Ctrl+D` | leave the attach; the terminal is restored first |
+| `PageUp` / `PageDown` | scroll the transcript one page |
+| `↑` / `↓` | scroll one line, while the editor is empty |
+| `Home` / `End` | oldest line / back to the newest (when the editor is empty) |
+
+Scrolled back, the last row shows `↓ N new` for the entries that arrived
+meanwhile, and scrolling to the bottom resumes following the live transcript.
+The surface is drawn with [`@earendil-works/pi-tui`](https://github.com/earendil-works/pi).
+
+`--no-tui` keeps the append-only line surface on a terminal; a redirected
+stdout always gets that line surface, so `dsh-sup … | tee log` stays
+machine-clean.
 
 ### Answer an approval
 
@@ -103,7 +132,7 @@ dsh web (the process you already run)
 
 **Activation.** The plugin always opens its socket discovery surface — the listener, the `0600` socket and the `<pid>-<8hex>.json` registry entry that names it — so a forwarder has something to connect to. The effect layer (session listeners, OSC reports, echo lines, stdin handling) mounts per bridge, which is the same fact as "a forwarder is connected". A GUI-only `dsh web` therefore exposes an inert socket and nothing else. With `DSH_SUP_TERMINAL_ID` non-empty (or herdr-core's `HC_TERMINAL_ID`) the process also supervises the terminal it runs in: the same records go to its own `/dev/tty`, while the socket stays open for a `dsh-sup` elsewhere. A session still has exactly one bridge across both surfaces, so a second attach is refused as `busy`. If the terminal cannot be opened — no `/dev/tty` and a non-TTY stdout, or a stdin that is not a terminal — the plugin writes the reason to stderr and keeps the socket surface.
 
-**Transcript output.** The bridge also forwards the conversation itself. A `mirror` frame carries one item — an operator message, an assistant reply (with a `⟦↑in ↓out⟧` usage line whenever the adapter reported token usage), or a tool call — and the forwarder writes it as append-only lines: no colour, no markdown, no spinner, no alternate screen, no line ever rewritten, and nothing from before the attach replayed. OSC 7501 records keep going to `/dev/tty`, so a real supervisor still reads the machine surface; the transcript lines go to stdout, and only when stdout is a TTY, so `dsh-sup … | tee log` stays machine-clean. `echo` lines reach exactly one sink: stdout when the operator has a TTY, `/dev/tty` otherwise.
+**Transcript output.** The bridge also forwards the conversation itself. A `mirror` frame carries one item — an operator message, an assistant reply (with a `⟦↑in ↓out⟧` usage line whenever the adapter reported token usage), or a tool call — and the forwarder renders it for a person: in line mode as append-only lines (no colour, no markdown, no spinner, no alternate screen, and no existing line rewritten), in a full-screen attach in the transcript viewport. An attach first replays the last 200 items of the session's persisted log as ordinary `mirror` frames, and an `echo` line says so when the replay was truncated (`history: showing last 200 items`) or the log could not be read. OSC 7501 records keep going to `/dev/tty`, so a real supervisor still reads the machine surface; the line surface goes to stdout, and only when stdout is a TTY, so `dsh-sup … | tee log` stays machine-clean, while the full-screen surface exists only when stdin and stdout are both terminals. `echo` lines reach exactly one place: stdout in line mode when the operator has a TTY, the transcript viewport in a full-screen attach, `/dev/tty` otherwise.
 
 ```text
 ❯ implement the mirror

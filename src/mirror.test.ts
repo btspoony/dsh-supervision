@@ -14,7 +14,7 @@ import {
   MAX_ITEM_REASONING,
   MAX_ITEM_TEXT,
 } from 'dsh-supervision-protocol'
-import { MAX_CALLS, mirrorFrame, mirrorOf } from './mirror.js'
+import { HISTORY_ITEMS, MAX_CALLS, historyItems, mirrorFrame, mirrorOf } from './mirror.js'
 import type { CallRecord, SessionEvent } from './mirror.js'
 import type { MirrorItem } from 'dsh-supervision-protocol'
 
@@ -361,3 +361,39 @@ test('an item that no cap could bound is dropped instead of closing the bridge',
   const huge: MirrorItem = { k: 'user', text: '\u0001'.repeat(MAX_FRAME) }
   assert.equal(mirrorFrame(huge), undefined)
 })
+test('history keeps the newest items in log order and flags what it dropped', () => {
+  assert.equal(HISTORY_ITEMS, 200, 'the replay budget the protocol expects')
+  const events = [user('one'), user('two'), user('three')]
+  assert.deepEqual(historyItems(events, table(), 2), {
+    items: [{ k: 'user', text: 'two' }, { k: 'user', text: 'three' }],
+    truncated: true,
+  })
+  assert.deepEqual(historyItems(events, table(), 3), {
+    items: [{ k: 'user', text: 'one' }, { k: 'user', text: 'two' }, { k: 'user', text: 'three' }],
+    truncated: false,
+  })
+})
+
+test('history counts only human-facing items, and a zero limit keeps none', () => {
+  const events = [user('injected', 'system-reminder'), user('two'), user('three')]
+  const { items, truncated } = historyItems(events, table(), 1)
+  assert.deepEqual(items, [{ k: 'user', text: 'three' }])
+  assert.equal(truncated, true)
+  assert.deepEqual(historyItems(events, table(), 0), { items: [], truncated: true })
+  assert.deepEqual(historyItems([], table(), HISTORY_ITEMS), { items: [], truncated: false })
+})
+
+test('a tool pair in the replay window resolves instead of leaving a bare start', () => {
+  const events: SessionEvent[] = [
+    { type: 'user/message', time: 1, data: { turn: 1, content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } },
+    { type: 'tool/call', time: 1_000, data: { turn: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } },
+    { type: 'tool/result', time: 1_012, data: { turn: 1, message: { toolCallId: 'c1', content: [{ type: 'text', text: 'a.txt' }] } } },
+  ]
+  const { items, truncated } = historyItems(events, table(), 2)
+  assert.equal(truncated, true)
+  assert.deepEqual(items, [
+    { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'start', turn: 1 },
+    { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'a.txt', ms: 12, turn: 1 },
+  ])
+})
+

@@ -6,6 +6,7 @@ import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { routeFrame } from './route.js';
 import { skillText, version } from './skill.js';
+import { chooseSurface, echoStatus, oscStatus, startTui, type Surface } from './tui.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
@@ -69,7 +70,14 @@ async function main(argv: readonly string[]): Promise<number> {
     parsed.kind === 'attach'
       ? { t: 'hello', proto: PROTO, pid: process.pid, attach: parsed.session }
       : { t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: parsed.cwd } };
-  return runBridge(selection.entry.socket, hello);
+  // The TUI owns stdout only when both ends are terminals: a redirected stdout
+  // must keep the append-only line bytes a supervisor parses.
+  const mode = chooseSurface({
+    stdinTTY: process.stdin.isTTY === true,
+    stdoutTTY: process.stdout.isTTY === true,
+    noTui: parsed.noTui === true,
+  });
+  return runBridge(selection.entry.socket, hello, mode === 'tui');
 }
 
 /**
@@ -77,7 +85,7 @@ async function main(argv: readonly string[]): Promise<number> {
  * any stdin is read, which is what makes hc's readiness gate and `started: true`
  * work. Then both directions relay until `bye`, an error, or a lost socket.
  */
-function runBridge(socket: string, hello: HelloFrame): Promise<number> {
+function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<number> {
   const tty = openTty();
   if (!tty.ok) {
     process.stderr.write(`${tty.error}\n`);
@@ -87,6 +95,8 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
   let settled = false;
   /** Kept so the closing error record can restate `title`, which hc replaces. */
   let title = '';
+  /** The full-screen surface, once `welcome` has named the session. */
+  let surface: Surface | undefined;
 
   return new Promise((resolve) => {
     // The human sink is stdout, so a terminal that vanishes mid-attach would
@@ -96,9 +106,20 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
     // bridge settled, and removing it would only re-expose the stream.
     process.stdout.on('error', () => { settle(EXIT.backendLost); });
 
+    /** Restores the terminal before any exit path writes to it. */
+    const closeSurface = (): void => {
+      try {
+        surface?.stop();
+      } catch {
+        // The screen already went away; restoring it must not swallow the exit.
+      }
+      surface = undefined;
+    };
+
     const settle = (code: number): void => {
       if (settled) return;
       settled = true;
+      closeSurface();
       process.stdin.pause();
       connection.close();
       tty.close();
@@ -122,6 +143,7 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
         // The `error` arm is tty-only: its cause belongs on stderr and its code
         // decides the exit, so it never goes through the shared renderer.
         if (frame.t === 'error') {
+          closeSurface();
           process.stderr.write(`${frame.code}: ${frame.message}\n`);
           settle(exitCodeFor(frame.code));
           return;
@@ -129,13 +151,33 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
         const routed = routeFrame(frame, process.stdout.isTTY === true);
         if (routed.tty !== undefined) tty.write(routed.tty);
         // The human sink is stdout itself, never the tty writer: a redirected
-        // stdout must stay free of the machine surface.
-        if (routed.out !== undefined) process.stdout.write(routed.out);
+        // stdout must stay free of the machine surface. Once the TUI owns that
+        // stdout, transcript items and echo lines go into its viewport instead.
+        if (surface !== undefined) {
+          if (frame.t === 'mirror') surface.push(frame.item);
+          else if (frame.t === 'echo') {
+            surface.push(frame.text);
+            const next = echoStatus(frame.text);
+            if (next !== undefined) surface.setStatus(next);
+          } else if (frame.t === 'osc') {
+            // The machine surface is not configurable, so it keeps the status
+            // live when the plugin writes no echo lines.
+            const next = oscStatus(frame.data);
+            if (next !== undefined) surface.setStatus(next);
+          }
+        } else if (routed.out !== undefined) {
+          process.stdout.write(routed.out);
+        }
         // The root `idle` must precede any stdin read, which is what makes hc's
         // readiness gate and `started: true` work.
         if (frame.t === 'welcome') {
           title = frame.title;
-          pump(sendLine);
+          if (useTui) {
+            surface = startTui({ title, sendLine, width: process.stdout.columns, onExit: () => { settle(EXIT.ok); } });
+            surface.setStatus({ session: frame.session, state: frame.state, turn: frame.turn });
+          } else {
+            pump(sendLine);
+          }
           return;
         }
         if (frame.t === 'bye') settle(EXIT.ok);
@@ -143,6 +185,7 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
       // The error record must precede the exit so hc never reports a stale
       // `working` after the backend is gone; the cause goes to stderr.
       onLost: (msg, detail) => {
+        closeSurface();
         // `title` is empty only when the handshake never completed; then the
         // record simply omits it rather than reporting a blank title.
         tty.write(rootReport('error', title === '' ? { msg } : { title, msg }));
@@ -152,6 +195,7 @@ function runBridge(socket: string, hello: HelloFrame): Promise<number> {
       // A refused frame never reached the socket, so the backend is alive and
       // the honest cause is the input, not a lost bridge.
       onRefused: (detail) => {
+        closeSurface();
         const msg = sending === 0 ? detail : `input line of ${String(sending)} bytes was not sent: ${detail}`;
         process.stderr.write(`${msg}\n`);
         tty.write(rootReport('error', title === '' ? { msg } : { title, msg }));

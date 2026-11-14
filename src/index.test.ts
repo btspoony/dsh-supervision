@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connect } from 'node:net'
 import type { Socket } from 'node:net'
-import { after, test } from 'node:test'
+import { after, mock, test } from 'node:test'
 import { DEFAULTS, apply, validateConfig } from './index.js'
 import type {
   ApprovalListener,
@@ -21,6 +21,7 @@ import type {
   UserMessage,
 } from './index.js'
 import type { ApprovalOutcome } from './approval.js'
+import { HISTORY_ITEMS } from './mirror.js'
 import type { TtyIO } from './tty-transport.js'
 import { PROTO, readRegistry } from 'dsh-supervision-protocol'
 import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
@@ -147,6 +148,14 @@ class FakeHost {
   archived: string[] = []
   /** What `sessionQuery` answers, when the host mounts it; `undefined` hides it. */
   sessionRecords: { header: { id: string; cwd?: string }; live: boolean }[] | undefined = undefined
+  /** What `sessionQuery.readSession` replays; `undefined` hides the reader. */
+  history: SessionEvent[] | undefined = []
+  /** Every session id the log reader was asked for, in call order. */
+  readonly historyReads: string[] = []
+  /** When set, the log read rejects with this reason. */
+  historyError: string | undefined = undefined
+  /** When set, `readSession` holds its answer until this resolves. */
+  historyWait: Promise<void> | undefined = undefined
   /** Sessions the projection cache marks blank (no turn yet). */
   blankSessions: string[] = []
   /** What the sidebar's `sessionController.list` answers, when mounted. */
@@ -214,9 +223,22 @@ class FakeHost {
             : { list: async () => ({ items: this.controllerItems ?? [] }) }
         }
         if (name === 'sessionQuery') {
-          return this.sessionRecords === undefined
+          const listSessions = this.sessionRecords === undefined
             ? undefined
-            : { listSessions: async () => this.sessionRecords ?? [] }
+            : async () => this.sessionRecords ?? []
+          const readSession = this.history === undefined
+            ? undefined
+            : async (id: string): Promise<{ readonly events: readonly SessionEvent[] }> => {
+              this.historyReads.push(id)
+              if (this.historyWait !== undefined) await this.historyWait
+              if (this.historyError !== undefined) throw new Error(this.historyError)
+              return { events: this.history ?? [] }
+            }
+          if (listSessions === undefined && readSession === undefined) return undefined
+          return {
+            ...(listSessions === undefined ? {} : { listSessions }),
+            ...(readSession === undefined ? {} : { readSession }),
+          }
         }
         if (name === 'sessionProjections') return { summaryKeys: () => ['sessionListMetadata'] }
         if (name === 'sessionProjectionCache') {
@@ -1125,6 +1147,301 @@ test('the attached session mirrors its conversation; a child session emits none'
   }
 })
 
+test('an attach replays the persisted log oldest first behind welcome', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = [
+    {
+      type: 'user/message',
+      time: 100,
+      data: { turn: 1, content: [{ type: 'text', text: 'earlier question' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'assistant/message',
+      time: 200,
+      data: { turn: 1, message: { content: [{ type: 'text', text: 'earlier answer' }] } },
+    },
+  ]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= 3, 'the replay behind welcome')
+    assert.deepEqual(host.historyReads, ['session-1'], 'the attach arm read the log')
+    assert.deepEqual(client.frames.map(frame => frame.t), ['welcome', 'mirror', 'mirror'])
+    assert.deepEqual(
+      client.frames.flatMap(frame => frame.t === 'mirror' ? [frame.item] : []),
+      [
+        { k: 'user', text: 'earlier question' },
+        { k: 'assistant', text: 'earlier answer', turn: 1 },
+      ],
+    )
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a long log replays its newest items and one echo says how many were kept', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = Array.from({ length: HISTORY_ITEMS + 2 }, (_, index): SessionEvent => ({
+    type: 'user/message',
+    time: index + 1,
+    data: { turn: 1, content: [{ type: 'text', text: 'm' + String(index) }], source: { kind: 'user' } },
+  }))
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= HISTORY_ITEMS + 2, 'the bounded replay and its echo')
+    const items = client.frames.flatMap(frame => frame.t === 'mirror' ? [frame.item] : [])
+    assert.equal(items.length, HISTORY_ITEMS, 'only the newest items are replayed')
+    assert.deepEqual(items[0], { k: 'user', text: 'm2' }, 'the oldest kept item starts the replay')
+    assert.deepEqual(items.at(-1), { k: 'user', text: 'm' + String(HISTORY_ITEMS + 1) })
+    assert.deepEqual(client.frames.at(-1), { t: 'echo', text: 'history: showing last ' + String(HISTORY_ITEMS) + ' items' })
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a tool call in the replayed log resolves with its state and ms', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = [
+    {
+      type: 'tool/call',
+      time: 1_000,
+      data: { turn: 2, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' },
+    },
+    {
+      type: 'tool/result',
+      time: 1_012,
+      data: { turn: 2, message: { toolCallId: 'c1', content: [{ type: 'text', text: 'a.txt' }] } },
+    },
+  ]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= 3, 'the tool pair')
+    const tools = client.frames.flatMap(frame => frame.t === 'mirror' && frame.item.k === 'tool' ? [frame.item] : [])
+    assert.deepEqual(tools, [
+      { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'start', turn: 2 },
+      { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'a.txt', ms: 12, turn: 2 },
+    ])
+  } finally {
+    host.dispose()
+  }
+})
+
+test('an unreadable log still attaches and echoes why history is missing', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = [{ type: 'user/message', data: { turn: 1, content: [{ type: 'text', text: 'lost' }], source: { kind: 'user' } } }]
+  host.historyError = 'session log is locked'
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= 2, 'the unavailable echo')
+    assert.deepEqual(client.frames[1], { t: 'echo', text: 'history unavailable: session log is locked' })
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the failed read')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a host with no log reader attaches and echoes that history is unavailable', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = undefined
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= 2, 'the unavailable echo')
+    assert.deepEqual(client.frames[1], { t: 'echo', text: 'history unavailable: no session query' })
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a new session replays nothing even when the host could read a log', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.history = [{ type: 'user/message', data: { turn: 1, content: [{ type: 'text', text: 'irrelevant' }], source: { kind: 'user' } } }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/repo/api' } })
+  const [welcome] = await client.take(1)
+
+  try {
+    assert.equal(welcome?.t, 'welcome')
+    // The new arm never arms a window and never calls the reader; an empty
+    // list after welcome is final because welcome precedes any read for attach.
+    assert.deepEqual(host.historyReads, [], 'the new arm never reads a log')
+    assert.deepEqual(client.frames.filter(frame => frame.t === 'mirror'), [])
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a live event during the history read lands after the replay exactly once', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  let release: () => void = () => {}
+  host.historyWait = new Promise<void>(resolve => { release = resolve })
+  host.history = [
+    { type: 'user/message', seq: 1, time: 100, data: { turn: 1, content: [{ type: 'text', text: 'snapshot one' }], source: { kind: 'user' } } },
+    { type: 'assistant/message', seq: 2, time: 200, data: { turn: 1, message: { content: [{ type: 'text', text: 'snapshot two' }] } } },
+  ]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+  const [welcome] = await client.take(1)
+
+  try {
+    assert.equal(welcome?.t, 'welcome', 'the handshake does not wait on the log')
+    // One event the snapshot already holds, one appended after it.
+    host.emit('session-1', {
+      type: 'assistant/message',
+      seq: 2,
+      time: 200,
+      data: { turn: 1, message: { content: [{ type: 'text', text: 'snapshot two' }] } },
+    })
+    host.emit('session-1', {
+      type: 'user/message',
+      seq: 3,
+      time: 300,
+      data: { turn: 1, content: [{ type: 'text', text: 'live later' }], source: { kind: 'user' } },
+    })
+    release()
+    await until(() => client.frames.length >= 4, 'the replay and the flushed live event')
+    assert.deepEqual(client.frames.flatMap(frame => frame.t === 'mirror' ? [frame.item] : []), [
+      { k: 'user', text: 'snapshot one' },
+      { k: 'assistant', text: 'snapshot two', turn: 1 },
+      { k: 'user', text: 'live later' },
+    ])
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(client.frames.length, 4, 'the duplicate seq is not a second item')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a log read that never answers cannot hold the attach', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.historyWait = new Promise<void>(() => {})
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  const started = Date.now()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+  const [welcome] = await client.take(1)
+
+  try {
+    assert.equal(welcome?.t, 'welcome', 'the attach does not wait for a hung read')
+    const [echo] = (await client.take(2)).slice(1)
+    assert.deepEqual(echo, { t: 'echo', text: 'history unavailable: timed out' })
+    assert.ok(Date.now() - started < 5_000, 'the echo arrives inside the handshake budget')
+    host.emit('session-1', {
+      type: 'user/message',
+      time: 500,
+      data: { turn: 1, content: [{ type: 'text', text: 'live after timeout' }], source: { kind: 'user' } },
+    })
+    const [live] = (await client.take(3)).slice(2)
+    assert.deepEqual(live, { t: 'mirror', item: { k: 'user', text: 'live after timeout' } })
+  } finally {
+    host.dispose()
+  }
+})
+
+
+test('a timed-out read flushes what arrived while it hung and keeps the bridge', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.historyWait = new Promise<void>(() => {})
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  // Simulated clock: the 4 s deadline fires without spending 4 s, and the
+  // production timing is untouched.
+  mock.timers.enable({ apis: ['setTimeout'] })
+  const started = Date.now()
+
+  try {
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+    await client.take(1)
+    // Buffered while the read is still hanging: the deadline's flush must not
+    // lose it.
+    host.emit('session-1', {
+      type: 'user/message',
+      seq: 1,
+      time: 100,
+      data: { turn: 1, content: [{ type: 'text', text: 'buffered live' }], source: { kind: 'user' } },
+    })
+    mock.timers.tick(4_000)
+    await until(() => client.frames.length >= 3, 'the timeout echo and the buffered item')
+    assert.deepEqual(client.frames.slice(1), [
+      { t: 'echo', text: 'history unavailable: timed out' },
+      { t: 'mirror', item: { k: 'user', text: 'buffered live' } },
+    ])
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(client.frames.length, 3, 'the buffered item lands exactly once')
+    assert.ok(Date.now() - started < 4_000, 'the deadline was simulated, not waited out')
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the timeout')
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+test('a tool result produced during the read pairs with the snapshot call', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  let release: () => void = () => {}
+  host.historyWait = new Promise<void>(resolve => { release = resolve })
+  host.history = [
+    { type: 'tool/call', seq: 1, time: 1_000, data: { turn: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } },
+  ]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+  await client.take(1)
+
+  try {
+    // The result arrives during the read; mapping it before the snapshot's
+    // call table existed would drop it as unpaired.
+    host.emit('session-1', {
+      type: 'tool/result',
+      seq: 2,
+      time: 1_012,
+      data: { turn: 1, message: { toolCallId: 'c1', content: [{ type: 'text', text: 'a.txt' }] } },
+    })
+    release()
+    await until(() => client.frames.length >= 3, 'the replayed call and its flushed result')
+    assert.deepEqual(client.frames.flatMap(frame => frame.t === 'mirror' ? [frame.item] : []), [
+      { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'start', turn: 1 },
+      { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'a.txt', ms: 12, turn: 1 },
+    ])
+  } finally {
+    host.dispose()
+  }
+})
 test('list reports live and bridged state without binding anything', async () => {
   const dir = tempDir()
   const host = new FakeHost()
@@ -1171,6 +1488,7 @@ test('a second hello for a bridged session is busy', async () => {
   const [frame] = await second.take(1)
   assert.equal(frame?.t, 'error')
   assert.equal(frame !== undefined && frame.t === 'error' ? frame.code : '', 'busy')
+  assert.deepEqual(host.historyReads, ['session-1'], 'the refused hello never arms or reads a log')
   host.dispose()
 })
 

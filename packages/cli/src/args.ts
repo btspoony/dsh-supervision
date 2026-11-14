@@ -1,20 +1,22 @@
 import { resolve } from 'node:path';
 
 export type Parsed =
-  | { readonly kind: 'new'; readonly cwd: string; readonly pid?: number }
-  | { readonly kind: 'attach'; readonly session: string; readonly pid?: number }
-  | { readonly kind: 'list'; readonly cwd?: string; readonly pid?: number }
+  | { readonly kind: 'new'; readonly cwd: string; readonly pid?: number; readonly noTui?: true }
+  | { readonly kind: 'attach'; readonly session: string; readonly pid?: number; readonly noTui?: true }
+  | { readonly kind: 'list'; readonly cwd?: string; readonly pid?: number; readonly noTui?: true }
   | { readonly kind: 'version' }
   | { readonly kind: 'skill' }
   | { readonly kind: 'usage'; readonly reason: string };
 
 export const usageText = [
-  'usage: dsh-sup [new] [--cwd <path>] [--pid <n>]',
-  '       dsh-sup attach <session-id> [--pid <n>]',
-  '       dsh-sup <session-id> [--pid <n>]',
+  'usage: dsh-sup [new] [--cwd <path>] [--pid <n>] [--no-tui]',
+  '       dsh-sup attach <session-id> [--pid <n>] [--no-tui]',
+  '       dsh-sup <session-id> [--pid <n>] [--no-tui]',
   '       dsh-sup list [--pid <n>] [--cwd <path>]   (every session; --cwd filters)',
   '       dsh-sup --version',
   '       dsh-sup --skill      (print the forwarder manual)',
+  '',
+  '--no-tui keeps the append-only line surface even on a terminal.',
 ].join('\n');
 
 /**
@@ -30,9 +32,14 @@ export function parseArgs(argv: readonly string[], base: string): Parsed {
   const words: string[] = [];
   let cwd: string | undefined;
   let pid: number | undefined;
+  let noTui = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? '';
+    if (arg === '--no-tui') {
+      noTui = true;
+      continue;
+    }
     if (arg !== '--pid' && arg !== '--cwd') {
       if (arg.startsWith('-')) return { kind: 'usage', reason: `unknown option ${arg}` };
       words.push(arg);
@@ -53,10 +60,12 @@ export function parseArgs(argv: readonly string[], base: string): Parsed {
 
   const [command, ...rest] = words;
   const target = cwd ?? resolve(base);
+  // Only named when asked for, so a plain parse keeps its narrow shape.
+  const flag = noTui ? { noTui: true as const } : {};
 
   if (command === undefined || command === 'new') {
     if (rest.length > 0) return { kind: 'usage', reason: `unexpected argument ${rest[0]}` };
-    return pid === undefined ? { kind: 'new', cwd: target } : { kind: 'new', cwd: target, pid };
+    return { kind: 'new', cwd: target, ...(pid === undefined ? {} : { pid }), ...flag };
   }
 
   if (command === 'list') {
@@ -67,6 +76,7 @@ export function parseArgs(argv: readonly string[], base: string): Parsed {
       kind: 'list',
       ...(cwd === undefined ? {} : { cwd }),
       ...(pid === undefined ? {} : { pid }),
+      ...flag,
     };
   }
 
@@ -79,9 +89,7 @@ export function parseArgs(argv: readonly string[], base: string): Parsed {
       return { kind: 'usage', reason: `not a session id: ${session ?? ''}` };
     }
     if (cwd !== undefined) return { kind: 'usage', reason: '--cwd applies to new and list only' };
-    return pid === undefined
-      ? { kind: 'attach', session }
-      : { kind: 'attach', session, pid };
+    return { kind: 'attach', session, ...(pid === undefined ? {} : { pid }), ...flag };
   }
 
   return { kind: 'usage', reason: `unknown command ${command}` };

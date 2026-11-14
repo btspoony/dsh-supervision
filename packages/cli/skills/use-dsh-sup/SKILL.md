@@ -45,18 +45,46 @@ GUI shows a supervision banner with **Take back control**.
 
 The bridge also forwards the conversation into your terminal: every operator
 message, every assistant reply (with a `⟦↑in ↓out⟧` usage line when the adapter
-reported token usage) and every tool call prints as its own append-only block — no
-colour, no markdown, no spinner, no rewritten line, and nothing from before the
-attach replayed. Those lines go to stdout, and only when stdout is a TTY, so a
-piped or redirected run keeps its stdout machine-clean. The machine records are
-unchanged: OSC 7501 still goes to `/dev/tty`, and the `echo` lines —
-`[turn <n>] <state>`, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> →
-<outcome> (source=supervisor|attached)`, the `/status` answer
+reported token usage) and every tool call appears as its own block — no colour, no
+markdown, no spinner. An attach replays the last 200 items of the session's
+persisted log as ordinary `mirror` frames, and an `echo` line says so when that
+replay was truncated (`history: showing last 200 items`) or the log could not be
+read.
+
+When stdin and stdout are both terminals, an attach opens a full-screen surface:
+a scrollable transcript of those blocks, a multi-line editor for the next
+operator line, and a status line with the session id, state and turn. Everything
+forwarded stays in the transcript, so scrolling back reaches the whole attach. The
+surface takes over the alternate screen; terminal scrollback is not written, and
+the last frame returns to the normal screen on exit.
+
+| Key | Effect |
+|---|---|
+| `Enter` | send the editor's text as one operator line |
+| `Shift+Enter` | newline in the editor, when the terminal reports the modifier (modifyOtherKeys or Kitty keyboard protocol); otherwise it submits like `Enter` |
+| `Ctrl+C` | send `/cancel` (ends the running turn, keeps the attach) |
+| `Ctrl+D` | leave the attach and restore the terminal |
+| `PageUp` / `PageDown` | scroll the transcript one page |
+| `↑` / `↓` | scroll one line, while the editor is empty |
+| `Home` / `End` | oldest line / back to the newest (when the editor is empty) |
+
+Scrolled back, the last row shows `↓ N new` for entries that arrived meanwhile;
+reaching the bottom resumes following. `--no-tui`, or a redirected stdout, keeps
+the append-only line surface: in line mode those blocks go to stdout only when
+stdout is a TTY, so a piped or redirected run keeps its stdout machine-clean. The
+line surface itself is untouched — no raw mode, no alternate screen, line at a
+time after Enter — and the plugin's in-process tty transport (`DSH_SUP_TERMINAL_ID`
+or `HC_TERMINAL_ID`) always stays on it, because the full-screen surface belongs
+to `dsh-sup` alone.
+
+The machine records are unchanged: OSC 7501 still goes to `/dev/tty`, and the
+`echo` lines — `[turn <n>] <state>`, `[ask <id>] <tool> parked (<session>)`,
+`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer
 `session=<id> state=<state> turn=<n> asks=<ids>` (`-` when nothing is parked),
 `refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`,
-`unknown command /<verb>` — reach exactly one sink each: stdout when you have a
-TTY, `/dev/tty` otherwise. Input handling is untouched: line mode, no raw mode, no
-alternate screen.
+`unknown command /<verb>` — reach exactly one place each: stdout in line mode when
+you have a TTY, the transcript viewport in a full-screen attach, `/dev/tty`
+otherwise.
 
 ```text
 ❯ implement the mirror
@@ -75,6 +103,7 @@ alternate screen.
 |---|---|---|
 | `--cwd <path>` | `new`, `list` | Working directory for the new session, or the filter for `list`; resolved against the caller's directory, sent absolute. Refused by `attach`. |
 | `--pid <n>` | every command | Pick the backend when several `dsh web` processes run. Without it a bridge needs exactly one live backend, and the refusal names each candidate. |
+| `--no-tui` | every command | Keep the append-only line surface even when stdin and stdout are terminals. A redirected stdout always uses it. |
 
 Backends are discovered through `$DSH_HOME/supervision`.
 

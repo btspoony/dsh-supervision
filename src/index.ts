@@ -11,12 +11,12 @@
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
 import { MAX_FRAME, PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
-import type { ErrorCode, HelloFrame, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
+import type { ErrorCode, HelloFrame, MirrorItem, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
-import { mirrorFrame, mirrorOf } from './mirror.js'
+import { HISTORY_ITEMS, historyItems, mirrorFrame, mirrorOf } from './mirror.js'
 import type { CallRecord, SessionEvent } from './mirror.js'
 import { parseLine } from './stdin.js'
 import { registerSupervisionRoutes, supervisionState } from './routes.js'
@@ -217,6 +217,22 @@ interface Shown {
   readonly turn: number
 }
 
+/**
+ * The window between opening a bridge's subscriptions and finishing its log
+ * replay. A live event that arrives while the snapshot is being read waits here
+ * so the replayed tail and the live feed join with neither a gap nor a repeat.
+ */
+interface ReplayWindow {
+  /** Highest event seq the snapshot holds; set once the read returns. */
+  lastSeq: number
+  /**
+   * Live events delivered during the read, in delivery order and still
+   * unmapped: the snapshot's call table has to be replayed first, or a result
+   * whose call is in that snapshot would be dropped as unpaired.
+   */
+  readonly pending: SessionEvent[]
+}
+
 /** One bridged session: its connection, its agent, and the report derived from its facts. */
 interface BridgeState {
   readonly bridge: Bridge
@@ -232,6 +248,8 @@ interface BridgeState {
   readonly children: Map<string, RootState>
   /** Started tool calls awaiting their result, so a result can report its `ms`. */
   readonly calls: Map<string, CallRecord>
+  /** Set only while an attach is replaying its session's persisted log. */
+  replay?: ReplayWindow
 }
 
 /**
@@ -240,6 +258,11 @@ interface BridgeState {
  */
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** True when the host stamped an event position this plugin can order by. */
+function isSeq(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 /**
@@ -404,11 +427,57 @@ interface ProjectionCacheLike {
   cachedSnapshot(header: unknown, keys: readonly string[]): { readonly values?: Readonly<Record<string, unknown>> } | undefined
 }
 
+/**
+ * The `ctx.sessionQuery` log-read surface. Declared on its own: replaying
+ * history needs only this half of the service, and a host that mounts the
+ * query without it still lists sessions.
+ */
+interface SessionLogLike {
+  readSession(sessionId: string): Promise<{ readonly events: readonly SessionEvent[] }>
+}
+
 /** @returns the host's session query, when a usable one is mounted. */
 function sessionQueryOf(value: unknown): SessionQueryLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const listSessions = (value as { listSessions?: unknown }).listSessions
   return typeof listSessions === 'function' ? value as SessionQueryLike : undefined
+}
+
+/** @returns the host's log reader, when the mounted query can read a log. */
+function sessionLogOf(value: unknown): SessionLogLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const readSession = (value as { readSession?: unknown }).readSession
+  return typeof readSession === 'function' ? value as SessionLogLike : undefined
+}
+
+/** A session's persisted log, or the reason the attach goes without one. */
+type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure: string }
+
+/**
+ * Read one session's log for replay. Never throws: an old host or a locked log
+ * must not cost the operator the attach itself.
+ * @param ctx - the plugin context; the query service is optional.
+ * @param session - the session whose log to read.
+ * @returns its events, or the reason there is nothing to replay.
+ */
+async function readLog(ctx: PluginContext, session: string): Promise<LogRead> {
+  const log = sessionLogOf(ctx.get?.('sessionQuery'))
+  if (log === undefined) return { failure: 'no session query' }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<'timed-out'>(resolve => {
+    timer = setTimeout(() => { resolve('timed-out') }, HISTORY_READ_TIMEOUT_MS)
+    if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+  })
+  try {
+    const read = await Promise.race([log.readSession(session), deadline])
+    if (read === 'timed-out') return { failure: 'timed out' }
+    return { events: read.events }
+  } catch (error) {
+    return { failure: reasonOf(error) }
+  } finally {
+    // Every path, including the timeout, leaves no timer behind.
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 /**
@@ -571,6 +640,12 @@ const NO_FACTORY = 'no agent factory registered'
  */
 const BOOT_WINDOW_MS = 30_000
 const BOOT_POLL_MS = 500
+/**
+ * How long an attach waits for its persisted log. The forwarder gives the whole
+ * handshake 5 s, so a slow read must degrade to one echo, never to a failed
+ * attach; a replay is not worth a broken session.
+ */
+const HISTORY_READ_TIMEOUT_MS = 4_000
 
 /**
  * Mount the plugin in two layers.
@@ -970,6 +1045,67 @@ function handlersFor(
     }
   }
 
+  /**
+   * Send one transcript item, dropping a frame over the wire limit: an
+   * oversized frame would close the socket, and once is enough to say so.
+   */
+  const sendMirror = (state: BridgeState, item: MirrorItem): void => {
+    const frame = mirrorFrame(item)
+    if (frame !== undefined) state.bridge.send(frame)
+    else if (!mirrorDropped) {
+      mirrorDropped = true
+      process.stderr.write(`dsh-supervision: mirror frame over ${String(MAX_FRAME)} bytes dropped\n`)
+    }
+  }
+
+  /**
+   * Arm the replay window on a freshly established bridge. From here until
+   * `finishReplay`, a live event for this session is buffered instead of sent.
+   * @param state - the bridge that just claimed the session.
+   * @returns the window to hand back to `finishReplay`.
+   */
+  const armReplay = (state: BridgeState): ReplayWindow => {
+    const window: ReplayWindow = { lastSeq: -1, pending: [] }
+    state.replay = window
+    return window
+  }
+
+  /**
+   * Deliver the replay, then the live events that arrived during the read.
+   * The window is disarmed first and nothing here awaits, so no live event can
+   * slip between the two and a thrown send cannot leave the window armed.
+   * A log the host could not read is one echo line: the attach already
+   * succeeded, and the supervisor is told only what it is missing.
+   * @param session - the session whose log was read.
+   * @param window - the window `armReplay` returned.
+   * @param log - the read snapshot, or the reason there is none.
+   */
+  const finishReplay = (session: string, window: ReplayWindow, log: LogRead): void => {
+    const state = bridged.get(session)
+    // A bridge released during the read owns nothing now: its window dies with it.
+    if (state === undefined || state.replay !== window) return
+    state.replay = undefined
+    if ('failure' in log) {
+      state.bridge.send({ t: 'echo', text: `history unavailable: ${log.failure}` })
+    } else {
+      for (const event of log.events) {
+        if (isSeq(event.seq) && event.seq > window.lastSeq) window.lastSeq = event.seq
+      }
+      const { items, truncated } = historyItems(log.events, state.calls, HISTORY_ITEMS)
+      for (const item of items) sendMirror(state, item)
+      if (truncated) {
+        state.bridge.send({ t: 'echo', text: `history: showing last ${String(HISTORY_ITEMS)} items` })
+      }
+    }
+    // An event the snapshot already holds is not a second item on the wire.
+    for (const event of window.pending) {
+      if (isSeq(event.seq) && event.seq <= window.lastSeq) continue
+      const item = mirrorOf(event, state.calls)
+      if (item !== undefined) sendMirror(state, item)
+    }
+    window.pending.length = 0
+  }
+
   /** Open the effect layer's listeners, and keep their disposers. */
   const openSubscriptions = (): void => {
     if (subscriptions !== undefined) return
@@ -979,16 +1115,14 @@ function handlersFor(
         if (subject.id === state.agent.session.id) {
           // A mirror is per bridged session: only the attached one is
           // conversation here, and a child's transcript belongs to its own.
-          const item = mirrorOf(event, state.calls)
-          if (item !== undefined) {
-            // An oversized frame would close the socket, so it is dropped here
-            // instead; once is enough to say so on stderr.
-            const frame = mirrorFrame(item)
-            if (frame !== undefined) state.bridge.send(frame)
-            else if (!mirrorDropped) {
-              mirrorDropped = true
-              process.stderr.write(`dsh-supervision: mirror frame over ${String(MAX_FRAME)} bytes dropped\n`)
-            }
+          const replay = state.replay
+          if (replay !== undefined) {
+            // The snapshot is older than every live event, so the replay must
+            // leave first; the event waits, unmapped, until then.
+            replay.pending.push(event)
+          } else {
+            const item = mirrorOf(event, state.calls)
+            if (item !== undefined) sendMirror(state, item)
           }
           if (fact !== undefined) feed(state, fact)
           continue
@@ -1150,7 +1284,18 @@ function handlersFor(
           message: `session ${agent.session.id} is already bridged`,
         })
         bridge.close()
+        return
       }
+      // The attach arm replays the persisted log; a fresh session has none. The
+      // window opens only after `establish` owns the session and its
+      // subscriptions, and before the read awaits, so a live event that lands
+      // during the read waits behind the replay instead of being lost.
+      if (!('attach' in frame)) return
+      const session = agent.session.id
+      const state = bridged.get(session)
+      if (state === undefined) return
+      const window = armReplay(state)
+      finishReplay(session, window, await readLog(ctx, session))
     },
 
     line(text: string, bridge: Bridge): void {
