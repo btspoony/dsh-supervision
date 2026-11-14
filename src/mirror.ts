@@ -80,6 +80,13 @@ export interface CallRecord {
 export const MAX_CALLS = 64
 
 /**
+ * How many items an attach replays from a session's persisted log. A log can
+ * hold a whole working day; the supervisor needs the recent tail, and a replay
+ * longer than this costs the forwarder more than it tells the operator.
+ */
+export const HISTORY_ITEMS = 200
+
+/**
  * One event as a transcript item.
  * @param event - any event the host delivers on `session/event`.
  * @param calls - the per-bridge call table; a `tool/call` records into it and
@@ -164,6 +171,30 @@ export function mirrorOf(event: SessionEvent, calls: Map<string, CallRecord>): M
     default:
       return undefined
   }
+}
+
+/**
+ * One session's persisted log as transcript items, oldest first.
+ * @param events - the session's events in log order.
+ * @param calls - the bridge's call table. Pairing runs over the whole log, so a
+ *   result inside the kept window still prints its call's name and timing.
+ * @param limit - how many items to keep, counting from the newest.
+ * @returns the kept items and whether older ones were left out.
+ */
+export function historyItems(
+  events: readonly SessionEvent[],
+  calls: Map<string, CallRecord>,
+  limit: number,
+): { readonly items: readonly MirrorItem[]; readonly truncated: boolean } {
+  const items: MirrorItem[] = []
+  for (const event of events) {
+    const item = mirrorOf(event, calls)
+    if (item !== undefined) items.push(item)
+  }
+  // `slice(length)` is the empty tail, so a zero or negative limit keeps nothing
+  // without a special case.
+  const start = Math.max(0, items.length - Math.max(0, limit))
+  return { items: items.slice(start), truncated: start > 0 }
 }
 
 /**

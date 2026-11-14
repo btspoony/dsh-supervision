@@ -11,12 +11,12 @@
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
 import { MAX_FRAME, PROTO, clearProgramStatus, programStatus } from 'dsh-supervision-protocol'
-import type { ErrorCode, HelloFrame, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
+import type { ErrorCode, HelloFrame, MirrorItem, ProgramKind, ProgramState, ProgramStatus, SessionItem } from 'dsh-supervision-protocol'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
-import { mirrorFrame, mirrorOf } from './mirror.js'
+import { HISTORY_ITEMS, historyItems, mirrorFrame, mirrorOf } from './mirror.js'
 import type { CallRecord, SessionEvent } from './mirror.js'
 import { parseLine } from './stdin.js'
 import { registerSupervisionRoutes, supervisionState } from './routes.js'
@@ -404,11 +404,47 @@ interface ProjectionCacheLike {
   cachedSnapshot(header: unknown, keys: readonly string[]): { readonly values?: Readonly<Record<string, unknown>> } | undefined
 }
 
+/**
+ * The `ctx.sessionQuery` log-read surface. Declared on its own: replaying
+ * history needs only this half of the service, and a host that mounts the
+ * query without it still lists sessions.
+ */
+interface SessionLogLike {
+  readSession(sessionId: string): Promise<{ readonly events: readonly SessionEvent[] }>
+}
+
 /** @returns the host's session query, when a usable one is mounted. */
 function sessionQueryOf(value: unknown): SessionQueryLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const listSessions = (value as { listSessions?: unknown }).listSessions
   return typeof listSessions === 'function' ? value as SessionQueryLike : undefined
+}
+
+/** @returns the host's log reader, when the mounted query can read a log. */
+function sessionLogOf(value: unknown): SessionLogLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const readSession = (value as { readSession?: unknown }).readSession
+  return typeof readSession === 'function' ? value as SessionLogLike : undefined
+}
+
+/** A session's persisted log, or the reason the attach goes without one. */
+type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure: string }
+
+/**
+ * Read one session's log for replay. Never throws: an old host or a locked log
+ * must not cost the operator the attach itself.
+ * @param ctx - the plugin context; the query service is optional.
+ * @param session - the session whose log to read.
+ * @returns its events, or the reason there is nothing to replay.
+ */
+async function readLog(ctx: PluginContext, session: string): Promise<LogRead> {
+  const log = sessionLogOf(ctx.get?.('sessionQuery'))
+  if (log === undefined) return { failure: 'no session query' }
+  try {
+    return { events: (await log.readSession(session)).events }
+  } catch (error) {
+    return { failure: reasonOf(error) }
+  }
 }
 
 /**
@@ -970,6 +1006,40 @@ function handlersFor(
     }
   }
 
+  /**
+   * Send one transcript item, dropping a frame over the wire limit: an
+   * oversized frame would close the socket, and once is enough to say so.
+   */
+  const sendMirror = (state: BridgeState, item: MirrorItem): void => {
+    const frame = mirrorFrame(item)
+    if (frame !== undefined) state.bridge.send(frame)
+    else if (!mirrorDropped) {
+      mirrorDropped = true
+      process.stderr.write(`dsh-supervision: mirror frame over ${String(MAX_FRAME)} bytes dropped\n`)
+    }
+  }
+
+  /**
+   * Replay the tail of a session's persisted log into the bridge that just
+   * claimed it. A log the host could not read is one echo line: the attach
+   * already succeeded, and the supervisor is told only what it is missing.
+   * @param session - the session whose log was read.
+   * @param log - its events, or the reason there are none.
+   */
+  const replayHistory = (session: string, log: LogRead): void => {
+    const state = bridged.get(session)
+    if (state === undefined) return
+    if ('failure' in log) {
+      state.bridge.send({ t: 'echo', text: `history unavailable: ${log.failure}` })
+      return
+    }
+    const { items, truncated } = historyItems(log.events, state.calls, HISTORY_ITEMS)
+    for (const item of items) sendMirror(state, item)
+    if (truncated) {
+      state.bridge.send({ t: 'echo', text: `history: showing last ${String(HISTORY_ITEMS)} items` })
+    }
+  }
+
   /** Open the effect layer's listeners, and keep their disposers. */
   const openSubscriptions = (): void => {
     if (subscriptions !== undefined) return
@@ -980,16 +1050,7 @@ function handlersFor(
           // A mirror is per bridged session: only the attached one is
           // conversation here, and a child's transcript belongs to its own.
           const item = mirrorOf(event, state.calls)
-          if (item !== undefined) {
-            // An oversized frame would close the socket, so it is dropped here
-            // instead; once is enough to say so on stderr.
-            const frame = mirrorFrame(item)
-            if (frame !== undefined) state.bridge.send(frame)
-            else if (!mirrorDropped) {
-              mirrorDropped = true
-              process.stderr.write(`dsh-supervision: mirror frame over ${String(MAX_FRAME)} bytes dropped\n`)
-            }
-          }
+          if (item !== undefined) sendMirror(state, item)
           if (fact !== undefined) feed(state, fact)
           continue
         }
@@ -1141,6 +1202,11 @@ function handlersFor(
         return
       }
 
+      // The attach arm replays the persisted log; a fresh session has none. The
+      // read happens before `establish` opens the subscriptions, so the replay
+      // lands synchronously behind `welcome` and no live event interleaves.
+      const log = 'attach' in frame ? await readLog(ctx, frame.attach) : undefined
+
       // The early attach check above is the fast path; this one catches a hello
       // that raced another bridge into the shared table while it was binding.
       if (!establish(agent, bridge, 'welcome')) {
@@ -1150,7 +1216,9 @@ function handlersFor(
           message: `session ${agent.session.id} is already bridged`,
         })
         bridge.close()
+        return
       }
+      if (log !== undefined) replayHistory(agent.session.id, log)
     },
 
     line(text: string, bridge: Bridge): void {

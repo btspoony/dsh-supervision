@@ -21,6 +21,7 @@ import type {
   UserMessage,
 } from './index.js'
 import type { ApprovalOutcome } from './approval.js'
+import { HISTORY_ITEMS } from './mirror.js'
 import type { TtyIO } from './tty-transport.js'
 import { PROTO, readRegistry } from 'dsh-supervision-protocol'
 import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
@@ -147,6 +148,12 @@ class FakeHost {
   archived: string[] = []
   /** What `sessionQuery` answers, when the host mounts it; `undefined` hides it. */
   sessionRecords: { header: { id: string; cwd?: string }; live: boolean }[] | undefined = undefined
+  /** What `sessionQuery.readSession` replays; `undefined` hides the reader. */
+  history: SessionEvent[] | undefined = []
+  /** Every session id the log reader was asked for, in call order. */
+  readonly historyReads: string[] = []
+  /** When set, the log read rejects with this reason. */
+  historyError: string | undefined = undefined
   /** Sessions the projection cache marks blank (no turn yet). */
   blankSessions: string[] = []
   /** What the sidebar's `sessionController.list` answers, when mounted. */
@@ -214,9 +221,21 @@ class FakeHost {
             : { list: async () => ({ items: this.controllerItems ?? [] }) }
         }
         if (name === 'sessionQuery') {
-          return this.sessionRecords === undefined
+          const listSessions = this.sessionRecords === undefined
             ? undefined
-            : { listSessions: async () => this.sessionRecords ?? [] }
+            : async () => this.sessionRecords ?? []
+          const readSession = this.history === undefined
+            ? undefined
+            : async (id: string): Promise<{ readonly events: readonly SessionEvent[] }> => {
+              this.historyReads.push(id)
+              if (this.historyError !== undefined) throw new Error(this.historyError)
+              return { events: this.history ?? [] }
+            }
+          if (listSessions === undefined && readSession === undefined) return undefined
+          return {
+            ...(listSessions === undefined ? {} : { listSessions }),
+            ...(readSession === undefined ? {} : { readSession }),
+          }
         }
         if (name === 'sessionProjections') return { summaryKeys: () => ['sessionListMetadata'] }
         if (name === 'sessionProjectionCache') {
@@ -1125,6 +1144,150 @@ test('the attached session mirrors its conversation; a child session emits none'
   }
 })
 
+test('an attach replays the persisted log oldest first behind welcome', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = [
+    {
+      type: 'user/message',
+      time: 100,
+      data: { turn: 1, content: [{ type: 'text', text: 'earlier question' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'assistant/message',
+      time: 200,
+      data: { turn: 1, message: { content: [{ type: 'text', text: 'earlier answer' }] } },
+    },
+  ]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= 3, 'the replay behind welcome')
+    assert.deepEqual(host.historyReads, ['session-1'], 'the attach arm read the log')
+    assert.deepEqual(client.frames.map(frame => frame.t), ['welcome', 'mirror', 'mirror'])
+    assert.deepEqual(
+      client.frames.flatMap(frame => frame.t === 'mirror' ? [frame.item] : []),
+      [
+        { k: 'user', text: 'earlier question' },
+        { k: 'assistant', text: 'earlier answer', turn: 1 },
+      ],
+    )
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a long log replays its newest items and one echo says how many were kept', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = Array.from({ length: HISTORY_ITEMS + 2 }, (_, index): SessionEvent => ({
+    type: 'user/message',
+    time: index + 1,
+    data: { turn: 1, content: [{ type: 'text', text: 'm' + String(index) }], source: { kind: 'user' } },
+  }))
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= HISTORY_ITEMS + 2, 'the bounded replay and its echo')
+    const items = client.frames.flatMap(frame => frame.t === 'mirror' ? [frame.item] : [])
+    assert.equal(items.length, HISTORY_ITEMS, 'only the newest items are replayed')
+    assert.deepEqual(items[0], { k: 'user', text: 'm2' }, 'the oldest kept item starts the replay')
+    assert.deepEqual(items.at(-1), { k: 'user', text: 'm' + String(HISTORY_ITEMS + 1) })
+    assert.deepEqual(client.frames.at(-1), { t: 'echo', text: 'history: showing last ' + String(HISTORY_ITEMS) + ' items' })
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a tool call in the replayed log resolves with its state and ms', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = [
+    {
+      type: 'tool/call',
+      time: 1_000,
+      data: { turn: 2, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' },
+    },
+    {
+      type: 'tool/result',
+      time: 1_012,
+      data: { turn: 2, message: { toolCallId: 'c1', content: [{ type: 'text', text: 'a.txt' }] } },
+    },
+  ]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= 3, 'the tool pair')
+    const tools = client.frames.flatMap(frame => frame.t === 'mirror' && frame.item.k === 'tool' ? [frame.item] : [])
+    assert.deepEqual(tools, [
+      { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'start', turn: 2 },
+      { k: 'tool', callId: 'c1', name: 'bash', args: '{"command":"ls"}', state: 'ok', detail: 'a.txt', ms: 12, turn: 2 },
+    ])
+  } finally {
+    host.dispose()
+  }
+})
+
+test('an unreadable log still attaches and echoes why history is missing', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = [{ type: 'user/message', data: { turn: 1, content: [{ type: 'text', text: 'lost' }], source: { kind: 'user' } } }]
+  host.historyError = 'session log is locked'
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= 2, 'the unavailable echo')
+    assert.deepEqual(client.frames[1], { t: 'echo', text: 'history unavailable: session log is locked' })
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the failed read')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a host with no log reader attaches and echoes that history is unavailable', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.history = undefined
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => client.frames.length >= 2, 'the unavailable echo')
+    assert.deepEqual(client.frames[1], { t: 'echo', text: 'history unavailable: no session query' })
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a new session replays nothing even when the host could read a log', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.history = [{ type: 'user/message', data: { turn: 1, content: [{ type: 'text', text: 'irrelevant' }], source: { kind: 'user' } } }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  client.write({ t: 'hello', proto: PROTO, pid: process.pid, new: { cwd: '/repo/api' } })
+  const [welcome] = await client.take(1)
+
+  try {
+    assert.equal(welcome?.t, 'welcome')
+    // The log read happens before welcome leaves, so an empty list is final.
+    assert.deepEqual(host.historyReads, [], 'the new arm never reads a log')
+    assert.deepEqual(client.frames.filter(frame => frame.t === 'mirror'), [])
+  } finally {
+    host.dispose()
+  }
+})
 test('list reports live and bridged state without binding anything', async () => {
   const dir = tempDir()
   const host = new FakeHost()
