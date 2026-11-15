@@ -209,7 +209,7 @@ The facts a supervisor needs, all of them on this repository's wire:
 ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<permission|question|auth>][ :app=<word>][ :title=<base64>][ :msg=<base64>] ST
 ```
 
-A clear is `state=clear` for the root, `state=clear:id=<id>` for one child record. `kind` is legal only on `blocked`; a parked approval is the root `blocked:kind=permission` record carrying `msg=<tool> <reason> [ask <id>]`. Caps: sequence under 4096 bytes, title 192 bytes, `msg` 2048 bytes, id 128 bytes as `/`-joined segments of at most 32 bytes each (8 segments). The root word is `blocked` > `working` > `done` / `error` / `idle`, and a parked approval outranks a live turn. The reporting surface is `/dev/tty` on both paths (stdout when it is a TTY); that is what the supervisor reads, not the plugin's or the forwarder's stdout.
+A clear is `state=clear` for the root, `state=clear:id=<id>` for one child record. `kind` is legal only on `blocked`; a parked approval is the root `blocked:kind=permission` record carrying `msg=<tool> <reason> [ask <id>]`. Caps: sequence under 4096 bytes, title 192 bytes, `msg` 2048 bytes, id 128 bytes as `/`-joined segments of at most 32 bytes each (8 segments). The root word is `blocked` > `working` > `done` / `error` / `idle`, and a parked approval outranks a live turn. The root also stays `working` while a descendant subagent (`origin = subagent`, lineage reaching the bridged session) or a background job the session owns is `running` or `stopping` — not only while its own turn is live — and `msg` then carries the count (`2 subagents · 1 job`). If that activity has not changed for 5 minutes the root falls back to the turn word and one `activity stale: …` echo line says so. The reporting surface is `/dev/tty` on both paths (stdout when it is a TTY); that is what the supervisor reads, not the plugin's or the forwarder's stdout.
 
 **Routes**, served only when the host mounts a webserver:
 
@@ -218,7 +218,7 @@ A clear is `state=clear` for the root, `state=clear:id=<id>` for one child recor
 | `GET /dsh-supervision/state` | `{"proto":1,"sessions":{"<session id>":{"bridged":true,"terminal":"…","pid":<n>,"since":<ms>,"asks":["<ask id>"]}}}`; `405` for another method |
 | `POST /dsh-supervision/reclaim` | `content-type: application/json`, body `{"session":"<id>"}` under 4 KiB → `200 {"reclaimed":true}`; `409 {"reclaimed":false}` when no bridge held it; `415` for another content type, `400` for a bad body |
 
-**Echo lines** the supervisor reads, in the order they are written: `[turn <n>] <state>` on a state change, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer above, `refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`, `unknown command /<verb>`.
+**Echo lines** the supervisor reads, in the order they are written: `[turn <n>] <state>` on a state change, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer above, `refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`, `unknown command /<verb>`, and one `activity stale: …` when subagent/job activity outlives its window.
 
 **Exit codes of `dsh-sup`:** `0` clean `bye`, `1` backend lost, `2` usage or no live backend, `3` `busy`, `4` `locked`, `5` `create-failed`, `6` `protocol` (a frame this process refused, so the backend is alive).
 

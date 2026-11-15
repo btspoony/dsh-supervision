@@ -54,7 +54,7 @@ after(() => {
 interface FakeAgent {
   id: string
   status: 'idle' | 'running'
-  session: { id: string; header: { id?: string; cwd?: string } }
+  session: { id: string; header: { id?: string; cwd?: string; parentSession?: string; origin?: string } }
   steer(message: UserMessage): void
   cancel(cause: { readonly kind: 'user' }): void
 }
@@ -176,6 +176,10 @@ class FakeHost {
   skillGetWait: Promise<void> | undefined = undefined
   /** Rows `ctx.commands.list` answers; `undefined` hides the command service. */
   catalogCommands: { name: string; description: string; input?: unknown }[] | undefined = undefined
+  /** Rows `ctx.jobs.list` answers; `undefined` hides the job service. */
+  jobRows: { id: string; label?: string; owner?: string; status: string }[] | undefined = []
+  /** Job-event listeners the plugin subscribed, one per bridge. */
+  readonly jobListeners = new Set<() => void>()
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -185,6 +189,7 @@ class FakeHost {
   attachServer = true
   readonly #sessionListeners = new Set<(session: { id: string }, event: SessionEvent) => void>()
   readonly #statusListeners = new Set<(payload: { agent: FakeAgent; status: 'idle' | 'running' }) => void>()
+  readonly #subagentListeners = new Set<() => void>()
   /** DSH's answerer chain for `approval/request`, in dispatch order. */
   readonly #approvalListeners: ApprovalListener[] = []
   /** The last effect registered; the fake models the host's disposal like the old one. */
@@ -279,6 +284,19 @@ class FakeHost {
             ? undefined
             : { list: (_agent: unknown) => this.catalogCommands ?? [] }
         }
+        if (name === 'jobs') {
+          return this.jobRows === undefined
+            ? undefined
+            : {
+                list: () => this.jobRows ?? [],
+                events: {
+                  subscribe: (_filter: { owner: string }, listener: () => void) => {
+                    this.jobListeners.add(listener)
+                    return () => { this.jobListeners.delete(listener) }
+                  },
+                },
+              }
+        }
         if (name === 'sessionProjections') return { summaryKeys: () => ['sessionListMetadata'] }
         if (name === 'sessionProjectionCache') {
           return {
@@ -316,6 +334,10 @@ class FakeHost {
             if (index >= 0) this.#approvalListeners.splice(index, 1)
           }
         }
+        if (name === 'subagent/start' || name === 'subagent/end') {
+          this.#subagentListeners.add(listener)
+          return () => { this.#subagentListeners.delete(listener) }
+        }
         const set = name === 'session/event' ? this.#sessionListeners : this.#statusListeners
         set.add(listener)
         return () => { set.delete(listener) }
@@ -325,11 +347,11 @@ class FakeHost {
   }
 
   /** Register an agent without going through `apply`. */
-  add(id: string, cwd: string): FakeAgent {
+  add(id: string, cwd: string, lineage: { parentSession?: string; origin?: string } = {}): FakeAgent {
     const agent: FakeAgent = {
       id,
       status: 'idle',
-      session: { id, header: { id, cwd } },
+      session: { id, header: { id, cwd, ...lineage } },
       steer: message => { this.steered.push({ session: id, message }) },
       cancel: cause => { this.cancelled.push(`${id}:${cause.kind}`) },
     }
@@ -339,6 +361,16 @@ class FakeHost {
 
   emit(session: string, event: SessionEvent): void {
     for (const listener of this.#sessionListeners) listener({ id: session }, event)
+  }
+
+  /** Fire one job event, as the host's job service would. */
+  emitJob(): void {
+    for (const listener of this.jobListeners) listener()
+  }
+
+  /** Fire one subagent start/end, as the host's subagent service would. */
+  emitSubagent(): void {
+    for (const listener of this.#subagentListeners) listener()
   }
 
   /**
@@ -1703,6 +1735,162 @@ test('/skill says the service is unavailable when the host mounts none', async (
   } finally {
     host.dispose()
   }
+})
+/** The decoded fields of the newest root OSC report (the one with no child id). */
+function lastRootFields(client: Client): Record<string, string> {
+  const frame = client.conversation.filter(
+    (candidate): candidate is Extract<OutFrame, { t: 'osc' }> => candidate.t === 'osc' && !candidate.data.includes(':id='),
+  ).at(-1)
+  const fields: Record<string, string> = {}
+  if (frame === undefined) return fields
+  const body = frame.data.replace(/^\u001b\]7501;/, '').replace(/\u001b\\$/, '')
+  for (const pair of body.split(':')) {
+    const index = pair.indexOf('=')
+    if (index < 0) continue
+    const key = pair.slice(0, index)
+    const value = pair.slice(index + 1)
+    fields[key] = key === 'msg' || key === 'title' ? Buffer.from(value, 'base64').toString('utf8') : value
+  }
+  return fields
+}
+
+test('a turn that ends with a running subagent keeps the root working and says why', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => lastRootFields(client).state === 'working', 'the live turn')
+    host.add('session-child', '/repo', { parentSession: 'session-1', origin: 'subagent' })
+    const child = host.agents.at(-1)
+    assert.ok(child !== undefined)
+    child.status = 'running'
+    host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await until(() => lastRootFields(client).msg === '1 subagent', 'working after the turn ended')
+    assert.equal(lastRootFields(client).state, 'working')
+
+    // The child settling is the only thing left running; the turn word returns.
+    child.status = 'idle'
+    host.emitSubagent()
+    await until(() => lastRootFields(client).state === 'done', 'done after the child settled')
+    assert.equal(lastRootFields(client).msg, undefined)
+  } finally {
+    host.dispose()
+  }
+})
+
+test('an owned running job keeps the root working until it settles', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    // A finished turn leaves the word the job has to override.
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await until(() => lastRootFields(client).state === 'done', 'the finished turn')
+    host.jobRows = [{ id: 'job-1', label: 'nightly', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+    assert.equal(lastRootFields(client).msg, '1 job')
+
+    host.jobRows = [{ id: 'job-1', label: 'nightly', owner: 'session-1', status: 'done' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'done', 'done after the job settled')
+    assert.equal(lastRootFields(client).msg, undefined)
+  } finally {
+    host.dispose()
+  }
+})
+
+test('an activity family that never changes stops counting after its window', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  const realNow = Date.now()
+
+  try {
+    // A finished turn leaves the word the stale fallback must return to.
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await until(() => lastRootFields(client).state === 'done', 'the finished turn')
+    host.add('session-child', '/repo', { parentSession: 'session-1', origin: 'subagent' })
+    const child = host.agents.at(-1)
+    assert.ok(child !== undefined)
+    child.status = 'running'
+    host.emitSubagent()
+    await until(() => lastRootFields(client).state === 'working', 'working for the child')
+    assert.equal(lastRootFields(client).msg, '1 subagent')
+
+    // The child stops changing; past the stale window the root falls back.
+    mock.timers.enable({ apis: ['Date'] })
+    // A full minute past the window, so the few milliseconds spent setting the
+    // clock up can never make the test pass or fail on scheduling noise.
+    mock.timers.setTime(realNow + 6 * 60_000)
+    host.emitSubagent()
+    await until(() => lastRootFields(client).state === 'done', 'the stale fallback')
+    assert.equal(lastRootFields(client).msg, 'activity stale: 1 subagent')
+    assert.deepEqual(
+      client.conversation.find(frame => frame.t === 'echo' && frame.text.startsWith('activity stale:')),
+      { t: 'echo', text: 'activity stale: 1 subagent' },
+    )
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+test('a host without the jobs service reports the turn word exactly as before', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.jobRows = undefined
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    assert.equal(host.jobListeners.size, 0, 'nothing to subscribe')
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => lastRootFields(client).state === 'working', 'the live turn')
+    host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await until(() => lastRootFields(client).state === 'done', 'the turn word')
+    assert.equal(lastRootFields(client).msg, undefined)
+  } finally {
+    host.dispose()
+  }
+})
+
+test('disposing the plugin clears an activity poll it started', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-child', '/repo', { parentSession: 'session-1', origin: 'subagent' })
+  const child = host.agents.at(-1)
+  assert.ok(child !== undefined)
+  child.status = 'running'
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => lastRootFields(client).state === 'working', 'working for the child')
+
+  const realClear = globalThis.clearInterval
+  let cleared = 0
+  globalThis.clearInterval = ((timer: ReturnType<typeof setInterval>) => {
+    cleared += 1
+    realClear(timer)
+  }) as typeof globalThis.clearInterval
+  try {
+    host.dispose()
+  } finally {
+    globalThis.clearInterval = realClear
+  }
+  assert.ok(cleared > 0, 'the activity poll was cleared')
 })
 test('list reports live and bridged state without binding anything', async () => {
   const dir = tempDir()

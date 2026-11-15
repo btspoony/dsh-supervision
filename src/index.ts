@@ -21,6 +21,8 @@ import type {
   ProgramStatus,
   SessionItem,
 } from 'dsh-supervision-protocol'
+import { activityOf, activitySummary, staleActivity } from './activity.js'
+import type { Activity, AgentActivityView, JobActivityView } from './activity.js'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { catalogOf } from './catalog.js'
@@ -42,8 +44,17 @@ import type { TtyOpen } from './tty.js'
 /** The parts of a DSH Session this plugin reads. */
 interface SessionLike {
   readonly id: string
-  /** The stored header; DSH writes `id` and `cwd` into every one. */
-  readonly header?: { readonly id?: string; readonly cwd?: string }
+  /**
+   * The stored header; DSH writes `id` and `cwd` into every one. The lineage
+   * pair is optional: a fork carries `parentSession` without the subagent
+   * origin, and an older host may carry neither.
+   */
+  readonly header?: {
+    readonly id?: string
+    readonly cwd?: string
+    readonly parentSession?: string
+    readonly origin?: string
+  }
 }
 
 /** The parts of a DSH user message this plugin builds. */
@@ -66,6 +77,25 @@ interface AgentLike {
 /** The `ctx.subagents` surface this plugin reads, when the host mounts it. */
 interface SubagentsLike {
   rootOf(agent: AgentLike): AgentLike
+}
+
+/** One background job as the host's job service lists it. */
+interface JobViewLike {
+  readonly id: string
+  readonly label?: string
+  readonly owner?: string
+  readonly status: string
+}
+
+/**
+ * The `ctx.jobs` surface this plugin reads, when the host mounts it. `events`
+ * is optional: without it the 2 s poll is the only way a job change is noticed.
+ */
+interface JobsLike {
+  list(caller: string): readonly JobViewLike[]
+  events?: {
+    subscribe(filter: { readonly owner: string }, listener: () => void): () => void
+  }
 }
 
 /** The `ctx.agentDefaultModel` surface this plugin reads, when the host mounts it. */
@@ -135,6 +165,7 @@ export interface PluginContext {
     name: 'agent/status',
     listener: (payload: { readonly agent: AgentLike; readonly status: 'idle' | 'running' }) => void,
   ): () => void
+  on(name: 'subagent/start' | 'subagent/end', listener: () => void): () => void
   on(
     name: 'approval/request',
     listener: ApprovalListener,
@@ -263,6 +294,16 @@ interface BridgeState {
   replay?: ReplayWindow
   /** This bind's catalog frame, in flight; `hello` awaits it before replay. */
   catalog?: Promise<void>
+  /** The non-turn families still running for this root. */
+  activity: Activity
+  /** Epoch milliseconds of the last activity identity change, for the stale guard. */
+  activityAt: number
+  /** The 2 s re-scan, opened only once some activity actually exists. */
+  activityTimer: ReturnType<typeof setInterval> | undefined
+  /** The job subscription for this bridge, disposed with it. */
+  jobsOff?: () => void
+  /** Whether the stale echo has already been sent for this bridge. */
+  staleNoted: boolean
 }
 
 /**
@@ -276,6 +317,11 @@ function reasonOf(error: unknown): string {
 /** True when the host stamped an event position this plugin can order by. */
 function isSeq(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** The identity of one activity snapshot, for the "did anything change" test. */
+function activityKey(activity: Activity): string {
+  return JSON.stringify(activity)
 }
 
 /**
@@ -347,6 +393,13 @@ function subagentsOf(value: unknown): SubagentsLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   if (!('rootOf' in value) || typeof value.rootOf !== 'function') return undefined
   return value as SubagentsLike
+}
+
+/** @returns the host's job service, when a usable one is mounted. */
+function jobsOf(value: unknown): JobsLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const list = (value as { list?: unknown }).list
+  return typeof list === 'function' ? value as JobsLike : undefined
 }
 
 /** @returns the host's default model service, when one is mounted. */
@@ -733,6 +786,11 @@ const HISTORY_READ_TIMEOUT_MS = 4_000
  * convenience: half a conversation replayed late is not worth a hanging attach.
  */
 const CATALOG_TIMEOUT_MS = 2_000
+/**
+ * How often an active bridge re-reads the host's activity. Host events decide
+ * when to look immediately; the poll only catches what never announced itself.
+ */
+const ACTIVITY_POLL_MS = 2_000
 
 /**
  * Mount the plugin in two layers.
@@ -957,18 +1015,42 @@ function handlersFor(
   const pendingFor = (session: string): readonly ParkedAsk[] =>
     asks.list().filter(ask => ask.session === session)
 
+  /**
+   * The stale note, when a family has gone unchanged past its window. A child
+   * that never settles must not report `working` forever.
+   */
+  const staleNote = (state: BridgeState): string | undefined => {
+    const summary = activitySummary(state.activity)
+    if (!summary.working || !staleActivity(state.activityAt, Date.now())) return undefined
+    return `activity stale: ${summary.msg}`
+  }
+
+  /** The non-turn half of the root report: running families, or the stale note. */
+  const activityView = (state: BridgeState): { readonly working: boolean; readonly msg: string } => {
+    const note = staleNote(state)
+    return note === undefined ? activitySummary(state.activity) : { working: false, msg: note }
+  }
+
   /** The root record to report: a parked ask outranks every fact the session reports. */
   const reportOf = (state: BridgeState): ProgramStatus => {
     const [ask] = pendingFor(state.agent.session.id)
-    if (ask === undefined) {
-      return { state: rootWord(state.root), app: state.root.app, title: state.root.title }
+    if (ask !== undefined) {
+      return {
+        state: 'blocked',
+        kind: 'permission',
+        msg: askMsg(ask),
+        app: state.root.app,
+        title: state.root.title,
+      }
     }
+    const activity = activityView(state)
+    // The turn and the activity families are independent reasons to be working;
+    // `blocked` still wins inside `rootWord`, so the precedence table is unchanged.
     return {
-      state: 'blocked',
-      kind: 'permission',
-      msg: askMsg(ask),
+      state: rootWord({ working: state.root.working || activity.working, terminal: state.root.terminal }),
       app: state.root.app,
       title: state.root.title,
+      ...(activity.msg === '' ? {} : { msg: activity.msg }),
     }
   }
 
@@ -986,11 +1068,77 @@ function handlersFor(
       const data = programStatus(record)
       if (data !== '') state.bridge.send({ t: 'osc', data })
     }
+    // One line per bridge says why a family stopped counting: the operator is
+    // looking at a `done` root that still has a child listed in the host.
+    const note = staleNote(state)
+    if (note !== undefined && !state.staleNoted) {
+      state.staleNoted = true
+      if (config.echo) state.bridge.send({ t: 'echo', text: note })
+    }
     // A title change alone is not worth a line in the supervisor's transcript.
     if (config.echo && (state.root.turn !== shown.turn || record.state !== shown.state)) {
       state.bridge.send({ t: 'echo', text: `[turn ${String(state.root.turn)}] ${record.state}` })
     }
     state.shown = { state: record.state, msg, title, kind: record.kind, turn: state.root.turn }
+  }
+
+  /**
+   * Re-read the host's activity into the bridge without reporting. A turn's end
+   * must compose the new activity *before* the publish inside `feed`, so the
+   * wire never shows a transient `done`.
+   * @param state - the bridge whose activity is re-read.
+   */
+  const refreshActivity = (state: BridgeState): void => {
+    // A released bridge owns nothing: a late timer or job event must not report.
+    if (bridged.get(state.agent.session.id) !== state) return
+    const jobs = jobsOf(ctx.get?.('jobs'))
+    let jobRows: readonly JobViewLike[] = []
+    if (jobs !== undefined) {
+      try {
+        jobRows = jobs.list(state.agent.session.id)
+      } catch {
+        // A service that cannot list is indistinguishable from none here.
+        jobRows = []
+      }
+    }
+    const agents: AgentActivityView[] = ctx.agents.list().map(agent => {
+      const header = agent.session.header
+      return {
+        sessionId: agent.session.id,
+        ...(header?.parentSession === undefined ? {} : { parentSession: header.parentSession }),
+        ...(header?.origin === undefined ? {} : { origin: header.origin }),
+        status: agent.status,
+      }
+    })
+    const jobsView: JobActivityView[] = jobRows.map(job => ({
+      id: job.id,
+      ...(job.label === undefined ? {} : { label: job.label }),
+      ...(job.owner === undefined ? {} : { owner: job.owner }),
+      status: job.status,
+    }))
+    const activity = activityOf(state.agent.session.id, { agents, jobs: jobsView })
+    // Identity, not freshness: a rescan returning the same items is not news,
+    // and only a real change may move the stale window.
+    if (activityKey(activity) !== activityKey(state.activity)) {
+      state.activity = activity
+      state.activityAt = Date.now()
+    }
+    if (state.activity.subagents.length > 0 || state.activity.jobs.length > 0) startActivityTimer(state)
+  }
+
+  /** Re-read activity and report it, for events whose only meaning is activity. */
+  const recomputeActivity = (state: BridgeState): void => {
+    refreshActivity(state)
+    publish(state)
+  }
+
+  /** Open the 2 s fallback poll; only a bridge with real activity pays for it. */
+  const startActivityTimer = (state: BridgeState): void => {
+    if (state.activityTimer !== undefined) return
+    const timer = setInterval(() => { recomputeActivity(state) }, ACTIVITY_POLL_MS)
+    // Never a reason for the host process to stay alive.
+    if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+    state.activityTimer = timer
   }
 
   /** Send one root report immediately, for a bridge that just switched session. */
@@ -1233,7 +1381,12 @@ function handlersFor(
             const item = mirrorOf(event, state.calls)
             if (item !== undefined) sendMirror(state, item)
           }
-          if (fact !== undefined) feed(state, fact)
+          if (fact !== undefined) {
+            // A turn's end decides the word, but activity decides whether the
+            // work is really done: refresh before `feed` publishes.
+            if (fact.type === 'turn/end') refreshActivity(state)
+            feed(state, fact)
+          }
           continue
         }
         if (fact === undefined) continue
@@ -1244,13 +1397,20 @@ function handlersFor(
     const offStatus = ctx.on('agent/status', payload => {
       for (const state of bridged.values()) {
         if (payload.agent !== state.agent) continue
+        // Same ordering rule as turn/end: activity first, one publish.
+        refreshActivity(state)
         feed(state, { type: 'agent/status', status: payload.status })
       }
     })
+    const offSubagent = (): void => {
+      for (const state of bridged.values()) recomputeActivity(state)
+    }
+    const offSubagentStart = ctx.on('subagent/start', offSubagent)
+    const offSubagentEnd = ctx.on('subagent/end', offSubagent)
     // Prepended, and only alive while a bridge is: without one the browser's
     // own answerer runs untouched, and a claimed ask never reaches it.
     const offApproval = ctx.on('approval/request', answer, { prepend: true })
-    subscriptions = [offSession, offStatus, offApproval]
+    subscriptions = [offSession, offStatus, offSubagentStart, offSubagentEnd, offApproval]
   }
 
   /** Resolve the asks parked for one bridge; with the last bridge, every ask. */
@@ -1271,6 +1431,14 @@ function handlersFor(
     // raised it, and its asker must not hang on a question nobody will answer.
     cancelAsks(session)
     if (state === undefined) return
+    // The poll and the job subscription belong to this bridge alone; a released
+    // bridge must not keep the process (or the host) busy for nothing.
+    if (state.activityTimer !== undefined) {
+      clearInterval(state.activityTimer)
+      state.activityTimer = undefined
+    }
+    state.jobsOff?.()
+    state.jobsOff = undefined
     clearChildren(state)
     if (bridged.size > 0 || subscriptions === undefined) return
     for (const off of subscriptions) off()
@@ -1316,6 +1484,10 @@ function handlersFor(
       shown: { state: root.current.state, msg: '', title: root.current.title, kind: undefined, turn: root.turn },
       children: new Map(),
       calls: new Map(),
+      activity: { subagents: [], jobs: [] },
+      activityAt: 0,
+      activityTimer: undefined,
+      staleNoted: false,
     }
     bridged.set(session, state)
     openSubscriptions()
@@ -1336,6 +1508,18 @@ function handlersFor(
     }
     // A child report alone sets `reported`, so children follow the root word.
     seedChildren(state)
+    // The host may already have running descendants when this bridge attaches;
+    // one read now keeps the first composed report from claiming `idle`.
+    recomputeActivity(state)
+    // Job changes are the one family with no session event of their own.
+    const jobs = jobsOf(ctx.get?.('jobs'))
+    if (jobs?.events !== undefined) {
+      try {
+        state.jobsOff = jobs.events.subscribe({ owner: session }, () => { recomputeActivity(state) })
+      } catch {
+        // A service that cannot subscribe still lists; the poll covers it.
+      }
+    }
     // The menu follows every root word, bind and switch alike. `hello` awaits
     // this promise so the replay can never overtake the catalog.
     state.catalog = sendCatalog(state)
