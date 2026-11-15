@@ -1736,6 +1736,11 @@ test('/skill says the service is unavailable when the host mounts none', async (
     host.dispose()
   }
 })
+/** Every echo line the client received, in order. */
+function echoesOf(client: Client): readonly string[] {
+  return client.conversation.flatMap(frame => frame.t === 'echo' ? [frame.text] : [])
+}
+
 /** The decoded fields of the newest root OSC report (the one with no child id). */
 function lastRootFields(client: Client): Record<string, string> {
   const frame = client.conversation.filter(
@@ -1989,6 +1994,93 @@ test('a turn held by activity does not advance the turn; releasing it does once'
     const done = client.conversation.flatMap(frame => frame.t === 'echo' ? [frame.text] : [])
       .filter(text => text.endsWith(' done'))
     assert.deepEqual(done, ['[turn 1] done'])
+  } finally {
+    host.dispose()
+  }
+})
+test('a blocked turn held by activity counts its leave once and the drain adds nothing', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.add('session-child', '/repo', { parentSession: 'session-1', origin: 'subagent' })
+    const child = host.agents.at(-1)
+    assert.ok(child !== undefined)
+    child.status = 'running'
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => lastRootFields(client).state === 'working', 'the live turn')
+
+    // blocked outranks working, so this is a real leave even while the child runs.
+    host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'blocked' } } })
+    await until(() => lastRootFields(client).state === 'blocked', 'the blocked word')
+    assert.deepEqual(echoesOf(client), ['[turn 0] working', '[turn 1] blocked'])
+
+    // Draining the family later reports the same blocked word: no second count.
+    child.status = 'idle'
+    host.emitSubagent()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(lastRootFields(client).state, 'blocked')
+    assert.deepEqual(echoesOf(client), ['[turn 0] working', '[turn 1] blocked'])
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a job that starts before the turn ends leaves once when it settles', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.deepEqual(echoesOf(client), ['[turn 0] working'], 'the held turn leaves nothing')
+
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'done' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'done', 'the drained word')
+    assert.deepEqual(echoesOf(client), ['[turn 0] working', '[turn 1] done'])
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a job that starts after the turn ends counts one leave of its own', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await until(() => lastRootFields(client).state === 'done', 'the finished turn')
+    assert.deepEqual(echoesOf(client), ['[turn 0] working', '[turn 1] done'])
+
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+    assert.deepEqual(echoesOf(client), ['[turn 0] working', '[turn 1] done', '[turn 1] working'])
+
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'done' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'done', 'the drained word')
+    assert.deepEqual(echoesOf(client), [
+      '[turn 0] working',
+      '[turn 1] done',
+      '[turn 1] working',
+      '[turn 2] done',
+    ])
   } finally {
     host.dispose()
   }

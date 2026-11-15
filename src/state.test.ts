@@ -37,6 +37,18 @@ test('a turn held by activity leaves no turn behind', () => {
   assert.equal(fold(root(), events).turn, 1)
 })
 
+test('a blocked end held by activity still counts its one leave', () => {
+  const events: readonly StateEvent[] = [
+    { type: 'turn/start', turn: 1 },
+    { type: 'turn/end', turn: 1, reason: 'blocked' },
+  ]
+  const held = fold(root(), events, true)
+  assert.equal(held.turn, 1, 'blocked outranks working, so the leave is real')
+  assert.equal(held.terminal, 'blocked')
+  // Draining the family changes nothing: the same result, no second count.
+  assert.equal(fold(held, [{ type: 'agent/status', status: 'idle' }], true).turn, 1)
+})
+
 test('a live turn reports working', () => {
   assert.equal(fold(root(), [{ type: 'turn/start', turn: 1 }]).current.state, 'working')
 })

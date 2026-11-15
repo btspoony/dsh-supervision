@@ -111,10 +111,12 @@ export function reduceRootState(state: RootState, event: StateEvent, heldWorking
       break
   }
 
-  // hc increments its own turn each time the root leaves `working`, and a
-  // repeated word is not a turn; mirroring that exactly is what keeps the two
-  // counters equal.
-  const leaving = !heldWorking && state.current.state === 'working' && rootWord(settled) !== 'working'
+  // hc counts a leave of the *composed* word, and a repeated word is not a turn.
+  // A family can hold a finished turn on `working`, but `blocked` outranks
+  // `working` (and `working` outranks error/done), so the flag suppresses only a
+  // composing `working` — a blocked end is always a real leave and counts once.
+  const composed = rootWord({ working: settled.working || heldWorking, terminal: settled.terminal })
+  const leaving = state.current.state === 'working' && composed !== 'working'
   const turn = leaving ? state.turn + 1 : state.turn
   const record: RootRecord = { state: rootWord(settled), app: settled.app, title: settled.title }
   const unchanged = record.state === state.current.state
