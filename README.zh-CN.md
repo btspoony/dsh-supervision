@@ -66,7 +66,7 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 ### 交互面
 
-stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行追加：对话放在可滚动的 transcript 视口里，下面是多行编辑器，最下面一行状态栏显示会话 id、状态与 turn。turn 只在插件 `echo` 配置打开时显示：echo 关闭后 `welcome` 之后没有任何帧携带轮次，状态栏因此靠 OSC 记录维持状态、不再显示 turn，而不是把数字冻在那里。桥接转发过的内容都留在 transcript 中，向上滚动就能看全。attach 期间交互面占用终端的备用屏：不写终端回滚缓冲，历史就是 TUI 自己的视口；结束 attach 时最后一帧会打回正常屏幕。
+stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行追加：对话放在可滚动的 transcript 视口里，下面是多行编辑器，最下面一行状态栏显示会话 id、状态与 turn。turn 只在插件 `echo` 配置打开时显示：echo 关闭后 `welcome` 之后没有任何帧携带轮次，状态栏因此靠 OSC 记录维持状态（`programStatus` 打开时）、不再显示 turn，而不是把数字冻在那里；两者都关闭时状态栏只剩会话 id。桥接转发过的内容都留在 transcript 中，向上滚动就能看全。attach 期间交互面占用终端的备用屏：不写终端回滚缓冲，历史就是 TUI 自己的视口；结束 attach 时最后一帧会打回正常屏幕。
 
 | 按键 | 作用 |
 |---|---|

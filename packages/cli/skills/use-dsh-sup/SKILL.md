@@ -55,7 +55,8 @@ When stdin and stdout are both terminals, an attach opens a full-screen surface:
 a scrollable transcript of those blocks, a multi-line editor for the next
 operator line, and a status line with the session id, state and turn. The turn
 appears only while the plugin's `echo` config is on — with echo off no frame after
-`welcome` carries a count, so the bar follows OSC records and omits it. Everything
+`welcome` carries a count, so the bar follows OSC records (while `programStatus` is
+on) and omits it; with both off it carries the session id alone. Everything
 forwarded stays in the transcript, so scrolling back reaches the whole attach. The
 surface takes over the alternate screen; terminal scrollback is not written, and
 the last frame returns to the normal screen on exit.
