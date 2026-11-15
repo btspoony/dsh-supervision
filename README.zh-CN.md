@@ -7,7 +7,7 @@
 [![npm](https://img.shields.io/npm/dt/dsh-supervision)](https://www.npmjs.com/package/dsh-supervision)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](package.json)
 ![node](https://img.shields.io/badge/node-%3E%3D22-339933.svg)
-![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-4B32C3.svg)
+![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.3-4B32C3.svg)
 
 **把运行中的 DSH 会话桥接到任意终端 supervisor 上——状态可见，指令可发。** 插件就装在你已经在运行的那个 `dsh web` 进程里：[**OSC 7501**](https://www.superlogical.com/rex/docs/build/program-status) 记录写到终端上，操作者输入回到同一个会话。herdr-core（`hc`）是受支持的一种 supervisor，也是参考实现；只要能从 PTY 读到 OSC 7501、又能往那个 PTY 的 stdin 写行，任何 supervisor 都可以。
 
