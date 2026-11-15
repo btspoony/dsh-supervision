@@ -1892,6 +1892,108 @@ test('disposing the plugin clears an activity poll it started', async () => {
   }
   assert.ok(cleared > 0, 'the activity poll was cleared')
 })
+test('an activity poll stops when the last family drains and restarts lazily', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    const realClear = globalThis.clearInterval
+    let cleared = 0
+    globalThis.clearInterval = ((timer: ReturnType<typeof setInterval>) => {
+      cleared += 1
+      realClear(timer)
+    }) as typeof globalThis.clearInterval
+    try {
+      host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'done' }]
+      host.emitJob()
+      await until(() => lastRootFields(client).state === 'idle', 'the drained word')
+    } finally {
+      globalThis.clearInterval = realClear
+    }
+    assert.ok(cleared > 0, 'the poll stopped with the family')
+
+    // A later family opens a fresh poll; the bridge is still watched.
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'the restarted activity')
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'done' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'idle', 'the second drain')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a switch announces the composed activity word, not a transient idle', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  // Cold, so the switch exercises the resume path and a fresh establish.
+  host.add('child-2', '/repo', { parentSession: 'session-2', origin: 'subagent' })
+  const child = host.agents.at(-1)
+  assert.ok(child !== undefined)
+  child.status = 'running'
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    const before = client.conversation.length
+    client.write({ t: 'line', text: '/attach session-2' })
+    await until(() => host.resumed.includes('session-2'), 'the switch to bind')
+    await until(() => client.conversation.slice(before).some(frame => frame.t === 'echo'), 'the announce echo')
+    const echoes = client.conversation.slice(before).flatMap(frame => frame.t === 'echo' ? [frame.text] : [])
+    assert.equal(echoes[0], '[turn 0] working', 'the first announced word is composed')
+    assert.equal(echoes.includes('[turn 0] idle'), false, 'no transient idle frame')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('releasing a bridge clears its poll and job subscription without touching the other bridge', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-b', '/repo/other')
+  host.add('child-1', '/repo', { parentSession: 'session-1', origin: 'subagent' })
+  const child = host.agents.at(-1)
+  assert.ok(child !== undefined)
+  child.status = 'running'
+  apply(host.ctx, config({ socketDir: dir }))
+  const one = await attached(host, dir, 'session-1')
+  const two = await attached(host, dir, 'session-b')
+
+  try {
+    await until(() => lastRootFields(one).state === 'working', 'activity on the first bridge')
+    assert.equal(host.jobListeners.size, 2, 'one job subscription per bridge')
+
+    const realClear = globalThis.clearInterval
+    let cleared = 0
+    globalThis.clearInterval = ((timer: ReturnType<typeof setInterval>) => {
+      cleared += 1
+      realClear(timer)
+    }) as typeof globalThis.clearInterval
+    try {
+      one.socket.end()
+      await until(() => host.jobListeners.size === 1, 'the released bridge unsubscribed')
+    } finally {
+      globalThis.clearInterval = realClear
+    }
+    assert.ok(cleared > 0, 'the released bridge cleared its poll')
+
+    host.emit('session-b', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => lastRootFields(two).state === 'working', 'the surviving bridge still reports')
+    assert.equal(host.jobListeners.size, 1, 'no subscription came back')
+  } finally {
+    host.dispose()
+  }
+})
 test('list reports live and bridged state without binding anything', async () => {
   const dir = tempDir()
   const host = new FakeHost()

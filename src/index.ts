@@ -1123,7 +1123,10 @@ function handlersFor(
       state.activity = activity
       state.activityAt = Date.now()
     }
+    // A bridge pays for the poll only while something is actually running; the
+    // idle path must not keep re-scanning the host (plan §5).
     if (state.activity.subagents.length > 0 || state.activity.jobs.length > 0) startActivityTimer(state)
+    else stopActivityTimer(state)
   }
 
   /** Re-read activity and report it, for events whose only meaning is activity. */
@@ -1139,6 +1142,13 @@ function handlersFor(
     // Never a reason for the host process to stay alive.
     if (typeof timer === 'object' && 'unref' in timer) timer.unref()
     state.activityTimer = timer
+  }
+
+  /** Close the fallback poll once no family is running; a later one starts it again. */
+  const stopActivityTimer = (state: BridgeState): void => {
+    if (state.activityTimer === undefined) return
+    clearInterval(state.activityTimer)
+    state.activityTimer = undefined
   }
 
   /** Send one root report immediately, for a bridge that just switched session. */
@@ -1492,6 +1502,10 @@ function handlersFor(
     bridged.set(session, state)
     openSubscriptions()
 
+    // Read activity before any frame. The welcome stays turn-only, but a switch
+    // announces at once and must not announce an idle word it is about to
+    // correct; the snapshot is also what the post-welcome report uses.
+    refreshActivity(state)
     if (greet === 'welcome') {
       // The root word is the forwarder's readiness signal, so it leaves before
       // any subscription could produce a frame behind it.
@@ -1508,9 +1522,8 @@ function handlersFor(
     }
     // A child report alone sets `reported`, so children follow the root word.
     seedChildren(state)
-    // The host may already have running descendants when this bridge attaches;
-    // one read now keeps the first composed report from claiming `idle`.
-    recomputeActivity(state)
+    // The snapshot is already in hand; report it once the root word has gone out.
+    publish(state)
     // Job changes are the one family with no session event of their own.
     const jobs = jobsOf(ctx.get?.('jobs'))
     if (jobs?.events !== undefined) {
