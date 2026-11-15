@@ -99,6 +99,22 @@ test('a welcome must name a known state and a whole turn count', () => {
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, session: '' })}\n`).ok, false);
 });
 
+test('a welcome may carry a strict echo flag and nothing else', () => {
+  const base = { t: 'welcome', proto: PROTO, session: 'session-1', title: 'repo', state: 'idle', turn: 0 };
+  // Absent is an older plugin, and an older plugin keeps writing echo lines.
+  assert.deepEqual(frames(decodeChunk('', `${JSON.stringify(base)}\n`)), [base]);
+  assert.deepEqual(frames(decodeChunk('', `${JSON.stringify({ ...base, echo: false })}\n`)), [
+    { ...base, echo: false },
+  ]);
+  assert.deepEqual(frames(decodeChunk('', `${JSON.stringify({ ...base, echo: true })}\n`)), [
+    { ...base, echo: true },
+  ]);
+  // A non-boolean is not a reason to lose the attach: the flag is simply unused.
+  for (const echo of ['no', 0, 1, null, {}]) {
+    assert.deepEqual(frames(decodeChunk('', `${JSON.stringify({ ...base, echo })}\n`)), [base]);
+  }
+});
+
 test('an error frame carries one of the protocol codes', () => {
   assert.deepEqual(frames(decodeChunk('', '{"t":"error","code":"busy","message":"held"}\n')), [
     { t: 'error', code: 'busy', message: 'held' },

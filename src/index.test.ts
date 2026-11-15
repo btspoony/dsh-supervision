@@ -1039,6 +1039,23 @@ test('a bare hello creates a session and answers welcome before anything else', 
   host.dispose()
 })
 
+test('the welcome restates the echo config the forwarder seeds its turn from', async () => {
+  for (const echo of [true, false]) {
+    const dir = tempDir()
+    const host = new FakeHost()
+    host.add('session-1', '/repo')
+    apply(host.ctx, config({ socketDir: dir, echo }))
+    try {
+      const client = await attached(host, dir, 'session-1')
+      const [welcome] = await client.take(1)
+      assert.equal(welcome?.t, 'welcome')
+      assert.equal(welcome !== undefined && welcome.t === 'welcome' ? welcome.echo : undefined, echo)
+    } finally {
+      host.dispose()
+    }
+  }
+})
+
 test('an attach to a live session reuses it; a resumed one comes from persistence', async () => {
   const dir = tempDir()
   const host = new FakeHost()

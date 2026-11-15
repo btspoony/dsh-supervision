@@ -73,6 +73,12 @@ export type Welcome = {
   readonly title: string
   readonly state: ProgramState
   readonly turn: number
+  /**
+   * Whether the plugin writes `[turn <n>] <state>` echo lines. Optional and
+   * additive on the same {@link PROTO}: absent means an older plugin, whose
+   * turn count the forwarder keeps showing.
+   */
+  readonly echo?: boolean
 }
 
 /** Token counts as the host reports them on one finished assistant step. */
@@ -263,7 +269,10 @@ function parseOutFrame(line: string): OutFrame | undefined {
       if (proto !== PROTO) return undefined
       if (typeof session !== 'string' || session === '' || typeof title !== 'string') return undefined
       if (!isProgramState(state) || typeof turn !== 'number' || !Number.isInteger(turn) || turn < 0) return undefined
-      return { t: 'welcome', proto, session, title, state, turn }
+      // Only a strict boolean says anything; anything else is an older or a
+      // different peer, and its turn count keeps today's behaviour.
+      const echo = typeof parsed['echo'] === 'boolean' ? parsed['echo'] : undefined
+      return { t: 'welcome', proto, session, title, state, turn, ...(echo === undefined ? {} : { echo }) }
     }
     case 'osc': {
       const data = parsed['data']

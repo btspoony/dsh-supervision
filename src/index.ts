@@ -1569,6 +1569,9 @@ function handlersFor(
         title: root.current.title,
         state: root.current.state,
         turn: root.turn,
+        // The turn count only advances on the echo lines this flag turns off, so
+        // the forwarder needs it to know whether the number it seeds is honest.
+        echo: config.echo,
       })
     } else {
       announce(state)

@@ -69,7 +69,10 @@ With `--no-tui`, or when stdin or stdout is not a terminal, the bridge reads std
 When stdin and stdout are both terminals, an attach opens a full-screen surface
 instead of appending lines: the conversation in a scrollable transcript viewport,
 a multi-line editor for the next operator line, and a status line carrying the
-session id, the reported state and the turn. Everything the bridge forwards stays
+session id, the reported state and the turn. The turn is shown only while the
+plugin's `echo` config is on: nothing after `welcome` carries a count when echo
+is off, so the bar keeps the state live from OSC records and shows no turn rather
+than freezing one. Everything the bridge forwards stays
 in the transcript, so scrolling back reaches the whole attach. The surface
 takes over the terminal's alternate screen while attached: terminal scrollback is
 not written, the TUI viewport is the history, and the last frame is printed back
@@ -235,7 +238,7 @@ Six keys, all of them read by `src/index.ts`; an unknown shape is refused with a
 |---|---|---|
 | `enabled` | `true` | Mount anything at all. `false` is a hard off switch: no socket, no routes, no client decoration. |
 | `programStatus` | `true` | Emit OSC 7501 reports. Off leaves the socket answering `list` only. |
-| `echo` | `true` | Mirror state changes and approval decisions as `echo` lines for the supervisor. |
+| `echo` | `true` | Mirror state changes and approval decisions as `echo` lines for the supervisor. Off also drops the turn from the attach surface's status bar, because the count only advances on those lines. |
 | `app` | `"dsh"` | The program word every report restates. |
 | `titleFrom` | `"cwd-basename"` | Where the root title comes from: `cwd-basename`, `session-title`, or `none`. |
 | `socketDir` | `$DSH_HOME/supervision` | Registry and socket directory. |

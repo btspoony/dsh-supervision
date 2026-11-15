@@ -66,7 +66,7 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 ### 交互面
 
-stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行追加：对话放在可滚动的 transcript 视口里，下面是多行编辑器，最下面一行状态栏显示会话 id、状态与 turn。桥接转发过的内容都留在 transcript 中，向上滚动就能看全。attach 期间交互面占用终端的备用屏：不写终端回滚缓冲，历史就是 TUI 自己的视口；结束 attach 时最后一帧会打回正常屏幕。
+stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行追加：对话放在可滚动的 transcript 视口里，下面是多行编辑器，最下面一行状态栏显示会话 id、状态与 turn。turn 只在插件 `echo` 配置打开时显示：echo 关闭后 `welcome` 之后没有任何帧携带轮次，状态栏因此靠 OSC 记录维持状态、不再显示 turn，而不是把数字冻在那里。桥接转发过的内容都留在 transcript 中，向上滚动就能看全。attach 期间交互面占用终端的备用屏：不写终端回滚缓冲，历史就是 TUI 自己的视口；结束 attach 时最后一帧会打回正常屏幕。
 
 | 按键 | 作用 |
 |---|---|
@@ -198,7 +198,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 |---|---|---|
 | `enabled` | `true` | 是否挂载任何东西。`false` 是硬开关：没有套接口、没有路由、没有客户端装饰。 |
 | `programStatus` | `true` | 是否发出 OSC 7501 上报。关掉后套接口只回答 `list`。 |
-| `echo` | `true` | 是否把状态变化与审批决定镜像成 supervisor 读的 `echo` 行。 |
+| `echo` | `true` | 是否把状态变化与审批决定镜像成 supervisor 读的 `echo` 行。关闭后 attach 交互面状态栏也不再显示 turn，因为轮次只在这类行上推进。 |
 | `app` | `"dsh"` | 每条上报都要重述的程序名。 |
 | `titleFrom` | `"cwd-basename"` | 根标题来源：`cwd-basename`、`session-title` 或 `none`。 |
 | `socketDir` | `$DSH_HOME/supervision` | 注册表与套接口目录。 |
