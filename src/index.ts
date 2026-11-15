@@ -442,30 +442,11 @@ interface SkillsLike {
   get(name: string, options?: unknown): Promise<SkillDefinitionLike | undefined>
 }
 
-/** One `ctx.commands.list` row: a name, its summary and an optional input hint. */
-interface CommandSummaryLike {
-  readonly name: string
-  readonly description: string
-  readonly input?: unknown
-}
-
-/** The `ctx.commands` read surface: the host commands an agent advertises. */
-interface CommandsLike {
-  list(agent: AgentLike): readonly CommandSummaryLike[]
-}
-
 /** @returns the host's skill catalog, when a usable one is mounted. */
 function skillsOf(value: unknown): SkillsLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const { list, get } = value as { list?: unknown; get?: unknown }
   return typeof list === 'function' && typeof get === 'function' ? value as SkillsLike : undefined
-}
-
-/** @returns the host's command catalog, when a usable one is mounted. */
-function commandsOf(value: unknown): CommandsLike | undefined {
-  if (typeof value !== 'object' || value === null) return undefined
-  const list = (value as { list?: unknown }).list
-  return typeof list === 'function' ? value as CommandsLike : undefined
 }
 
 /** @returns the host's workspace registry, when a usable one is mounted. */
@@ -572,13 +553,12 @@ type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure
 
 /**
  * Build one bridge's catalog payload, bounded. A service that never answers
- * degrades to empty sections: the menu is worth a short wait, never a bogged
+ * degrades to an empty menu: the menu is worth a short wait, never a bogged
  * attach.
- * @param ctx - the plugin context; both services are optional.
- * @param agent - the session whose view the catalogs answer for.
- * @returns the capped menu, or empty sections when a service hangs.
+ * @param ctx - the plugin context; the skill service is optional.
+ * @returns the capped menu, or an empty one when the service hangs.
  */
-async function catalogWithin(ctx: PluginContext, agent: AgentLike): Promise<Catalog> {
+async function catalogWithin(ctx: PluginContext): Promise<Catalog> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<Catalog>(resolve => {
     timer = setTimeout(() => { resolve({ skills: [], commands: [] }) }, CATALOG_TIMEOUT_MS)
@@ -586,7 +566,7 @@ async function catalogWithin(ctx: PluginContext, agent: AgentLike): Promise<Cata
   })
   try {
     return await Promise.race([
-      catalogOf({ skills: skillsOf(ctx.get?.('skills')), commands: commandsOf(ctx.get?.('commands')), agent }),
+      catalogOf({ skills: skillsOf(ctx.get?.('skills')) }),
       deadline,
     ])
   } finally {
@@ -1357,7 +1337,7 @@ function handlersFor(
    * @param state - the bridge that just took the session.
    */
   const sendCatalog = async (state: BridgeState): Promise<void> => {
-    const catalog = await catalogWithin(ctx, state.agent)
+    const catalog = await catalogWithin(ctx)
     // A switch during the fetch owns the bridge now; this menu is not its own.
     if (bridged.get(state.agent.session.id) !== state) return
     // The codec refuses an oversized frame by closing the bridge, so the one

@@ -1,14 +1,13 @@
 /**
  * The host's session menu as the one catalog frame payload: the skills a
- * session can invoke and the slash commands its agent advertises. Pure — no
- * socket, clock, or process state — because the host mounts the plugin, never
- * the reverse, so both services arrive as `unknown` and are read defensively.
+ * session can invoke. Pure — no socket, clock, or process state — because the
+ * host mounts the plugin, never the reverse, so the service arrives as
+ * `unknown` and is read defensively. Host commands are deliberately not
+ * collected: the bridge can list them but never run one.
  */
 
 import {
   isRecord,
-  MAX_CATALOG_ARGUMENT_HINT,
-  MAX_CATALOG_COMMANDS,
   MAX_CATALOG_DESCRIPTION,
   MAX_CATALOG_NAME,
   MAX_CATALOG_SKILLS,
@@ -17,49 +16,42 @@ import {
 } from 'dsh-supervision-protocol'
 import type { CatalogCommand, CatalogSkill } from 'dsh-supervision-protocol'
 
-/** The payload of one `catalog` frame. */
+/** The payload of one `catalog` frame; `commands` stays on the wire, always empty. */
 export interface Catalog {
   readonly skills: readonly CatalogSkill[]
   readonly commands: readonly CatalogCommand[]
 }
 
-/** The two optional host services and the agent whose view they answer for. */
+/** The optional host service the menu is built from. */
 export interface CatalogSources {
   readonly skills: unknown
-  readonly commands: unknown
-  readonly agent: unknown
 }
 
 /**
- * Build one catalog payload from the host's two optional services.
- * A service that is absent, mistyped or throwing contributes an empty section:
+ * Build one catalog payload from the host's skill service.
+ * A service that is absent, mistyped or throwing contributes an empty menu:
  * a missing menu must never fail the attach that asked for it.
- * @param sources - the services, read reflectively, and their viewing agent.
- * @returns the capped skills and commands, in the order the host listed them.
+ * @param sources - the service, read reflectively.
+ * @returns the capped skills, in the order the host listed them.
  */
 export async function catalogOf(sources: CatalogSources): Promise<Catalog> {
-  return fitCatalog(
-    await skillsOf(sources.skills),
-    await commandsOf(sources.commands, sources.agent),
-  )
+  return fitCatalog(await skillsOf(sources.skills))
 }
 
 /**
  * Shrink a capped catalog until its encoded frame fits the wire. Row and column
  * caps do not compose to a frame — 200 skills with multibyte descriptions alone
  * can exceed {@link MAX_FRAME} — and the transport answers an oversized frame by
- * closing the attach. Commands go first (they are the host's convenience) and
- * then skills from the tail, so each list keeps its own head.
+ * closing the attach. Skills go from the tail, so the list keeps its head.
  */
-function fitCatalog(skills: CatalogSkill[], commands: CatalogCommand[]): Catalog {
-  while (commands.length > 0 && frameBytes(skills, commands) > MAX_FRAME) commands.pop()
-  while (skills.length > 0 && frameBytes(skills, commands) > MAX_FRAME) skills.pop()
-  return { skills, commands }
+function fitCatalog(skills: CatalogSkill[]): Catalog {
+  while (skills.length > 0 && frameBytes(skills) > MAX_FRAME) skills.pop()
+  return { skills, commands: [] }
 }
 
 /** One catalog frame's encoded size, the trailing newline included. */
-function frameBytes(skills: readonly CatalogSkill[], commands: readonly CatalogCommand[]): number {
-  return Buffer.byteLength(JSON.stringify({ t: 'catalog', skills, commands }), 'utf8') + 1
+function frameBytes(skills: readonly CatalogSkill[]): number {
+  return Buffer.byteLength(JSON.stringify({ t: 'catalog', skills, commands: [] }), 'utf8') + 1
 }
 
 async function skillsOf(value: unknown): Promise<CatalogSkill[]> {
@@ -82,29 +74,6 @@ async function skillsOf(value: unknown): Promise<CatalogSkill[]> {
     skills.push({ name, description })
   }
   return skills
-}
-
-async function commandsOf(value: unknown, agent: unknown): Promise<CatalogCommand[]> {
-  const list = listOf(value)
-  if (list === undefined) return []
-  let rows: unknown
-  try {
-    rows = await list.call(value, agent)
-  } catch {
-    return []
-  }
-  if (!Array.isArray(rows)) return []
-  const commands: CatalogCommand[] = []
-  for (const row of rows) {
-    if (commands.length >= MAX_CATALOG_COMMANDS) break
-    if (!isRecord(row)) continue
-    const name = nameOf(row['name'])
-    const description = text(row['description'], MAX_CATALOG_DESCRIPTION)
-    if (name === undefined || description === undefined) continue
-    const argumentHint = inputHint(row['input'])
-    commands.push(argumentHint === undefined ? { name, description } : { name, description, argumentHint })
-  }
-  return commands
 }
 
 /** The service's `list` method, when it has one this plugin can call. */
@@ -130,10 +99,4 @@ function nameOf(value: unknown): string | undefined {
   const clean = stripControls(value)
   if (clean !== value || clean === '' || clean.length > MAX_CATALOG_NAME) return undefined
   return clean
-}
-
-/** The free-form input hint a command advertises, already capped. */
-function inputHint(value: unknown): string | undefined {
-  if (!isRecord(value)) return undefined
-  return text(value['hint'], MAX_CATALOG_ARGUMENT_HINT)
 }

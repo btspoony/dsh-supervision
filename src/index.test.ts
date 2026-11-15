@@ -176,8 +176,6 @@ class FakeHost {
   readonly skillGets: string[] = []
   /** When set, `ctx.skills.get` holds its answer until this resolves. */
   skillGetWait: Promise<void> | undefined = undefined
-  /** Rows `ctx.commands.list` answers; `undefined` hides the command service. */
-  catalogCommands: { name: string; description: string; input?: unknown }[] | undefined = undefined
   /** Rows `ctx.jobs.list` answers; `undefined` hides the job service. */
   jobRows: { id: string; label?: string; owner?: string; status: string }[] | undefined = []
   /** Job-event listeners the plugin subscribed, one per bridge. */
@@ -285,11 +283,6 @@ class FakeHost {
                 : { name: skill, description: body.description, content: body.content }
             },
           }
-        }
-        if (name === 'commands') {
-          return this.catalogCommands === undefined
-            ? undefined
-            : { list: (_agent: unknown) => this.catalogCommands ?? [] }
         }
         if (name === 'jobs') {
           return this.jobRows === undefined
@@ -1570,10 +1563,6 @@ test('a catalog frame follows welcome once and precedes the replayed history', a
   const host = new FakeHost()
   host.add('session-1', '/repo')
   host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
-  host.catalogCommands = [
-    { name: 'compact', description: 'shrink the context', input: { hint: '<focus>' } },
-    { name: 'status', description: 'show usage' },
-  ]
   host.history = [
     { type: 'user/message', seq: 1, time: 1, data: { turn: 1, content: [{ type: 'text', text: 'earlier' }], source: { kind: 'user' } } },
   ]
@@ -1586,8 +1575,7 @@ test('a catalog frame follows welcome once and precedes the replayed history', a
     await until(() => client.allFrames.length >= 3, 'the catalog and the replay')
     assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog', 'mirror'])
     const [catalog] = catalogs(client)
-    // Host commands are listed by the host but unreachable through the bridge,
-    // so the menu may only offer skills; the field itself stays on the wire.
+    // The wire field stays for the forwarder's parser; the plugin never fills it.
     assert.deepEqual(catalog, {
       t: 'catalog',
       skills: [{ name: 'use-dsh-sup', description: 'drive the terminal' }],
@@ -1626,7 +1614,6 @@ test('a throwing skill service empties its section and still attaches', async ()
   host.add('session-1', '/repo')
   host.catalogSkills = []
   host.skillsListError = 'skills down'
-  host.catalogCommands = [{ name: 'compact', description: 'shrink the context' }]
   apply(host.ctx, config({ socketDir: dir }))
   const client = await attached(host, dir, 'session-1')
 
