@@ -1056,10 +1056,20 @@ function handlersFor(
 
   /** Send the root report when the record changed, plus the echo mirror. */
   const publish = (state: BridgeState): void => {
+    // A released bridge owns nothing: a queued ask decision or a late event must
+    // not write into a socket that is gone.
+    if (bridged.get(state.agent.session.id) !== state) return
     const record = reportOf(state)
+    const { shown } = state
+    // herdr-core counts a turn each time the root leaves `working`. A family that
+    // drains does that outside the reducer, so mirror it here; the parked-ask
+    // `blocked` record is not a counted leave and keeps its historical numbering.
+    if (shown.state === 'working' && record.state !== 'working' && record.state !== 'blocked'
+      && state.root.turn === shown.turn) {
+      state.root = { ...state.root, turn: state.root.turn + 1 }
+    }
     const msg = record.msg ?? ''
     const title = record.title ?? ''
-    const { shown } = state
     // A record is replaced whole, so any field it carries is part of its
     // identity: a title-only change must reach the wire.
     const changed = record.state !== shown.state || msg !== shown.msg
@@ -1122,6 +1132,8 @@ function handlersFor(
     if (activityKey(activity) !== activityKey(state.activity)) {
       state.activity = activity
       state.activityAt = Date.now()
+      // A new episode may go stale on its own; the note is once per episode.
+      state.staleNoted = false
     }
     // A bridge pays for the poll only while something is actually running; the
     // idle path must not keep re-scanning the host (plan §5).
@@ -1172,7 +1184,9 @@ function handlersFor(
 
   /** Fold one fact from the attached session into its root record. */
   const feed = (state: BridgeState, event: StateEvent): void => {
-    state.root = reduceRootState(state.root, event)
+    // Activity can hold the composed root on `working` after the turn ends; the
+    // turn counter follows the composed word, so the reducer needs that fact.
+    state.root = reduceRootState(state.root, event, activityView(state).working)
     publish(state)
   }
 

@@ -174,7 +174,7 @@ mirror 打印的是写好的整块，一次一行。
 ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<permission|question|auth>][ :app=<word>][ :title=<base64>][ :msg=<base64>] ST
 ```
 
-清除是根记录用 `state=clear`、单条子记录用 `state=clear:id=<id>`。`kind` 只在 `blocked` 上合法。上限：整条序列小于 4096 字节，title 192 字节，`msg` 2048 字节，id 128 字节且按 `/` 分段、每段至多 32 字节（最多 8 段）。根词优先级为 `blocked` > `working` > `done` / `error` / `idle`。只要后代 subagent（`origin = subagent` 且谱系能追到被桥接会话）或该会话拥有的后台 job 仍处于 `running` 或 `stopping`，根记录也保持 `working`——不只是它自己那轮还活着时——此时 `msg` 携带数量（`2 subagents · 1 job`）。这类活动 5 分钟没有变化时，根记录回退到轮次得到的词，并写一行 `activity stale: …` echo 说明原因。挂起的审批把根记录写成 `state=blocked:kind=permission`，`msg=<tool> <reason> [ask <id>]`。
+清除是根记录用 `state=clear`、单条子记录用 `state=clear:id=<id>`。`kind` 只在 `blocked` 上合法。上限：整条序列小于 4096 字节，title 192 字节，`msg` 2048 字节，id 128 字节且按 `/` 分段、每段至多 32 字节（最多 8 段）。根词优先级为 `blocked` > `working` > `done` / `error` / `idle`。只要后代 subagent（`origin = subagent` 且谱系能追到被桥接会话）或该会话拥有的后台 job 仍处于 `running` 或 `stopping`，根记录也保持 `working`——不只是它自己那轮还活着时——此时 `msg` 携带数量（`2 subagents · 1 job`）。这类活动 5 分钟没有变化时，根记录回退到轮次得到的词，并写一行 `activity stale: …` echo 说明原因——这个回退是防子任务或 job 卡死的，所以运行超过 5 分钟且状态没有变化的 job 会被报成 `done`，直到它下一次上报事件。挂起的审批把根记录写成 `state=blocked:kind=permission`，`msg=<tool> <reason> [ask <id>]`。
 
 **路由**，只在宿主挂载了 webserver 时提供：
 

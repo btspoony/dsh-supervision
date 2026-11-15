@@ -1956,6 +1956,43 @@ test('a switch announces the composed activity word, not a transient idle', asyn
   }
 })
 
+test('a turn held by activity does not advance the turn; releasing it does once', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.add('session-child', '/repo', { parentSession: 'session-1', origin: 'subagent' })
+    const child = host.agents.at(-1)
+    assert.ok(child !== undefined)
+    child.status = 'running'
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => lastRootFields(client).state === 'working', 'the live turn')
+
+    // The turn ends, but the child holds the composed word on `working`:
+    // herdr-core would see no leave, so the turn counter must not move either.
+    host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await until(() => lastRootFields(client).msg === '1 subagent', 'the held working word')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      client.conversation.some(frame => frame.t === 'echo' && frame.text === '[turn 1] working'),
+      false,
+      'a held turn is not a leave',
+    )
+
+    // The child settling is the one real leave, and it counts exactly once.
+    child.status = 'idle'
+    host.emitSubagent()
+    await until(() => lastRootFields(client).state === 'done', 'the drained word')
+    const done = client.conversation.flatMap(frame => frame.t === 'echo' ? [frame.text] : [])
+      .filter(text => text.endsWith(' done'))
+    assert.deepEqual(done, ['[turn 1] done'])
+  } finally {
+    host.dispose()
+  }
+})
 test('releasing a bridge clears its poll and job subscription without touching the other bridge', async () => {
   const dir = tempDir()
   const host = new FakeHost()
