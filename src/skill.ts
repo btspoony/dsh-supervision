@@ -8,6 +8,7 @@
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { reasonOf } from './reason.js'
 
 const SKILL_NAME = 'use-dsh-supervision'
 /** One provider name = one source in the catalog, and it is this plugin. */
@@ -66,7 +67,18 @@ export interface SkillMountContext {
 export function registerSkill(ctx: SkillMountContext): void {
   const skills = ctx.get?.('skills')
   if (!isSkillsLike(skills)) return
-  ctx.effect(() => skills.registerProvider(() => skillProvider()))
+  ctx.effect(() => {
+    try {
+      return skills.registerProvider(() => skillProvider())
+    } catch (error) {
+      // The manual is a convenience, and this runs inside apply after the socket
+      // is already open: a registry that refuses the provider must cost the
+      // operator a skill, not the bridge. One line names the degradation, and
+      // there is no disposal to register because nothing was registered.
+      process.stderr.write(`dsh-supervision: skill unavailable: ${reasonOf(error)}\n`)
+      return () => {}
+    }
+  })
 }
 
 /** What the provider renders from the packaged manual. */

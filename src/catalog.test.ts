@@ -1,6 +1,7 @@
 /**
- * Catalog assembly: both host services become one menu payload, and a missing,
- * mistyped or throwing service contributes an empty section instead of a fault.
+ * Catalog assembly: the host's skill service becomes the menu payload, and a
+ * missing, mistyped or throwing service contributes an empty section instead of
+ * a fault. Host commands are never collected, so the wire field stays empty.
  */
 
 import assert from 'node:assert/strict'
@@ -8,8 +9,6 @@ import test from 'node:test'
 import {
   decodeChunk,
   encodeFrame,
-  MAX_CATALOG_ARGUMENT_HINT,
-  MAX_CATALOG_COMMANDS,
   MAX_CATALOG_DESCRIPTION,
   MAX_CATALOG_NAME,
   MAX_CATALOG_SKILLS,
@@ -17,58 +16,28 @@ import {
 } from 'dsh-supervision-protocol'
 import { catalogOf } from './catalog.js'
 
-test('both services become the menu with their descriptions and input hints', async () => {
-  const agent = { id: 'session-1' }
-  let listedFor: unknown
+test('the skill service becomes the menu, and commands stay empty', async () => {
   const catalog = await catalogOf({
-    skills: {
-      list: async () => [{ name: 'use-dsh-sup', description: 'drive the terminal' }],
-    },
-    commands: {
-      list: (who: unknown) => {
-        listedFor = who
-        return [
-          { name: 'compact', description: 'shrink the context', input: { hint: '<focus>', attachments: true } },
-          { name: 'status', description: 'show usage' },
-        ]
-      },
-    },
-    agent,
+    skills: { list: async () => [{ name: 'use-dsh-sup', description: 'drive the terminal' }] },
   })
-  assert.deepEqual(catalog.skills, [{ name: 'use-dsh-sup', description: 'drive the terminal' }])
-  assert.deepEqual(catalog.commands, [
-    { name: 'compact', description: 'shrink the context', argumentHint: '<focus>' },
-    { name: 'status', description: 'show usage' },
-  ])
-  assert.equal(listedFor, agent, 'commands are listed for the viewing agent')
-})
-
-test('each service that is absent contributes an empty section', async () => {
-  assert.deepEqual(await catalogOf({ skills: undefined, commands: undefined, agent: {} }), {
-    skills: [],
-    commands: [],
-  })
-  assert.deepEqual(await catalogOf({ skills: { list: async () => [] }, commands: undefined, agent: {} }), {
-    skills: [],
+  assert.deepEqual(catalog, {
+    skills: [{ name: 'use-dsh-sup', description: 'drive the terminal' }],
     commands: [],
   })
 })
 
-test('a throwing or mistyped service is an empty section, never a rejection', async () => {
-  const catalog = await catalogOf({
-    skills: { list: async () => { throw new Error('skills down') } },
-    commands: {
-      list: () => {
-        throw new Error('commands down')
-      },
-    },
-    agent: {},
-  })
-  assert.deepEqual(catalog, { skills: [], commands: [] })
-  assert.deepEqual(await catalogOf({ skills: { list: 1 }, commands: 'nope', agent: {} }), {
+test('an absent service contributes an empty menu', async () => {
+  assert.deepEqual(await catalogOf({ skills: undefined }), { skills: [], commands: [] })
+  assert.deepEqual(await catalogOf({ skills: { list: async () => [] } }), { skills: [], commands: [] })
+})
+
+test('a throwing or mistyped service is an empty menu, never a rejection', async () => {
+  assert.deepEqual(await catalogOf({ skills: { list: async () => { throw new Error('skills down') } } }), {
     skills: [],
     commands: [],
   })
+  assert.deepEqual(await catalogOf({ skills: { list: 1 } }), { skills: [], commands: [] })
+  assert.deepEqual(await catalogOf({ skills: 'nope' }), { skills: [], commands: [] })
 })
 
 test('malformed rows are skipped, not fatal', async () => {
@@ -82,13 +51,8 @@ test('malformed rows are skipped, not fatal', async () => {
         { name: 1, description: 'wrong type' },
       ],
     },
-    commands: {
-      list: () => [{ name: 'good', description: 'kept', input: { hint: 7 } }, null],
-    },
-    agent: {},
   })
-  assert.deepEqual(catalog.skills, [{ name: 'good', description: 'kept' }])
-  assert.deepEqual(catalog.commands, [{ name: 'good', description: 'kept' }])
+  assert.deepEqual(catalog, { skills: [{ name: 'good', description: 'kept' }], commands: [] })
 })
 
 test('row and field caps hold', async () => {
@@ -100,20 +64,9 @@ test('row and field caps hold', async () => {
           description: 'd'.repeat(MAX_CATALOG_DESCRIPTION + 5),
         })),
     },
-    commands: {
-      list: () =>
-        Array.from({ length: MAX_CATALOG_COMMANDS + 3 }, (_, index) => ({
-          name: `c${String(index)}`,
-          description: 'short',
-          input: { hint: 'h'.repeat(MAX_CATALOG_ARGUMENT_HINT + 5) },
-        })),
-    },
-    agent: {},
   })
   assert.equal(catalog.skills.length, MAX_CATALOG_SKILLS)
   assert.equal(catalog.skills[0]?.description.length, MAX_CATALOG_DESCRIPTION)
-  assert.equal(catalog.commands.length, MAX_CATALOG_COMMANDS)
-  assert.equal(catalog.commands[0]?.argumentHint?.length, MAX_CATALOG_ARGUMENT_HINT)
 })
 
 test('a name that cannot be a key drops its row', async () => {
@@ -126,11 +79,8 @@ test('a name that cannot be a key drops its row', async () => {
         { name: '', description: 'empty' },
       ],
     },
-    commands: { list: () => [{ name: 'ok', description: 'kept' }] },
-    agent: {},
   })
-  assert.deepEqual(catalog.skills, [{ name: 'good', description: 'kept' }])
-  assert.deepEqual(catalog.commands, [{ name: 'ok', description: 'kept' }])
+  assert.deepEqual(catalog, { skills: [{ name: 'good', description: 'kept' }], commands: [] })
 })
 
 test('a cap-max catalog is byte-budgeted to a frame the codec accepts', async () => {
@@ -143,15 +93,6 @@ test('a cap-max catalog is byte-budgeted to a frame the codec accepts', async ()
             description: fill.repeat(MAX_CATALOG_DESCRIPTION),
           })),
       },
-      commands: {
-        list: () =>
-          Array.from({ length: MAX_CATALOG_COMMANDS + 10 }, (_, index) => ({
-            name: `c${String(index)}`,
-            description: fill.repeat(MAX_CATALOG_DESCRIPTION),
-            input: { hint: fill.repeat(MAX_CATALOG_ARGUMENT_HINT) },
-          })),
-      },
-      agent: {},
     })
     const first = await build()
     const second = await build()
@@ -160,7 +101,6 @@ test('a cap-max catalog is byte-budgeted to a frame the codec accepts', async ()
     assert.ok(Buffer.byteLength(line, 'utf8') <= MAX_FRAME, `${fill === '漢' ? 'multibyte' : 'ASCII'} fits`)
     assert.equal(decodeChunk('', line).ok, true, 'the trimmed catalog still decodes')
     assert.ok(first.skills.length <= MAX_CATALOG_SKILLS)
-    assert.ok(first.commands.length <= MAX_CATALOG_COMMANDS)
-    assert.ok(first.skills.length > 0 || first.commands.length > 0)
+    assert.ok(first.skills.length > 0)
   }
 })

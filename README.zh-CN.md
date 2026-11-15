@@ -66,7 +66,7 @@ session-4f2a…      4711   /Users/me/work     yes   -
 
 ### 交互面
 
-stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行追加：对话放在可滚动的 transcript 视口里，下面是多行编辑器，最下面一行状态栏显示会话 id、状态与 turn。桥接转发过的内容都留在 transcript 中，向上滚动就能看全。attach 期间交互面占用终端的备用屏：不写终端回滚缓冲，历史就是 TUI 自己的视口；结束 attach 时最后一帧会打回正常屏幕。
+stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行追加：对话放在可滚动的 transcript 视口里，下面是多行编辑器，最下面一行状态栏显示会话 id、状态与 turn。turn 只在插件 `echo` 配置打开时显示：echo 关闭后 `welcome` 之后没有任何帧携带轮次，状态栏因此靠 OSC 记录维持状态（`programStatus` 打开时）、不再显示 turn，而不是把数字冻在那里。`programStatus` 关闭后 OSC 记录不再到达，状态就停在 attach 时上报的值——冻结但仍然显示；echo 关闭时略去的只是轮次。桥接转发过的内容都留在 transcript 中，向上滚动就能看全。attach 期间交互面占用终端的备用屏：不写终端回滚缓冲，历史就是 TUI 自己的视口；结束 attach 时最后一帧会打回正常屏幕。
 
 | 按键 | 作用 |
 |---|---|
@@ -85,7 +85,9 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 
 `--no-tui` 在终端上也保留只追加的行模式表面；stdout 被重定向时永远走行模式，所以 `dsh-sup … | tee log` 写出的文件依然干净。
 
-**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与宿主斜杠命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。名字来自宿主本身：`/skill:<name>` 与普通输入一样转发，由插件注入该 skill 的正文。
+**未验证的平台。** Windows 终端（ConPTY）与 tmux 尚未验证：全屏交互面还没有在那里跑过。真去跑时先查三件事——每条退出路径（`Ctrl+D`、`/q`、后端断开）都能恢复备用屏；终端会上报交互面认识的键盘协议（modifyOtherKeys 或 Kitty 协议，决定 `Shift+Enter` 的行为）；pane 里有桥接能打开的 `/dev/tty`，没有的话只有套接口面挂载，原因写到 stderr。
+
+**补全。** attach 建立后插件会发来一条 `catalog` 帧，只携带该会话的 skills；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。菜单只提供 skills 与 forwarder 自己的退出命令，没有别的：像 `/compact` 这样的宿主斜杠命令在这里不可达——桥接无法执行它，提交只会得到 `unknown command /<verb>`——那些命令属于 web 输入框。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。`/skill:<name>` 与普通输入一样转发，由插件注入该 skill 的正文。skill 行可以在名字之后带额外文本（`/skill:use-dsh-sup focus on the retry`）；这些词会作为 `## Operator note` 附在正文之后到达模型。
 
 **退出。** `/q`、`/quit`、`/exit`、`/bye`——单独一行、全小写、后面不带参数——在两种界面（TUI 与 `--no-tui`）都能退出 attach：转发器发出 `bye`、恢复终端并以 0 退出，且它们不会被转发给会话，不会留下挂起的模型请求。转发器还会把它们追加到 `/`
 菜单末尾并标注 `leave dsh-sup (local)`，因此退出方式不依赖宿主 catalog 提供了
@@ -198,7 +200,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 |---|---|---|
 | `enabled` | `true` | 是否挂载任何东西。`false` 是硬开关：没有套接口、没有路由、没有客户端装饰。 |
 | `programStatus` | `true` | 是否发出 OSC 7501 上报。关掉后套接口只回答 `list`。 |
-| `echo` | `true` | 是否把状态变化与审批决定镜像成 supervisor 读的 `echo` 行。 |
+| `echo` | `true` | 是否把状态变化与审批决定镜像成 supervisor 读的 `echo` 行。关闭后 attach 交互面状态栏也不再显示 turn，因为轮次只在这类行上推进。 |
 | `app` | `"dsh"` | 每条上报都要重述的程序名。 |
 | `titleFrom` | `"cwd-basename"` | 根标题来源：`cwd-basename`、`session-title` 或 `none`。 |
 | `socketDir` | `$DSH_HOME/supervision` | 注册表与套接口目录。 |

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { CombinedAutocompleteProvider, Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
-import { renderMirror } from 'dsh-supervision-protocol';
+import { PROTO, renderMirror } from 'dsh-supervision-protocol';
 import { routeFrame } from './route.js';
 import { PLAIN, createTheme } from './theme.js';
 import {
@@ -50,6 +50,7 @@ import {
   scrollBy,
   scrollToBottom,
   scrollToTop,
+  welcomeStatus,
 } from './tui.js';
 
 test('maxTop pins the viewport to the last full page', () => {
@@ -415,6 +416,27 @@ test('an OSC 7501 root record advances the status; a child record does not', () 
   assert.match(status.render(80), /idle/);
   assert.match(status.render(80), /turn 4/);
 });
+test('a welcome with echo off seeds no turn, and OSC still moves the state', () => {
+  const status = new StatusLine();
+  status.set(welcomeStatus({ t: 'welcome', proto: PROTO, session: 'session-1', title: 'repo', state: 'idle', turn: 7, echo: false }));
+  assert.match(status.render(80), /session-1/);
+  assert.match(status.render(80), /idle/);
+  assert.doesNotMatch(status.render(80), /turn/, 'nothing would advance a seed while echo is off');
+
+  // OSC is the machine surface, so the state keeps moving without any echo line.
+  const next = oscStatus('\x1b]7501;state=working\x1b\\');
+  if (next !== undefined) status.set(next);
+  assert.match(status.render(80), /working/);
+  assert.doesNotMatch(status.render(80), /turn/);
+
+  // Echo on, or an older plugin that sends no flag, keeps the seeded count.
+  for (const echo of [true, undefined]) {
+    const seeded = new StatusLine();
+    seeded.set(welcomeStatus({ t: 'welcome', proto: PROTO, session: 'session-2', title: 'repo', state: 'idle', turn: 7, ...(echo === undefined ? {} : { echo }) }));
+    assert.match(seeded.render(80), /turn 7/);
+  }
+});
+
 test('user, assistant, tool and system entries are visually distinct', () => {
   const color = createTheme({ color: true });
   const user = renderEntry({ k: 'user', text: 'hello **there**' }, 40, color).join('\n');

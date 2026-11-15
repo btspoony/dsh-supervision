@@ -53,7 +53,11 @@ read.
 
 When stdin and stdout are both terminals, an attach opens a full-screen surface:
 a scrollable transcript of those blocks, a multi-line editor for the next
-operator line, and a status line with the session id, state and turn. Everything
+operator line, and a status line with the session id, state and turn. The turn
+appears only while the plugin's `echo` config is on — with echo off no frame after
+`welcome` carries a count, so the bar follows OSC records (while `programStatus` is
+on) and omits it. With `programStatus` off those records stop arriving, so the
+state stays at the value the attach reported — frozen, still shown. Everything
 forwarded stays in the transcript, so scrolling back reaches the whole attach. The
 surface takes over the alternate screen; terminal scrollback is not written, and
 the last frame returns to the normal screen on exit.
@@ -77,13 +81,17 @@ the editor is framed in the accent colour. `NO_COLOR`, a non-terminal stdout or
 | `Home` / `End` | oldest line / back to the newest (when the editor is empty) |
 
 Typing `/` opens the suggestion menu the plugin's `catalog` frame feeds: the
-session's skills appear as `/skill:<name>` (fuzzy-matching the bare name works)
-and the host's slash commands as `/name`; Tab inserts the highlighted completion,
-while Enter accepts and sends it immediately. Accepting
-`/skill:<name>` or typing it by hand is forwarded like any other line, and the
-plugin injects that skill's body. The catalog frame never reaches stdout or
-`/dev/tty`; `--no-tui` ignores it. `@file` completion resolves against the
-session's directory when `fd` is installed.
+session's skills appear as `/skill:<name>` (fuzzy-matching the bare name works),
+and the forwarder's own exits close the list. That is the whole menu — a host
+slash command such as `/compact` is not offered and would answer
+`unknown command /<verb>` if typed, because the bridge cannot execute one; host
+commands belong to the web input box. Tab inserts the highlighted completion,
+while Enter accepts and sends it immediately. Accepting `/skill:<name>` or typing
+it by hand is forwarded like any other line, and the plugin injects that skill's
+body. Words after the name travel with it: `/skill:use-dsh-sup focus on the
+retry` reaches the model as the body followed by an `## Operator note`. The
+catalog frame never reaches stdout or `/dev/tty`; `--no-tui` ignores it. `@file`
+completion resolves against the session's directory when `fd` is installed.
 
 `/q`, `/quit`, `/exit` and `/bye` leave the attach from either surface: the
 forwarder sends `bye`, restores the screen and exits 0, and the line never reaches
@@ -92,6 +100,13 @@ so the menu shows a way out even with no host vocabulary. In the TUI, `Ctrl+D` a
 menu first and otherwise sends `/cancel`, and Ctrl+C clears the editor (twice on
 an empty editor within 1.5 s leaves; any other key resets that window). Trailing
 spaces are ignored, so accepting the menu entry and pressing Enter still leaves.
+
+Windows terminals (ConPTY) and tmux are unverified: no run has exercised this
+surface there. When you do, check the alternate screen is restored on every exit
+path (`Ctrl+D`, `/q`, a lost backend), that the terminal reports a keyboard
+protocol the surface understands (modifyOtherKeys or Kitty, which decide
+`Shift+Enter`), and that the pane has a `/dev/tty` the bridge can open — without
+one only the socket surface mounts, and the reason lands on stderr.
 
 Scrolled back, the last row shows `↓ N new` for entries that arrived meanwhile;
 reaching the bottom resumes following. `--no-tui`, or a redirected stdout, keeps

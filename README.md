@@ -69,7 +69,12 @@ With `--no-tui`, or when stdin or stdout is not a terminal, the bridge reads std
 When stdin and stdout are both terminals, an attach opens a full-screen surface
 instead of appending lines: the conversation in a scrollable transcript viewport,
 a multi-line editor for the next operator line, and a status line carrying the
-session id, the reported state and the turn. Everything the bridge forwards stays
+session id, the reported state and the turn. The turn is shown only while the
+plugin's `echo` config is on: nothing after `welcome` carries a count when echo
+is off, so the bar keeps the state live from OSC records (while `programStatus` is
+on) and shows no turn rather than freezing one. With `programStatus` off those
+records stop arriving, so the state stays at the value the attach reported —
+frozen, still shown. Everything the bridge forwards stays
 in the transcript, so scrolling back reaches the whole attach. The surface
 takes over the terminal's alternate screen while attached: terminal scrollback is
 not written, the TUI viewport is the history, and the last frame is printed back
@@ -104,16 +109,28 @@ in the table above or the bytes a redirected stdout receives.
 stdout always gets that line surface, so `dsh-sup … | tee log` stays
 machine-clean.
 
-**Suggestions.** The plugin sends a `catalog` frame with the session's skills and
-host slash commands once the attach is up, and the editor turns it into a menu:
-typing `/` lists every entry, typing `/skill:` narrows to the session's skills as
-`/skill:<name>` (fuzzy-matching the bare name works too); Tab inserts the
-highlighted completion, while Enter accepts and sends it immediately. The
+**Untested platforms.** Windows terminals (ConPTY) and tmux are unverified: no
+run has exercised the full-screen surface there. When you do, check three things
+first — the alternate screen is restored on every exit path (`Ctrl+D`, `/q`, a
+lost backend), the terminal reports a keyboard protocol the surface understands
+(modifyOtherKeys or the Kitty protocol, which decide `Shift+Enter`), and the
+pane has a `/dev/tty` the bridge can open; without one only the socket surface
+mounts, and the reason lands on stderr.
+
+**Suggestions.** The plugin sends a `catalog` frame with the session's skills once
+the attach is up, and the editor turns it into a menu: typing `/` lists every
+entry, typing `/skill:` narrows to the session's skills as `/skill:<name>`
+(fuzzy-matching the bare name works too); Tab inserts the highlighted completion,
+while Enter accepts and sends it immediately. The menu offers skills and the
+forwarder's own exits, nothing else: a host slash command such as `/compact` is
+unreachable from here — the bridge cannot execute one, so it would answer
+`unknown command /<verb>` — and those commands stay in the web input box. The
 catalog frame is surface input only — it never reaches stdout or `/dev/tty`, and
-line mode ignores it. `@file` completion
-resolves against the session's directory when the `fd` binary is installed. The
-names are the host's own: `/skill:<name>` is forwarded like any other line, so the
-plugin turns it into the skill's body.
+line mode ignores it. `@file` completion resolves against the session's directory
+when the `fd` binary is installed. `/skill:<name>` is forwarded like any other
+line, so the plugin turns it into the skill's body. A skill line may carry extra
+text after the name (`/skill:use-dsh-sup focus on the retry`); those words reach
+the model as an `## Operator note` after the body.
 
 **Leaving.** `/q`, `/quit`, `/exit` and `/bye` — on a line of their own,
 lowercase, nothing after them — leave the attach from either surface (TUI or
@@ -233,7 +250,7 @@ Six keys, all of them read by `src/index.ts`; an unknown shape is refused with a
 |---|---|---|
 | `enabled` | `true` | Mount anything at all. `false` is a hard off switch: no socket, no routes, no client decoration. |
 | `programStatus` | `true` | Emit OSC 7501 reports. Off leaves the socket answering `list` only. |
-| `echo` | `true` | Mirror state changes and approval decisions as `echo` lines for the supervisor. |
+| `echo` | `true` | Mirror state changes and approval decisions as `echo` lines for the supervisor. Off also drops the turn from the attach surface's status bar, because the count only advances on those lines. |
 | `app` | `"dsh"` | The program word every report restates. |
 | `titleFrom` | `"cwd-basename"` | Where the root title comes from: `cwd-basename`, `session-title`, or `none`. |
 | `socketDir` | `$DSH_HOME/supervision` | Registry and socket directory. |

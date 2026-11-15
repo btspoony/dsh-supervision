@@ -37,6 +37,7 @@ import {
   type CatalogSkill,
   type MirrorItem,
   type ProgramState,
+  type Welcome,
 } from 'dsh-supervision-protocol';
 import { PLAIN, markdownTheme, themeFor, type Theme, type Token } from './theme.js';
 
@@ -141,6 +142,20 @@ export function oscStatus(data: string): Status | undefined {
     if (key === 'state') state = value;
   }
   return state !== undefined && isProgramState(state) ? { state } : undefined;
+}
+
+/**
+ * The status the root word seeds. The plugin can only advance the turn through
+ * the echo lines its `echo` config writes, so with echo off nothing after this
+ * frame carries a count: seeding one would freeze a number on screen.
+ * @param frame - the decoded `welcome` frame.
+ */
+export function welcomeStatus(frame: Welcome): Status {
+  return {
+    session: frame.session,
+    state: frame.state,
+    turn: frame.echo === false ? undefined : frame.turn,
+  };
 }
 
 /** The state an echo line reports, e.g. `[turn 3] working`; anything else is prose. */

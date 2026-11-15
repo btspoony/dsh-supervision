@@ -27,6 +27,7 @@ import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { catalogOf } from './catalog.js'
 import type { Catalog } from './catalog.js'
+import { reasonOf } from './reason.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
 import { HISTORY_ITEMS, historyItems, mirrorFrame, mirrorOf } from './mirror.js'
@@ -312,14 +313,6 @@ interface BridgeState {
   activityNotice: string | undefined
 }
 
-/**
- * @param error - the thrown value.
- * @returns its message, for a refusal the forwarder prints verbatim.
- */
-function reasonOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 /** True when the host stamped an event position this plugin can order by. */
 function isSeq(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -442,30 +435,11 @@ interface SkillsLike {
   get(name: string, options?: unknown): Promise<SkillDefinitionLike | undefined>
 }
 
-/** One `ctx.commands.list` row: a name, its summary and an optional input hint. */
-interface CommandSummaryLike {
-  readonly name: string
-  readonly description: string
-  readonly input?: unknown
-}
-
-/** The `ctx.commands` read surface: the host commands an agent advertises. */
-interface CommandsLike {
-  list(agent: AgentLike): readonly CommandSummaryLike[]
-}
-
 /** @returns the host's skill catalog, when a usable one is mounted. */
 function skillsOf(value: unknown): SkillsLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const { list, get } = value as { list?: unknown; get?: unknown }
   return typeof list === 'function' && typeof get === 'function' ? value as SkillsLike : undefined
-}
-
-/** @returns the host's command catalog, when a usable one is mounted. */
-function commandsOf(value: unknown): CommandsLike | undefined {
-  if (typeof value !== 'object' || value === null) return undefined
-  const list = (value as { list?: unknown }).list
-  return typeof list === 'function' ? value as CommandsLike : undefined
 }
 
 /** @returns the host's workspace registry, when a usable one is mounted. */
@@ -572,13 +546,12 @@ type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure
 
 /**
  * Build one bridge's catalog payload, bounded. A service that never answers
- * degrades to empty sections: the menu is worth a short wait, never a bogged
+ * degrades to an empty menu: the menu is worth a short wait, never a bogged
  * attach.
- * @param ctx - the plugin context; both services are optional.
- * @param agent - the session whose view the catalogs answer for.
- * @returns the capped menu, or empty sections when a service hangs.
+ * @param ctx - the plugin context; the skill service is optional.
+ * @returns the capped menu, or an empty one when the service hangs.
  */
-async function catalogWithin(ctx: PluginContext, agent: AgentLike): Promise<Catalog> {
+async function catalogWithin(ctx: PluginContext): Promise<Catalog> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<Catalog>(resolve => {
     timer = setTimeout(() => { resolve({ skills: [], commands: [] }) }, CATALOG_TIMEOUT_MS)
@@ -586,7 +559,7 @@ async function catalogWithin(ctx: PluginContext, agent: AgentLike): Promise<Cata
   })
   try {
     return await Promise.race([
-      catalogOf({ skills: skillsOf(ctx.get?.('skills')), commands: commandsOf(ctx.get?.('commands')), agent }),
+      catalogOf({ skills: skillsOf(ctx.get?.('skills')) }),
       deadline,
     ])
   } finally {
@@ -1357,13 +1330,16 @@ function handlersFor(
    * @param state - the bridge that just took the session.
    */
   const sendCatalog = async (state: BridgeState): Promise<void> => {
-    const catalog = await catalogWithin(ctx, state.agent)
+    const catalog = await catalogWithin(ctx)
     // A switch during the fetch owns the bridge now; this menu is not its own.
     if (bridged.get(state.agent.session.id) !== state) return
     // The codec refuses an oversized frame by closing the bridge, so the one
     // frame that must never fail is proven here; a menu that still cannot fit
     // is replaced by the empty one rather than costing the operator the attach.
-    let frame: OutFrame = { t: 'catalog', skills: catalog.skills, commands: catalog.commands }
+    // The bridge can list host commands but never run one, so advertising them
+    // offered menu rows whose submission answers `unknown command`. The field
+    // stays on the wire for the forwarder's parser; it just never carries a row.
+    let frame: OutFrame = { t: 'catalog', skills: catalog.skills, commands: [] }
     try {
       encodeFrame(frame)
     } catch {
@@ -1566,6 +1542,9 @@ function handlersFor(
         title: root.current.title,
         state: root.current.state,
         turn: root.turn,
+        // The turn count only advances on the echo lines this flag turns off, so
+        // the forwarder needs it to know whether the number it seeds is honest.
+        echo: config.echo,
       })
     } else {
       announce(state)
@@ -1735,9 +1714,13 @@ function handlersFor(
               }
               // The body is the point: the operator named the skill, so the model
               // receives it as their own message rather than a command to parse.
-              state.agent.steer(userMessage(
-                `# Skill: ${skill.name}\n\n${skill.description}\n\n${skill.content}`,
-              ))
+              const body = `# Skill: ${skill.name}\n\n${skill.description}\n\n${skill.content}`
+              // Words typed after the name belong to the same request; they trail
+              // the body as a note, so naming a skill and saying what for is one line.
+              const text = command.args.length === 0
+                ? body
+                : `${body.trimEnd()}\n\n## Operator note\n\n${command.args.join(' ')}`
+              state.agent.steer(userMessage(text))
             } catch (error) {
               bridge.send({ t: 'echo', text: `skill failed: ${reasonOf(error)}` })
             }

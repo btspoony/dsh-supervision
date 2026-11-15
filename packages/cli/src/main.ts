@@ -6,7 +6,7 @@ import { liveEntries, selectEntry } from './registry.js';
 import { lineForwarder } from './lines.js';
 import { routeFrame } from './route.js';
 import { skillText, version } from './skill.js';
-import { catalogOf, chooseSurface, echoStatus, oscStatus, routeLine, startTui, type Surface } from './tui.js';
+import { catalogOf, chooseSurface, echoStatus, oscStatus, routeLine, startTui, welcomeStatus, type Surface } from './tui.js';
 import { openTty } from './tty.js';
 import { APP_NAME, PROTO, encodeReport, isEntryLive, readRegistry, supervisionDir } from 'dsh-supervision-protocol';
 import type { HelloFrame, OutFrame, RegistryEntry } from 'dsh-supervision-protocol';
@@ -203,7 +203,7 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
               basePath: 'new' in hello ? hello.new.cwd : process.cwd(),
               onExit: localExit,
             });
-            surface.setStatus({ session: frame.session, state: frame.state, turn: frame.turn });
+            surface.setStatus(welcomeStatus(frame));
           } else {
             pump(sendLine);
           }
