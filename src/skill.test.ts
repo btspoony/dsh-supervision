@@ -124,3 +124,27 @@ test('a host without a skill service still loads, and disposal unregisters', () 
   dispose()
   assert.deepEqual(skills.disposed, [true])
 })
+
+test('a registry that refuses the provider logs one line and keeps the mount', () => {
+  // This runs inside apply with the socket already open, so a throw here would
+  // cost the operator the whole bridge; the manual is the only thing it may cost.
+  const refusing = {
+    registerProvider(): () => void {
+      throw new Error('registry is closed')
+    },
+  }
+  const lines: string[] = []
+  const original = process.stderr.write
+  process.stderr.write = ((chunk: string) => {
+    lines.push(chunk)
+    return true
+  }) as typeof process.stderr.write
+  try {
+    const disposers = mount(refusing)
+    assert.equal(disposers.length, 1, 'the effect still registers a teardown')
+    assert.doesNotThrow(() => disposers[0]?.())
+  } finally {
+    process.stderr.write = original
+  }
+  assert.deepEqual(lines, ['dsh-supervision: skill unavailable: registry is closed\n'])
+})

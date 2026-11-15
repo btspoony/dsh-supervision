@@ -168,6 +168,8 @@ class FakeHost {
   readonly skillBodies = new Map<string, { description: string; content: string }>()
   /** When set, `ctx.skills.list` rejects with this message. */
   skillsListError: string | undefined = undefined
+  /** When set, `ctx.skills.registerProvider` throws with this message. */
+  skillRegisterError: string | undefined = undefined
   /** When set, `ctx.skills.list` holds its answer until this resolves. */
   catalogWait: Promise<void> | undefined = undefined
   /** Every skill name `ctx.skills.get` was asked for, in call order. */
@@ -265,7 +267,10 @@ class FakeHost {
         if (name === 'skills') {
           if (this.catalogSkills === undefined && this.skillBodies.size === 0) return undefined
           return {
-            registerProvider: () => () => {},
+            registerProvider: () => {
+              if (this.skillRegisterError !== undefined) throw new Error(this.skillRegisterError)
+              return () => {}
+            },
             list: async () => {
               if (this.catalogWait !== undefined) await this.catalogWait
               if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
@@ -1632,6 +1637,31 @@ test('a throwing skill service empties its section and still attaches', async ()
     assert.deepEqual(catalog?.commands, [], 'a host command is never advertised')
     client.write({ t: 'line', text: 'still steers' })
     await until(() => host.steered.length === 1, 'a usable bridge after the failure')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a skill registry that refuses the provider logs one line and leaves the socket mounted', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  host.skillRegisterError = 'registry is closed'
+  const written: string[] = []
+  const original = process.stderr.write
+  process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
+  try {
+    apply(host.ctx, config({ socketDir: dir }))
+  } finally {
+    process.stderr.write = original
+  }
+  assert.deepEqual(written, ['dsh-supervision: skill unavailable: registry is closed\n'])
+  // The refusal costs the manual, not the bridge: the operator still attaches.
+  const client = await attached(host, dir, 'session-1')
+  try {
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the refusal')
   } finally {
     host.dispose()
   }

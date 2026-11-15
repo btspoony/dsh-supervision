@@ -66,7 +66,26 @@ export interface SkillMountContext {
 export function registerSkill(ctx: SkillMountContext): void {
   const skills = ctx.get?.('skills')
   if (!isSkillsLike(skills)) return
-  ctx.effect(() => skills.registerProvider(() => skillProvider()))
+  ctx.effect(() => {
+    try {
+      return skills.registerProvider(() => skillProvider())
+    } catch (error) {
+      // The manual is a convenience, and this runs inside apply after the socket
+      // is already open: a registry that refuses the provider must cost the
+      // operator a skill, not the bridge. One line names the degradation, and
+      // there is no disposal to register because nothing was registered.
+      process.stderr.write(`dsh-supervision: skill unavailable: ${reasonOf(error)}\n`)
+      return () => {}
+    }
+  })
+}
+
+/**
+ * @param error - the thrown value.
+ * @returns its message, for a one-line diagnostic.
+ */
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /** What the provider renders from the packaged manual. */
