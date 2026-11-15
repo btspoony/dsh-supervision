@@ -72,8 +72,9 @@ a multi-line editor for the next operator line, and a status line carrying the
 session id, the reported state and the turn. The turn is shown only while the
 plugin's `echo` config is on: nothing after `welcome` carries a count when echo
 is off, so the bar keeps the state live from OSC records (while `programStatus` is
-on) and shows no turn rather than freezing one. With both off the bar carries the
-session id alone. Everything the bridge forwards stays
+on) and shows no turn rather than freezing one. With `programStatus` off those
+records stop arriving, so the state stays at the value the attach reported —
+frozen, still shown. Everything the bridge forwards stays
 in the transcript, so scrolling back reaches the whole attach. The surface
 takes over the terminal's alternate screen while attached: terminal scrollback is
 not written, the TUI viewport is the history, and the last frame is printed back
