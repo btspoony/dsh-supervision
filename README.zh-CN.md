@@ -85,7 +85,7 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 
 `--no-tui` 在终端上也保留只追加的行模式表面；stdout 被重定向时永远走行模式，所以 `dsh-sup … | tee log` 写出的文件依然干净。
 
-**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与宿主斜杠命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。名字来自宿主本身：`/skill:<name>` 与普通输入一样转发，由插件注入该 skill 的正文。
+**补全。** attach 建立后插件会发来一条 `catalog` 帧，只携带该会话的 skills；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。菜单只提供 skills 与 forwarder 自己的退出命令，没有别的：像 `/compact` 这样的宿主斜杠命令在这里不可达——桥接无法执行它，提交只会得到 `unknown command /<verb>`——那些命令属于 web 输入框。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。`/skill:<name>` 与普通输入一样转发，由插件注入该 skill 的正文。
 
 **退出。** `/q`、`/quit`、`/exit`、`/bye`——单独一行、全小写、后面不带参数——在两种界面（TUI 与 `--no-tui`）都能退出 attach：转发器发出 `bye`、恢复终端并以 0 退出，且它们不会被转发给会话，不会留下挂起的模型请求。转发器还会把它们追加到 `/`
 菜单末尾并标注 `leave dsh-sup (local)`，因此退出方式不依赖宿主 catalog 提供了

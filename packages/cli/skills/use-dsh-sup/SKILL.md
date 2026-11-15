@@ -77,13 +77,16 @@ the editor is framed in the accent colour. `NO_COLOR`, a non-terminal stdout or
 | `Home` / `End` | oldest line / back to the newest (when the editor is empty) |
 
 Typing `/` opens the suggestion menu the plugin's `catalog` frame feeds: the
-session's skills appear as `/skill:<name>` (fuzzy-matching the bare name works)
-and the host's slash commands as `/name`; Tab inserts the highlighted completion,
-while Enter accepts and sends it immediately. Accepting
-`/skill:<name>` or typing it by hand is forwarded like any other line, and the
-plugin injects that skill's body. The catalog frame never reaches stdout or
-`/dev/tty`; `--no-tui` ignores it. `@file` completion resolves against the
-session's directory when `fd` is installed.
+session's skills appear as `/skill:<name>` (fuzzy-matching the bare name works),
+and the forwarder's own exits close the list. That is the whole menu — a host
+slash command such as `/compact` is not offered and would answer
+`unknown command /<verb>` if typed, because the bridge cannot execute one; host
+commands belong to the web input box. Tab inserts the highlighted completion,
+while Enter accepts and sends it immediately. Accepting `/skill:<name>` or typing
+it by hand is forwarded like any other line, and the plugin injects that skill's
+body. The catalog frame never reaches stdout or `/dev/tty`; `--no-tui` ignores
+it. `@file` completion resolves against the session's directory when `fd` is
+installed.
 
 `/q`, `/quit`, `/exit` and `/bye` leave the attach from either surface: the
 forwarder sends `bye`, restores the screen and exits 0, and the line never reaches

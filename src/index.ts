@@ -1363,7 +1363,10 @@ function handlersFor(
     // The codec refuses an oversized frame by closing the bridge, so the one
     // frame that must never fail is proven here; a menu that still cannot fit
     // is replaced by the empty one rather than costing the operator the attach.
-    let frame: OutFrame = { t: 'catalog', skills: catalog.skills, commands: catalog.commands }
+    // The bridge can list host commands but never run one, so advertising them
+    // offered menu rows whose submission answers `unknown command`. The field
+    // stays on the wire for the forwarder's parser; it just never carries a row.
+    let frame: OutFrame = { t: 'catalog', skills: catalog.skills, commands: [] }
     try {
       encodeFrame(frame)
     } catch {

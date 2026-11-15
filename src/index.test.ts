@@ -1564,13 +1564,12 @@ test('a catalog frame follows welcome once and precedes the replayed history', a
     await until(() => client.allFrames.length >= 3, 'the catalog and the replay')
     assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog', 'mirror'])
     const [catalog] = catalogs(client)
+    // Host commands are listed by the host but unreachable through the bridge,
+    // so the menu may only offer skills; the field itself stays on the wire.
     assert.deepEqual(catalog, {
       t: 'catalog',
       skills: [{ name: 'use-dsh-sup', description: 'drive the terminal' }],
-      commands: [
-        { name: 'compact', description: 'shrink the context', argumentHint: '<focus>' },
-        { name: 'status', description: 'show usage' },
-      ],
+      commands: [],
     })
     await new Promise<void>(resolve => { setImmediate(resolve) })
     assert.equal(catalogs(client).length, 1, 'one catalog per bind')
@@ -1613,7 +1612,7 @@ test('a throwing skill service empties its section and still attaches', async ()
     await until(() => catalogs(client).length === 1, 'the degraded catalog')
     const [catalog] = catalogs(client)
     assert.deepEqual(catalog?.skills, [], 'a throwing service is an empty section')
-    assert.deepEqual(catalog?.commands, [{ name: 'compact', description: 'shrink the context' }])
+    assert.deepEqual(catalog?.commands, [], 'a host command is never advertised')
     client.write({ t: 'line', text: 'still steers' })
     await until(() => host.steered.length === 1, 'a usable bridge after the failure')
   } finally {
