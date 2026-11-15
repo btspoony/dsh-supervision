@@ -14,6 +14,7 @@ import { routeFrame } from './route.js';
 import { PLAIN, createTheme } from './theme.js';
 import {
   CTRL_C_WINDOW_MS,
+  LOCAL_EXITS,
   NO_CATALOG,
   autocompleteCatalog,
   catalogOf,
@@ -644,12 +645,22 @@ test('the catalog becomes one skill entry per skill plus one per host command', 
   const entries = autocompleteCatalog(SAMPLE);
   assert.deepEqual(
     entries.map((entry) => entry.name),
-    ['skill:use-dsh-sup', 'skill:use-dsh-supervision', 'skill:grill-me', 'status', 'approve'],
+    ['skill:use-dsh-sup', 'skill:use-dsh-supervision', 'skill:grill-me', 'status', 'approve', 'q', 'quit', 'exit', 'bye'],
   );
   assert.equal(entries[0]?.description, 'run the forwarder');
   assert.equal(entries[4]?.argumentHint, '<ask-id>', 'the host argument hint is passed through');
   assert.equal(entries[3]?.argumentHint, undefined);
-  assert.deepEqual(autocompleteCatalog(NO_CATALOG), [], 'an empty catalog offers no menu');
+  // The forwarder's own exits close the menu, so a host with no vocabulary
+  // still offers a way out that the operator can discover.
+  const local = entries.slice(-LOCAL_EXITS.length);
+  assert.deepEqual(local.map((entry) => entry.name), [...LOCAL_EXITS]);
+  for (const entry of local) assert.equal(entry.description, 'leave dsh-sup (local)');
+  const empty = autocompleteCatalog(NO_CATALOG);
+  assert.deepEqual(empty.map((entry) => entry.name), [...LOCAL_EXITS], 'an empty catalog offers the local exits');
+  assert.ok(
+    empty.every((entry) => entry.getArgumentCompletions === undefined),
+    'a local exit takes no argument',
+  );
 });
 
 test('the skill argument completions filter by prefix', async () => {
@@ -671,6 +682,10 @@ test('the provider lists skills for / and narrows to skills for /skill:', async 
   const root = await provider.getSuggestions(['/'], 0, 1, { signal });
   assert.deepEqual(root?.items.map((item) => item.value).sort(), [
     'approve',
+    'bye',
+    'exit',
+    'q',
+    'quit',
     'skill:grill-me',
     'skill:use-dsh-sup',
     'skill:use-dsh-supervision',
@@ -738,6 +753,10 @@ test('only the exact lowercase exit commands are forwarder-local', () => {
     assert.equal(isLocalExit(command), true, command);
     assert.deepEqual(lineAction(command), { kind: 'exit' }, command);
   }
+  // Accepting a menu entry leaves a trailing space, so that form must exit too.
+  for (const command of ['/q ', '/quit  ', '/exit\t']) {
+    assert.deepEqual(lineAction(command), { kind: 'exit' }, command);
+  }
   for (const text of ['/q now', '/quiet', '/Q', '/EXIT', ' /q', '/bye all', '/quitter', 'hello']) {
     assert.equal(isLocalExit(text), false, text);
     assert.deepEqual(lineAction(text), { kind: 'send', text }, text);
@@ -778,7 +797,12 @@ test('catalog rows with control bytes never reach the menu', async () => {
     ],
   };
   const entries = autocompleteCatalog(hostile);
-  assert.deepEqual(entries.map((entry) => entry.name), ['skill:safe-skill', 'safe', 'bad-hint']);
+  assert.deepEqual(entries.map((entry) => entry.name), [
+    'skill:safe-skill',
+    'safe',
+    'bad-hint',
+    ...LOCAL_EXITS,
+  ]);
   // Only the control-free hint survives.
   assert.equal(entries[2]?.argumentHint, undefined);
   for (const entry of entries) {

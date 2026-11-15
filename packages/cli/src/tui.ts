@@ -158,12 +158,21 @@ export const CTRL_C_WINDOW_MS = 1500;
 export const CTRL_C_HINT = 'Ctrl+C again to exit';
 
 /**
- * The forwarder-local exit commands: exact, lowercase, no arguments. Anything
- * longer or differently cased is ordinary input for the session.
+ * The forwarder-local exit commands, exact and lowercase: they leave the attach
+ * from either surface and are never forwarded. Unlike the host's vocabulary,
+ * these belong to the forwarder, so they are also always in the slash menu.
+ */
+export const LOCAL_EXITS = ['q', 'quit', 'exit', 'bye'] as const;
+
+/**
+ * Whether one submitted line is a forwarder-local exit. Anything longer or
+ * differently cased is ordinary input for the session.
+ * Trailing whitespace is ignored because accepting a menu entry appends a space.
  * @param text - the submitted editor text.
  */
 export function isLocalExit(text: string): boolean {
-  return text === '/q' || text === '/quit' || text === '/exit' || text === '/bye';
+  const line = text.trimEnd();
+  return line.startsWith('/') && (LOCAL_EXITS as readonly string[]).includes(line.slice(1));
 }
 
 /** What the line sender does with one submitted text. */
@@ -328,9 +337,11 @@ export function catalogOf(frame: unknown): Catalog | undefined {
 /**
  * The slash menu for one catalog: a `skill:<name>` entry per skill (typed as
  * `/skill:`, which the provider fuzzy-matches against the bare names), then one
- * entry per host command. Argument completions filter the skills again, so a
- * half-typed name narrows instead of guessing.
- * @param catalog - the host's advertised vocabulary; an empty one yields no menu.
+ * entry per host command, then the forwarder's own exit commands. Argument
+ * completions filter the skills again, so a half-typed name narrows instead of
+ * guessing.
+ * @param catalog - the host's advertised vocabulary; an empty one still offers
+ *   the forwarder-local exits.
  */
 export function autocompleteCatalog(catalog: Catalog): SlashCommand[] {
   // A host string goes straight into the menu, which the terminal renders
@@ -358,7 +369,8 @@ export function autocompleteCatalog(catalog: Catalog): SlashCommand[] {
         ? {}
         : { argumentHint: command.argumentHint }),
     }));
-  return [...skills, ...commands];
+  const local: SlashCommand[] = LOCAL_EXITS.map((name) => ({ name, description: 'leave dsh-sup (local)' }));
+  return [...skills, ...commands, ...local];
 }
 
 /**

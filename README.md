@@ -118,11 +118,14 @@ plugin turns it into the skill's body.
 **Leaving.** `/q`, `/quit`, `/exit` and `/bye` — on a line of their own,
 lowercase, nothing after them — leave the attach from either surface (TUI or
 `--no-tui`): the forwarder sends `bye`, restores the terminal and exits 0. They are
-never forwarded to the session, so nothing is left waiting on the model. In the
+never forwarded to the session, so nothing is left waiting on the model. The
+forwarder also puts them at the end of the `/` menu as `leave dsh-sup (local)`, so
+the way out never depends on what the host's catalog advertises. In the
 TUI, `Ctrl+D` still leaves outright, `Esc` closes an open completion menu first
 and otherwise cancels the running turn, and `Ctrl+C` clears the editor; on an
 empty editor it shows `Ctrl+C again to exit` and a second press within 1.5 s
-leaves. `/q now` or `/quiet` are ordinary input.
+leaves. `/q now` or `/quiet` are ordinary input; trailing spaces are ignored, so
+accepting the menu entry and pressing Enter still leaves.
 
 ### Answer an approval
 
