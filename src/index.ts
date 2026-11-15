@@ -304,6 +304,12 @@ interface BridgeState {
   jobsOff?: () => void
   /** Whether the stale echo has already been sent for this bridge. */
   staleNoted: boolean
+  /** The last successful job snapshot; kept when a scan fails. */
+  jobs: readonly JobActivityView[]
+  /** Why the last job scan failed, or undefined while scans succeed. */
+  activityError: string | undefined
+  /** One pending echo about a degraded or recovered scan. */
+  activityNotice: string | undefined
 }
 
 /**
@@ -1078,6 +1084,13 @@ function handlersFor(
       const data = programStatus(record)
       if (data !== '') state.bridge.send({ t: 'osc', data })
     }
+    // A scan that failed or recovered says so once, before the turn line below:
+    // it is the reason the root kept a word the host no longer confirms.
+    if (state.activityNotice !== undefined) {
+      const notice = state.activityNotice
+      state.activityNotice = undefined
+      if (config.echo) state.bridge.send({ t: 'echo', text: notice })
+    }
     // One line per bridge says why a family stopped counting: the operator is
     // looking at a `done` root that still has a child listed in the host.
     const note = staleNote(state)
@@ -1102,14 +1115,20 @@ function handlersFor(
     // A released bridge owns nothing: a late timer or job event must not report.
     if (bridged.get(state.agent.session.id) !== state) return
     const jobs = jobsOf(ctx.get?.('jobs'))
-    let jobRows: readonly JobViewLike[] = []
+    let jobRows: readonly JobViewLike[] | undefined
+    let problem: string | undefined
     if (jobs !== undefined) {
       try {
         jobRows = jobs.list(state.agent.session.id)
-      } catch {
-        // A service that cannot list is indistinguishable from none here.
-        jobRows = []
+      } catch (error) {
+        // A failed scan must not read as "the family ended": that would drop the
+        // root to done and count a fabricated leave when the service recovers.
+        problem = reasonOf(error)
       }
+    } else if (state.activityError !== undefined || state.jobs.length > 0) {
+      // A host that never mounts jobs is the documented empty family; a service
+      // that had reported and is now gone is a degradation worth one line.
+      problem = state.activityError ?? 'no jobs service'
     }
     const agents: AgentActivityView[] = ctx.agents.list().map(agent => {
       const header = agent.session.header
@@ -1120,12 +1139,26 @@ function handlersFor(
         status: agent.status,
       }
     })
-    const jobsView: JobActivityView[] = jobRows.map(job => ({
-      id: job.id,
-      ...(job.label === undefined ? {} : { label: job.label }),
-      ...(job.owner === undefined ? {} : { owner: job.owner }),
-      status: job.status,
-    }))
+    // The last successful snapshot is what a failed scan keeps reporting; only a
+    // successful list may replace it.
+    const jobsView: readonly JobActivityView[] = jobRows === undefined
+      ? state.jobs
+      : jobRows.map(job => ({
+        id: job.id,
+        ...(job.label === undefined ? {} : { label: job.label }),
+        ...(job.owner === undefined ? {} : { owner: job.owner }),
+        status: job.status,
+      }))
+    if (problem !== undefined) {
+      // One line per degradation episode; neither the snapshot nor the stale
+      // clock moves, so a genuinely stuck job still falls back on schedule.
+      if (state.activityError === undefined) state.activityNotice = `activity unavailable: ${problem}`
+      state.activityError = problem
+    } else if (jobRows !== undefined) {
+      if (state.activityError !== undefined) state.activityNotice = 'activity recovered'
+      state.activityError = undefined
+      state.jobs = jobsView
+    }
     const activity = activityOf(state.agent.session.id, { agents, jobs: jobsView })
     // Identity, not freshness: a rescan returning the same items is not news,
     // and only a real change may move the stale window.
@@ -1512,6 +1545,9 @@ function handlersFor(
       activityAt: 0,
       activityTimer: undefined,
       staleNoted: false,
+      jobs: [],
+      activityError: undefined,
+      activityNotice: undefined,
     }
     bridged.set(session, state)
     openSubscriptions()

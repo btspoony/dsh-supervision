@@ -180,6 +180,8 @@ class FakeHost {
   jobRows: { id: string; label?: string; owner?: string; status: string }[] | undefined = []
   /** Job-event listeners the plugin subscribed, one per bridge. */
   readonly jobListeners = new Set<() => void>()
+  /** When set, `ctx.jobs.list` throws with this message. */
+  jobsListError: string | undefined = undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -288,7 +290,10 @@ class FakeHost {
           return this.jobRows === undefined
             ? undefined
             : {
-                list: () => this.jobRows ?? [],
+                list: () => {
+                  if (this.jobsListError !== undefined) throw new Error(this.jobsListError)
+                  return this.jobRows ?? []
+                },
                 events: {
                   subscribe: (_filter: { owner: string }, listener: () => void) => {
                     this.jobListeners.add(listener)
@@ -1867,6 +1872,85 @@ test('a host without the jobs service reports the turn word exactly as before', 
     host.emit('session-1', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     await until(() => lastRootFields(client).state === 'done', 'the turn word')
     assert.equal(lastRootFields(client).msg, undefined)
+    assert.equal(
+      echoesOf(client).some(text => text.startsWith('activity unavailable')),
+      false,
+      'a host that never mounts jobs stays silent',
+    )
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a failing jobs scan keeps the known job and counts no fabricated leave', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    // A failing scan keeps the last-known job: the root must not fall to done and
+    // count a leave that herdr-core never saw.
+    host.jobsListError = 'jobs down'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: jobs down'), 'the degradation echo')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(lastRootFields(client).state, 'working', 'the known job keeps the word')
+    assert.equal(lastRootFields(client).msg, '1 job')
+
+    // A second failing scan neither repeats the line nor moves the counter.
+    host.emitJob()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(echoesOf(client).filter(text => text === 'activity unavailable: jobs down').length, 1)
+
+    host.jobsListError = undefined
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity recovered'), 'the recovery echo')
+    assert.equal(lastRootFields(client).state, 'working')
+
+    // The real settle is the only leave the supervisor sees; no turn ran here,
+    // so the turn word it returns to is idle.
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'done' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'idle', 'the drained word')
+    assert.deepEqual(echoesOf(client), [
+      '[turn 0] working',
+      'activity unavailable: jobs down',
+      'activity recovered',
+      '[turn 1] idle',
+    ])
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a vanished jobs service keeps the last-known activity', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    host.jobRows = undefined
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: no jobs service'), 'the degradation echo')
+    assert.equal(lastRootFields(client).state, 'working')
+    assert.equal(lastRootFields(client).msg, '1 job')
+
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity recovered'), 'the recovery echo')
+    assert.equal(lastRootFields(client).state, 'working')
   } finally {
     host.dispose()
   }
