@@ -107,6 +107,14 @@ in the table above or the bytes a redirected stdout receives.
 stdout always gets that line surface, so `dsh-sup … | tee log` stays
 machine-clean.
 
+**Untested platforms.** Windows terminals (ConPTY) and tmux are unverified: no
+run has exercised the full-screen surface there. When you do, check three things
+first — the alternate screen is restored on every exit path (`Ctrl+D`, `/q`, a
+lost backend), the terminal reports a keyboard protocol the surface understands
+(modifyOtherKeys or the Kitty protocol, which decide `Shift+Enter`), and the
+pane has a `/dev/tty` the bridge can open; without one only the socket surface
+mounts, and the reason lands on stderr.
+
 **Suggestions.** The plugin sends a `catalog` frame with the session's skills once
 the attach is up, and the editor turns it into a menu: typing `/` lists every
 entry, typing `/skill:` narrows to the session's skills as `/skill:<name>`

@@ -98,6 +98,13 @@ menu first and otherwise sends `/cancel`, and Ctrl+C clears the editor (twice on
 an empty editor within 1.5 s leaves; any other key resets that window). Trailing
 spaces are ignored, so accepting the menu entry and pressing Enter still leaves.
 
+Windows terminals (ConPTY) and tmux are unverified: no run has exercised this
+surface there. When you do, check the alternate screen is restored on every exit
+path (`Ctrl+D`, `/q`, a lost backend), that the terminal reports a keyboard
+protocol the surface understands (modifyOtherKeys or Kitty, which decide
+`Shift+Enter`), and that the pane has a `/dev/tty` the bridge can open — without
+one only the socket surface mounts, and the reason lands on stderr.
+
 Scrolled back, the last row shows `↓ N new` for entries that arrived meanwhile;
 reaching the bottom resumes following. `--no-tui`, or a redirected stdout, keeps
 the append-only line surface: in line mode those blocks go to stdout only when
