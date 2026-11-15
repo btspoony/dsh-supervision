@@ -126,7 +126,9 @@ unreachable from here — the bridge cannot execute one, so it would answer
 catalog frame is surface input only — it never reaches stdout or `/dev/tty`, and
 line mode ignores it. `@file` completion resolves against the session's directory
 when the `fd` binary is installed. `/skill:<name>` is forwarded like any other
-line, so the plugin turns it into the skill's body.
+line, so the plugin turns it into the skill's body. A skill line may carry extra
+text after the name (`/skill:use-dsh-sup focus on the retry`); those words reach
+the model as an `## Operator note` after the body.
 
 **Leaving.** `/q`, `/quit`, `/exit` and `/bye` — on a line of their own,
 lowercase, nothing after them — leave the attach from either surface (TUI or

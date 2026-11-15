@@ -1720,6 +1720,13 @@ test('/skill: injects the named skill body as a user message', async () => {
       host.steered[1] === undefined ? '' : steeredText(host.steered[1].message),
       steeredText(steer.message),
     )
+    // Words after the name are the operator's own, carried as a note.
+    client.write({ t: 'line', text: '/skill:use-dsh-sup focus on the retry' })
+    await until(() => host.steered.length === 3, 'the annotated injection')
+    assert.equal(
+      host.steered[2] === undefined ? '' : steeredText(host.steered[2].message),
+      '# Skill: use-dsh-sup\n\ndrive the terminal\n\nFull manual body\n\n## Operator note\n\nfocus on the retry',
+    )
   } finally {
     host.dispose()
   }

@@ -1741,9 +1741,13 @@ function handlersFor(
               }
               // The body is the point: the operator named the skill, so the model
               // receives it as their own message rather than a command to parse.
-              state.agent.steer(userMessage(
-                `# Skill: ${skill.name}\n\n${skill.description}\n\n${skill.content}`,
-              ))
+              const body = `# Skill: ${skill.name}\n\n${skill.description}\n\n${skill.content}`
+              // Words typed after the name belong to the same request; they trail
+              // the body as a note, so naming a skill and saying what for is one line.
+              const text = command.args.length === 0
+                ? body
+                : `${body.trimEnd()}\n\n## Operator note\n\n${command.args.join(' ')}`
+              state.agent.steer(userMessage(text))
             } catch (error) {
               bridge.send({ t: 'echo', text: `skill failed: ${reasonOf(error)}` })
             }

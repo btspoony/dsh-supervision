@@ -86,9 +86,10 @@ slash command such as `/compact` is not offered and would answer
 commands belong to the web input box. Tab inserts the highlighted completion,
 while Enter accepts and sends it immediately. Accepting `/skill:<name>` or typing
 it by hand is forwarded like any other line, and the plugin injects that skill's
-body. The catalog frame never reaches stdout or `/dev/tty`; `--no-tui` ignores
-it. `@file` completion resolves against the session's directory when `fd` is
-installed.
+body. Words after the name travel with it: `/skill:use-dsh-sup focus on the
+retry` reaches the model as the body followed by an `## Operator note`. The
+catalog frame never reaches stdout or `/dev/tty`; `--no-tui` ignores it. `@file`
+completion resolves against the session's directory when `fd` is installed.
 
 `/q`, `/quit`, `/exit` and `/bye` leave the attach from either surface: the
 forwarder sends `bye`, restores the screen and exits 0, and the line never reaches

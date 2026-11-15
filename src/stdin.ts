@@ -11,7 +11,7 @@ export type Command =
   | { readonly kind: 'status' }
   | { readonly kind: 'new'; readonly cwd: string | undefined }
   | { readonly kind: 'attach'; readonly session: string }
-  | { readonly kind: 'skill'; readonly name: string }
+  | { readonly kind: 'skill'; readonly name: string; readonly args: readonly string[] }
   | { readonly kind: 'approve'; readonly ask: string }
   | { readonly kind: 'reject'; readonly ask: string }
   | { readonly kind: 'yes' }
@@ -60,9 +60,10 @@ export function parseLine(line: string): Command | undefined {
     ? args[0]
     : verb.startsWith('skill:') ? verb.slice('skill:'.length) : undefined
   if (skillName !== undefined) {
-    const rest = verb === 'skill' ? args.slice(1) : args
-    return rest.length === 0 && SKILL_NAME.test(skillName)
-      ? { kind: 'skill', name: skillName }
+    // The name must still be a name, but the words after it are the operator's
+    // own and travel with the skill instead of turning the line into a refusal.
+    return SKILL_NAME.test(skillName)
+      ? { kind: 'skill', name: skillName, args: verb === 'skill' ? args.slice(1) : args }
       : { kind: 'unknown', verb: 'skill' }
   }
   switch (verb) {
