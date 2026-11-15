@@ -87,9 +87,11 @@ session's directory when `fd` is installed.
 
 `/q`, `/quit`, `/exit` and `/bye` leave the attach from either surface: the
 forwarder sends `bye`, restores the screen and exits 0, and the line never reaches
-the session. In the TUI, `Ctrl+D` also leaves, `Esc` closes an open completion
+the session. They also sit at the end of the `/` menu as `leave dsh-sup (local)`,
+so the menu shows a way out even with no host vocabulary. In the TUI, `Ctrl+D` also leaves, `Esc` closes an open completion
 menu first and otherwise sends `/cancel`, and Ctrl+C clears the editor (twice on
-an empty editor within 1.5 s leaves; any other key resets that window).
+an empty editor within 1.5 s leaves; any other key resets that window). Trailing
+spaces are ignored, so accepting the menu entry and pressing Enter still leaves.
 
 Scrolled back, the last row shows `↓ N new` for entries that arrived meanwhile;
 reaching the bottom resumes following. `--no-tui`, or a redirected stdout, keeps
