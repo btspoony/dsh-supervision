@@ -27,6 +27,7 @@ import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
 import { catalogOf } from './catalog.js'
 import type { Catalog } from './catalog.js'
+import { reasonOf } from './reason.js'
 import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
 import { HISTORY_ITEMS, historyItems, mirrorFrame, mirrorOf } from './mirror.js'
@@ -310,14 +311,6 @@ interface BridgeState {
   activityError: string | undefined
   /** One pending echo about a degraded or recovered scan. */
   activityNotice: string | undefined
-}
-
-/**
- * @param error - the thrown value.
- * @returns its message, for a refusal the forwarder prints verbatim.
- */
-function reasonOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 /** True when the host stamped an event position this plugin can order by. */

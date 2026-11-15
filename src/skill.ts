@@ -8,6 +8,7 @@
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { reasonOf } from './reason.js'
 
 const SKILL_NAME = 'use-dsh-supervision'
 /** One provider name = one source in the catalog, and it is this plugin. */
@@ -78,14 +79,6 @@ export function registerSkill(ctx: SkillMountContext): void {
       return () => {}
     }
   })
-}
-
-/**
- * @param error - the thrown value.
- * @returns its message, for a one-line diagnostic.
- */
-function reasonOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 /** What the provider renders from the packaged manual. */
