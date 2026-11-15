@@ -88,9 +88,11 @@ export function createRootState(app: string, title: string): RootState {
  * Fold one fact into the root state.
  * @param state - the previous state.
  * @param event - one session or agent fact.
+ * @param heldWorking - whether a non-turn family still holds the composed root
+ *   on `working`; such a turn never leaves, so it must not count as one.
  * @returns the next state; `current` keeps its identity when the record did not change.
  */
-export function reduceRootState(state: RootState, event: StateEvent): RootState {
+export function reduceRootState(state: RootState, event: StateEvent, heldWorking = false): RootState {
   let settled: Pick<RootState, 'app' | 'title' | 'terminal' | 'working' | 'live'>
   switch (event.type) {
     case 'turn/start':
@@ -109,10 +111,12 @@ export function reduceRootState(state: RootState, event: StateEvent): RootState 
       break
   }
 
-  // hc increments its own turn each time the root leaves `working`, and a
-  // repeated word is not a turn; mirroring that exactly is what keeps the two
-  // counters equal.
-  const leaving = state.current.state === 'working' && rootWord(settled) !== 'working'
+  // hc counts a leave of the *composed* word, and a repeated word is not a turn.
+  // A family can hold a finished turn on `working`, but `blocked` outranks
+  // `working` (and `working` outranks error/done), so the flag suppresses only a
+  // composing `working` — a blocked end is always a real leave and counts once.
+  const composed = rootWord({ working: settled.working || heldWorking, terminal: settled.terminal })
+  const leaving = state.current.state === 'working' && composed !== 'working'
   const turn = leaving ? state.turn + 1 : state.turn
   const record: RootRecord = { state: rootWord(settled), app: settled.app, title: settled.title }
   const unchanged = record.state === state.current.state

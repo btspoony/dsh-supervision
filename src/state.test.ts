@@ -13,15 +13,40 @@ function root(title = 'repo'): RootState {
   return createRootState('dsh', title)
 }
 
-/** Fold several facts in one pass. */
-function fold(state: RootState, events: readonly StateEvent[]): RootState {
-  return events.reduce(reduceRootState, state)
+/** Fold several facts in one pass; `heldWorking` mirrors an activity family. */
+function fold(state: RootState, events: readonly StateEvent[], heldWorking = false): RootState {
+  return events.reduce((current, event) => reduceRootState(current, event, heldWorking), state)
 }
 
 test('a fresh root reports idle at turn 0', () => {
   const state = root()
   assert.deepEqual(state.current, { state: 'idle', app: 'dsh', title: 'repo' })
   assert.equal(state.turn, 0)
+})
+
+test('a turn held by activity leaves no turn behind', () => {
+  const events: readonly StateEvent[] = [
+    { type: 'turn/start', turn: 1 },
+    { type: 'turn/end', turn: 1, reason: 'completed' },
+  ]
+  const held = fold(root(), events, true)
+  assert.equal(held.turn, 0, 'the composed word never left working')
+  assert.equal(held.working, false, 'the turn itself ended')
+  assert.equal(held.terminal, 'done')
+  // Without the held family the same facts are one real leave.
+  assert.equal(fold(root(), events).turn, 1)
+})
+
+test('a blocked end held by activity still counts its one leave', () => {
+  const events: readonly StateEvent[] = [
+    { type: 'turn/start', turn: 1 },
+    { type: 'turn/end', turn: 1, reason: 'blocked' },
+  ]
+  const held = fold(root(), events, true)
+  assert.equal(held.turn, 1, 'blocked outranks working, so the leave is real')
+  assert.equal(held.terminal, 'blocked')
+  // Draining the family changes nothing: the same result, no second count.
+  assert.equal(fold(held, [{ type: 'agent/status', status: 'idle' }], true).turn, 1)
 })
 
 test('a live turn reports working', () => {

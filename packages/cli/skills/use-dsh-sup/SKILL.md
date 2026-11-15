@@ -109,6 +109,14 @@ The machine records are unchanged: OSC 7501 still goes to `/dev/tty`, and the
 you have a TTY, the transcript viewport in a full-screen attach, `/dev/tty`
 otherwise.
 
+The root word covers more than the session's own turn: while a descendant
+subagent is `running`, or a background job owned by the session is `running` or
+`stopping`, the root reports `working` and its `msg` carries the count
+(`2 subagents · 1 job`). If that activity's identity (a family's status, label or
+membership) does not change for 5 minutes, the root falls back to the turn word —
+`msg` then reads `activity stale: …` — and one `activity stale: …` echo line
+explains it.
+
 ```text
 ❯ implement the mirror
 · One assistant/message per step; no deltas to stream.
