@@ -1490,12 +1490,6 @@ function handlersFor(
    * @param greet - `welcome` only for `hello`; the forwarder pumps stdin on it.
    */
   const establish = async (agent: AgentLike, bridge: Bridge, greet: 'welcome' | 'root'): Promise<boolean> => {
-    // The menu is read before the session is claimed, so its payload is in hand
-    // when the root word goes out: a slow service then costs the root word a
-    // bounded wait instead of leaving the menu empty behind an early `welcome`.
-    // Reading it first is also what keeps the claim atomic — no await separates
-    // the single-owner check from the claim.
-    const catalog = await catalogWithin(ctx)
     const session = agent.session.id
     // The shared table is the single-owner rule across both surfaces: a claim
     // that only checks its own transport cannot see the other one, and two
@@ -1529,6 +1523,12 @@ function handlersFor(
       activityNotice: undefined,
     }
     bridged.set(session, state)
+    // The menu is read after the claim — a refused hello never pays for it — and
+    // before any frame, so `welcome` and `catalog` still leave in one turn. No
+    // subscription is open yet, so nothing can send a frame while it waits.
+    const catalog = await catalogWithin(ctx)
+    // A second hello on this bridge during the read owns it now; this bind lost.
+    if (bridged.get(session) !== state) return false
     openSubscriptions()
 
     // Read activity before any frame. The welcome stays turn-only, but a switch

@@ -1596,22 +1596,58 @@ test('welcome waits for the catalog, so the menu is there when stdin pumps', asy
   const host = new FakeHost()
   host.add('session-1', '/repo')
   host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
-  let release: () => void = () => {}
-  host.catalogWait = new Promise<void>(resolve => { release = resolve })
+  // The read never answers on its own: only the mocked budget frees `welcome`,
+  // so no real-time window can decide this test.
+  host.catalogWait = new Promise<void>(() => {})
   apply(host.ctx, config({ socketDir: dir }))
   const client = new Client(await listening(dir))
   await client.ready()
-  client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+  mock.timers.enable({ apis: ['setTimeout'] })
 
   try {
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
     // The forwarder pumps stdin on `welcome`, so a menu still being read would be
     // open to a `/` pressed on the readiness signal.
     await until(() => host.catalogLists === 1, 'the catalog read to start')
     assert.equal(client.allFrames.length, 0, 'no frame while the catalog is being read')
-    release()
+    mock.timers.tick(249)
+    assert.equal(client.allFrames.length, 0, 'no frame before the budget expires')
+    mock.timers.tick(1)
     await until(() => client.allFrames.length >= 2, 'the welcome and its catalog')
     assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog'])
   } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+test('a refused hello never waits for the catalog', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  // A mounted skill service, so a read of the catalog would have something to wait on.
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const held = await attached(host, dir, 'session-1')
+  const mover = await attached(host, dir, 'session-2')
+
+  try {
+    // From here a catalog read could only finish by the mocked budget, so an echo
+    // that arrives proves the refusal ran before any read.
+    host.catalogWait = new Promise<void>(() => {})
+    const reads = host.catalogLists
+    mock.timers.enable({ apis: ['setTimeout'] })
+    mover.write({ t: 'line', text: '/attach session-1' })
+    await until(() => mover.frames.some(frame => frame.t === 'echo'), 'the refusal echo')
+    assert.deepEqual(
+      mover.frames.flatMap(frame => frame.t === 'echo' ? [frame.text] : []),
+      ['attach failed: session session-1 is already bridged'],
+    )
+    assert.equal(host.catalogLists, reads, 'a refused hello reads no catalog')
+    assert.equal(held.frames.filter(frame => frame.t === 'welcome').length, 1, 'the held bridge is untouched')
+  } finally {
+    mock.timers.reset()
     host.dispose()
   }
 })
