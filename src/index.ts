@@ -1571,7 +1571,7 @@ function handlersFor(
    * @param bridge - the connection that drives it.
    * @param greet - `welcome` only for `hello`; the forwarder pumps stdin on it.
    * @param created - whether this bind created a fresh session (`/new`), which
-   *   stays in the host's list even when this bind loses it.
+   *   exists on the host even when this bind loses it.
    * @returns `bound` when this bridge now owns the session, `busy` when another
    *   bridge does, and `superseded` when a later bind on this same bridge
    *   replaced it while the menu was being read — that bind owns everything.
@@ -1610,11 +1610,16 @@ function handlersFor(
     // Superseded is not a lost claim: the newer bind on this same bridge holds
     // it, and unclaiming here would clear that bind's session instead.
     if (bindSeq.get(bridge) !== ticket) {
-      // A `/new` made a session the host lists, so losing the bind must not look
-      // like nothing happened: one line on this connection, and the winner stays
-      // untouched. A superseded `/attach` created nothing and stays silent.
+      // A `/new` created a session the host keeps, so losing the bind must not
+      // look like nothing happened: one line on this connection, and the winner
+      // stays untouched. A superseded `/attach` created nothing and stays silent.
       if (created) {
-        bridge.send({ t: 'echo', text: `new superseded: session ${session} was created; it stays in your session list` })
+        // The way back in is the id, not the list: a session with no turn yet is
+        // blank, and both `list` and the sidebar hide it until one arrives. If the
+        // winning hello then loses its own claim it closes this socket, and a write
+        // after that close raises ERR_STREAM_WRITE_AFTER_END, which the transport's
+        // socket error handler drops: this line is lost, never thrown.
+        bridge.send({ t: 'echo', text: `new superseded: session ${session} was created; re-attach with /attach ${session}` })
       }
       return 'superseded'
     }

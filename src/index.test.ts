@@ -1745,8 +1745,9 @@ test('a superseded /new tells the operator the session it created survives', asy
   try {
     // `/new` is fire-and-forget, so its bind is still inside the catalog prefetch
     // when the hello behind it binds another session on the same connection. The
-    // session it created is real and listed, so the loser owes the operator one
-    // line saying so; `/attach` supersession created nothing and stays silent.
+    // session it created is real but blank, so neither `list` nor the sidebar
+    // shows it yet: the loser owes the operator its id and the way back in.
+    // `/attach` supersession created nothing and stays silent.
     client.write({ t: 'line', text: '/new' })
     await until(() => host.catalogLists === 2, 'the new bind read to start')
     const created = host.created[0] ?? ''
@@ -1759,14 +1760,26 @@ test('a superseded /new tells the operator the session it created survives', asy
 
     assert.deepEqual(
       client.allFrames.flatMap(frame => frame.t === 'echo' ? [frame.text] : []),
-      [`new superseded: session ${created} was created; it stays in your session list`],
-      'the losing /new says its session survives, once',
+      [`new superseded: session ${created} was created; re-attach with /attach ${created}`],
+      'the losing /new names its session and the way back in, once',
     )
     const types = client.allFrames.map(frame => frame.t)
     const secondWelcome = types.lastIndexOf('welcome')
     assert.equal(types[secondWelcome + 1], 'catalog', 'the winning bind reaches welcome then catalog')
     assert.ok(types.indexOf('echo') < secondWelcome, 'the losing /new answers before the winner binds')
     assert.deepEqual(host.created, [created], 'the host recorded one created session')
+
+    // The recovery path the echo names has to work, or the line is another false
+    // promise: the blank session is not listed, but `/attach` resumes it by id.
+    const catalogs = () => client.allFrames.filter(frame => frame.t === 'catalog').length
+    const before = catalogs()
+    client.write({ t: 'line', text: `/attach ${created}` })
+    await until(() => catalogs() > before, 'the created session re-attaches by id')
+    client.write({ t: 'line', text: '/status' })
+    await until(
+      () => client.allFrames.some(frame => frame.t === 'echo' && frame.text.startsWith(`session=${created} `)),
+      'the re-attached session answers as the bridged one',
+    )
   } finally {
     mock.timers.reset()
     host.dispose()
