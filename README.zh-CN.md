@@ -118,10 +118,10 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 ### 给 supervisor 侧 agent 的提示词
 
-那个技能活在被监督的会话里。控制 supervisor 终端的 agent 更早就要用上转发器，而且它可能压根还没装。先把这段提示词粘给它：
+下面这段给控制 supervisor 终端的 agent：装上与插件同版本的转发器，读懂手册，并把学到的东西留在下次还能拿到的地方：
 
 ```text
-先读出已装插件的版本：`dsh plugin --profile web list` 会打印 `dsh-supervision@<版本>`，若该行是 `link:` 就打开那个路径的 `package.json` 读 `version`；`dsh` 命令不可用时改为直接问我插件版本。然后跑 `dsh-sup --version`：命令不存在，或打印的版本与那个字符串不是逐字一致，就把你看到的结果说出来，经我同意后再用 `npm i -g dsh-sup@<插件版本>` 装上。接着用 `dsh-sup --skill` 通读完整手册，据此在本终端新建或 attach 一个会话，并把安装步骤、版本必须逐字相同的耦合，以及 `new` / `attach <session-id>` / `list` / `--cwd` / `--pid`、`/status`、`/approve` / `/reject`、`/q` 的用法写进你 supervisor 工作用的 skill 或 AGENTS.md，末尾给出我下一步该敲的命令。
+先读出已装插件的版本：`dsh plugin --profile web list` 会打印 `dsh-supervision@<版本>`，若该行是 `link:` 就读那个路径 `package.json` 里的 `version`。然后跑 `dsh-sup --version`：命令不存在，或打印的不是那个逐字相同的字符串，就把结果说出来，经我同意后再装 `npm i -g dsh-sup@<插件版本>`。接着用 `dsh-sup --skill` 通读手册，以它为准：把转发器怎么用——版本耦合、安装与升级、以及手册里那些会话操作——记进你 supervisor 工作用的 skill、memory 或 AGENTS.md。现在不要新建或 attach 会话，这一步只是先弄懂怎么用。
 ```
 
 ## 如何上报

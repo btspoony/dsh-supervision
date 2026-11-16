@@ -1,4 +1,4 @@
 ---
 category: Changed
 ---
-- Both READMEs carry a one-prompt, all-in-one handoff for the agent that drives the supervisor's terminal: it resolves the plugin version, checks `dsh-sup` (including the not-installed case), asks before installing the exact version, reads `dsh-sup --skill`, and records the usage in its own supervisor-side skill or AGENTS.md.
+- Both READMEs carry a one-prompt handoff for the agent that drives the supervisor's terminal: it matches `dsh-sup` to the installed plugin version (including the not-installed case), reads `dsh-sup --skill` as the authority, and records the usage in its own supervisor-side skill, memory or AGENTS.md instead of repeating CLI details that the manual already owns.

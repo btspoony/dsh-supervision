@@ -168,10 +168,10 @@ The plugin ships a `use-dsh-supervision` skill, so the agent inside a supervised
 
 ### Supervisor-side agent
 
-That skill lives inside the supervised session. The agent that drives the supervisor's terminal needs the forwarder before that, and it may not have it installed at all. Paste this prompt into it first:
+Give this to the agent that drives the supervisor's terminal. It installs the forwarder that matches the installed plugin, reads the manual, and keeps that knowledge where it is still there in the next session:
 
 ```text
-Read the installed plugin's version first: `dsh plugin --profile web list` prints `dsh-supervision@<version>`, and for a `link:` row read `version` from that path's `package.json`; if the `dsh` command is unavailable, ask me for the plugin version instead. Then run `dsh-sup --version`. If the command is missing or the printed version is not that exact string, say what you found and, only after I agree, install it with `npm i -g dsh-sup@<plugin-version>`. Then read the whole manual with `dsh-sup --skill`, use it to create or attach a session in this terminal, and write the install step, the exact-version coupling and the `new` / `attach <session-id>` / `list` / `--cwd` / `--pid`, `/status`, `/approve` / `/reject` and `/q` usage into the skill or AGENTS.md you use for supervisor work, closing that section with the commands I should run next.
+Read the installed plugin's version first: `dsh plugin --profile web list` prints `dsh-supervision@<version>`, and for a `link:` row read `version` from that path's `package.json`. Then run `dsh-sup --version`. If the command is missing or prints anything other than that exact string, say what you found and, only after I agree, install it with `npm i -g dsh-sup@<plugin-version>`. Then run `dsh-sup --skill` and treat that printed manual as the authority: record how to use the forwarder — the version coupling, install and upgrade, and the session operations in the manual's own terms — in the skill, memory or AGENTS.md you use for supervisor work. Do not create or attach a session now; this is only about knowing how to use it before the work starts.
 ```
 
 ## How it reports
