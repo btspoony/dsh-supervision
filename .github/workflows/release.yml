@@ -221,10 +221,15 @@ jobs:
       # published packages' build output and the changelog notes. The version and
       # the dist-tag are not carried — the publish job re-derives both from the
       # same merge commit, which is deterministic and leaves nothing to drift.
+      #
+      # The attempt suffix is what keeps the resume contract above reachable:
+      # upload-artifact v4 artifacts are immutable and unique per run, so a
+      # whole-workflow re-run would fail here on the previous attempt's name and
+      # skip `publish` entirely.
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-build
+          name: release-build-${{ github.run_attempt }}
           path: |
             lib
             packages/cli/lib
@@ -264,7 +269,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-build
+          name: release-build-${{ github.run_attempt }}
           path: .
 
       # Both values are re-derived, not carried: the version is the manifest in
