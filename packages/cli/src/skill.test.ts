@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -34,11 +34,14 @@ test('--skill prints the manual with the frontmatter stripped and the version fi
 
 test('--skill names an unreadable manual on stderr and exits 2', () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-sup-skill-'));
-  const bin = fileURLToPath(new URL('../bin/dsh-sup.mjs', import.meta.url));
-  const manual = fileURLToPath(new URL('../skills/use-dsh-sup/SKILL.md', import.meta.url));
-  // A broken install, not a flag mistake: the packaged manual is gone.
-  const parked = `${manual}.parked`;
-  renameSync(manual, parked);
+  // A throwaway copy of the entry points without the packaged manual: a broken
+  // install, with nothing in the tree under test moved or touched.
+  const pkg = mkdtempSync(join(fileURLToPath(new URL('..', import.meta.url)), '.skill-test-'));
+  const bin = join(pkg, 'bin', 'dsh-sup.mjs');
+  mkdirSync(join(pkg, 'bin'), { recursive: true });
+  mkdirSync(join(pkg, 'lib'), { recursive: true });
+  copyFileSync(fileURLToPath(new URL('../bin/dsh-sup.mjs', import.meta.url)), bin);
+  copyFileSync(fileURLToPath(new URL('./main.js', import.meta.url)), join(pkg, 'lib', 'main.js'));
   try {
     const run = spawnSync(process.execPath, [bin, '--skill'], {
       env: { ...process.env, DSH_HOME: home },
@@ -49,7 +52,7 @@ test('--skill names an unreadable manual on stderr and exits 2', () => {
     assert.match(run.stderr, /^cannot read .*SKILL\.md: /);
     assert.equal(run.stderr.trimEnd().split('\n').length, 1, 'one stderr line');
   } finally {
-    renameSync(parked, manual);
+    rmSync(pkg, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
 });
