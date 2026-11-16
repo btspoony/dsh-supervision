@@ -907,6 +907,13 @@ function handlersFor(
    * that carries it, and a `/attach` or `/new` switch keeps the same process.
    */
   const pids = new WeakMap<Bridge, number>()
+  /**
+   * The newest bind on each bridge, so a bind whose catalog read was overtaken
+   * by a later bind on the same connection can tell — `bridged` is not written
+   * until that read returns, so it cannot answer this.
+   */
+  const bindSeq = new WeakMap<Bridge, number>()
+  let bindCount = 0
 
   /** Attach to a live agent, or resume one from persistence. */
   const bind = async (session: string): Promise<AgentLike> => {
@@ -1511,6 +1518,17 @@ function handlersFor(
     // keeps this function idempotent and independent of that ordering detail.
     if (previous !== undefined) release(previous)
 
+    // The newest bind on a bridge owns what its read returns. `bridged` cannot
+    // answer that yet: nothing is published until the read is done, so a later
+    // bind on this bridge would find no state to compare against.
+    const ticket = ++bindCount
+    bindSeq.set(bridge, ticket)
+    // The menu is read after the claim — a refused hello never pays for it.
+    const catalog = await catalogWithin(ctx)
+    // A later bind on this same connection replaced this one: it publishes its
+    // own state and sends its own root word, so nothing here may answer.
+    if (bindSeq.get(bridge) !== ticket) return 'superseded'
+
     const root = createRootState(config.app, titleFor(agent, process.cwd()))
     const state: BridgeState = {
       bridge,
@@ -1529,15 +1547,11 @@ function handlersFor(
       activityError: undefined,
       activityNotice: undefined,
     }
+    // Publish the state only now, with the menu in hand and no await left before
+    // the root word. Another bridge may already have the process-global listeners
+    // open, and a state they can see would emit a transcript or OSC frame ahead
+    // of the `welcome`/`announce` that introduces it.
     bridged.set(session, state)
-    // The menu is read after the claim — a refused hello never pays for it — and
-    // before any frame, so `welcome` and `catalog` still leave in one turn. No
-    // subscription is open yet, so nothing can send a frame while it waits.
-    const catalog = await catalogWithin(ctx)
-    // A later bind on this same connection owns the session now: it replaced this
-    // state and will send its own root word. Nothing here may answer, or a
-    // healthy connection reads as a refused one.
-    if (bridged.get(session) !== state) return 'superseded'
     openSubscriptions()
 
     // Read activity before any frame. The welcome stays turn-only, but a switch

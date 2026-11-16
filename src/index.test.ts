@@ -1687,6 +1687,39 @@ test('a bind a later one on the same connection replaced stays silent', async ()
   }
 })
 
+test('a claimed session reports nothing before its root word', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  // Bridge A opens the process-global listeners; bridge B is claimed while its
+  // own menu is still being read.
+  await attached(host, dir, 'session-1')
+  let release: () => void = () => {}
+  host.catalogWait = new Promise<void>(resolve => { release = resolve })
+  mock.timers.enable({ apis: ['setTimeout'] })
+  const b = new Client(await listening(dir))
+  await b.ready()
+
+  try {
+    b.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-2' })
+    await until(() => host.catalogLists === 2, 'the second bridge read to start')
+    // A live event for B lands inside that window: B has no state the listener
+    // loop can publish, so nothing may reach the wire before B's root word.
+    host.emit('session-2', { type: 'turn/start', data: { turn: 1 } })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(b.allFrames.length, 0, 'no frame before the root word')
+    release()
+    await until(() => catalogs(b).length === 1, 'the catalog behind the root word')
+    assert.deepEqual(b.allFrames.slice(0, 2).map(frame => frame.t), ['welcome', 'catalog'])
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
 test('a session switch resends the catalog once', async () => {
   const dir = tempDir()
   const host = new FakeHost()
