@@ -23,8 +23,10 @@ name: Release
 # that never publishes.
 #
 # Two jobs. `build` reads the merge commit and produces the publishable output
-# (install, guard, changelog gate, build, dist-tag) and declares NO permissions,
-# so it inherits none. `publish` holds `contents: write` + `id-token: write`
+# (install, guard, changelog gate, build, dist-tag) under an explicit
+# `permissions: contents: read`: a read-only token, no repository write and no
+# OIDC credential (`id-token` is never part of the default scopes, and this job
+# does not ask for it). `publish` holds `contents: write` + `id-token: write`
 # for the tag, the GitHub Release and npm's OIDC exchange, receives the built
 # output as an artifact, and installs nothing. A compromised dependency
 # lifecycle script or build tool in the first job has no token to mint and no
@@ -51,10 +53,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # No `permissions` key on purpose: this job defaults to none, which is what
-  # keeps the install, guard and build steps from holding a repository write or
-  # an OIDC credential.
+  # `contents: read` is declared, not omitted: an omitted `permissions` key
+  # means the repository/organization default applies, which may be read-write.
+  # Declaring it is what guarantees a read-only token for the install, guard and
+  # build steps — no repository write and no OIDC credential.
   build:
+    permissions:
+      contents: read
     # Trigger only on PRs opened by the Release prep workflow: merged, from
     # this repository's own `release/v*` branch, authored by the prep actor
     # (`github-actions[bot]` when prep pushes with GITHUB_TOKEN, or the
