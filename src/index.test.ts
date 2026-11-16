@@ -170,6 +170,8 @@ class FakeHost {
   skillsWithoutList = false
   /** Omits `ctx.skills.get`: a host that mounts only the menu half. */
   skillsWithoutGet = false
+  /** Omits `ctx.skills.registerProvider`: a read-only registry. */
+  skillsWithoutRegister = false
   /** Bodies `ctx.skills.get` answers, keyed by the skill name. */
   readonly skillBodies = new Map<string, { description: string; content: string }>()
   /** When set, `ctx.skills.list` rejects with this message. */
@@ -190,6 +192,8 @@ class FakeHost {
   readonly jobListeners = new Set<() => void>()
   /** When set, `ctx.jobs.list` throws with this message. */
   jobsListError: string | undefined = undefined
+  /** The `code` that thrown failure carries, when the host sets one. */
+  jobsListErrorCode: string | undefined = undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -273,10 +277,12 @@ class FakeHost {
         if (name === 'skills') {
           if (this.catalogSkills === undefined && this.skillBodies.size === 0) return undefined
           return {
-            registerProvider: () => {
-              if (this.skillRegisterError !== undefined) throw new Error(this.skillRegisterError)
-              return () => {}
-            },
+            ...(this.skillsWithoutRegister ? {} : {
+              registerProvider: () => {
+                if (this.skillRegisterError !== undefined) throw new Error(this.skillRegisterError)
+                return () => {}
+              },
+            }),
             ...(this.skillsWithoutList ? {} : {
               list: async () => {
                 this.catalogLists += 1
@@ -302,7 +308,11 @@ class FakeHost {
             ? undefined
             : {
                 list: () => {
-                  if (this.jobsListError !== undefined) throw new Error(this.jobsListError)
+                  if (this.jobsListError !== undefined) {
+                    const failure: Error & { code?: string } = new Error(this.jobsListError)
+                    if (this.jobsListErrorCode !== undefined) failure.code = this.jobsListErrorCode
+                    throw failure
+                  }
                   return this.jobRows ?? []
                 },
                 events: {
@@ -1932,12 +1942,70 @@ test('a host that never mounts the skills service says so once, when the window 
       mock.timers.tick(500)
       ticks += 1
     }
-    assert.deepEqual(written, ['dsh-supervision: skill unavailable: no skill service after 30000 ms\n'])
+    assert.deepEqual(written, [
+      'dsh-supervision: skill unavailable: no skill registry accepted a provider within 30000 ms\n',
+    ])
     assert.ok(ticks > 50, 'the line waited for the boot window, not the first poll')
 
     // A retry chain that outlived the window would write a second line here.
     for (let extra = 0; extra < 20; extra += 1) mock.timers.tick(500)
     assert.equal(written.length, 1, 'one line per boot, not one per retry')
+  } finally {
+    process.stderr.write = original
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+test('a read-only skill registry keeps the menu, and the closed window blames only the provider', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  host.skillBodies.set('use-dsh-sup', { description: 'drive the terminal', content: 'Full manual body\n' })
+  // `list` and `get` only: the shape this batch made independently usable.
+  host.skillsWithoutRegister = true
+  const written: string[] = []
+  const original = process.stderr.write
+  mock.timers.enable({ apis: ['setTimeout'] })
+  process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
+  try {
+    apply(host.ctx, config({ socketDir: dir }))
+    const client = await attached(host, dir, 'session-1')
+    try {
+      // Both halves answer without a provider, so the line must not say the
+      // service is missing: it names the one member the check looked for.
+      await until(() => catalogs(client).length === 1, 'the read-only menu')
+      client.write({ t: 'line', text: '/skill:use-dsh-sup' })
+      await until(() => host.steered.length === 1, 'the body the read-only lookup serves')
+      for (let tick = 0; tick < 70; tick += 1) mock.timers.tick(500)
+      assert.deepEqual(written, [
+        'dsh-supervision: skill unavailable: no skill registry accepted a provider within 30000 ms\n',
+      ])
+    } finally {
+      host.dispose()
+    }
+  } finally {
+    process.stderr.write = original
+    mock.timers.reset()
+  }
+})
+
+test('a disposed plugin stops its boot window before the expiry line can fire', () => {
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  const written: string[] = []
+  const original = process.stderr.write
+  mock.timers.enable({ apis: ['setTimeout'] })
+  process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
+  try {
+    apply(host.ctx, config({ socketDir: tempDir() }))
+    // The window is still open when the plugin goes: nothing to supervise.
+    for (let tick = 0; tick < 10; tick += 1) mock.timers.tick(500)
+    host.dispose()
+    // Disposal clears the chain, so the remaining window writes no stderr line.
+    for (let tick = 0; tick < 70; tick += 1) mock.timers.tick(500)
+    assert.deepEqual(written, [], 'a disposed plugin reports nothing')
   } finally {
     process.stderr.write = original
     mock.timers.reset()
@@ -2345,6 +2413,82 @@ test('a changed jobs-scan cause is announced again and the fresh cause is what s
       'two episodes, one line each',
     )
     assert.equal(lastRootFields(client).state, 'working', 'the known job still keeps the word')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a cause that only renames its duration is one episode, not one line per poll', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    host.jobsListError = 'scan timed out after 1200 ms'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: scan timed out after 1200 ms'), 'the first cause')
+
+    // The same timeout, reported with a different duration: the 2 s poll must
+    // not turn one episode into one line per scan.
+    host.jobsListError = 'scan timed out after 1500 ms'
+    host.emitJob()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      echoesOf(client).filter(text => text.startsWith('activity unavailable:')).length,
+      1,
+      'a renumbered duration is the same episode',
+    )
+
+    // A different cause is still news.
+    host.jobsListError = 'registry closed'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: registry closed'), 'the changed cause')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a coded failure is the episode, not the message it happens to carry', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    host.jobsListError = 'lock held by session-9'
+    host.jobsListErrorCode = 'ELOCKED'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: lock held by session-9'), 'the first cause')
+
+    // Same code, another id in the message: one episode, and the full message
+    // the operator already read is not replaced by a second one.
+    host.jobsListError = 'lock held by session-12'
+    host.emitJob()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      echoesOf(client).filter(text => text.startsWith('activity unavailable:')).length,
+      1,
+      'the code decides, not the id in the message',
+    )
+
+    // A different code under the same message is a new episode.
+    host.jobsListErrorCode = 'EBUSY'
+    host.emitJob()
+    await until(
+      () => echoesOf(client).filter(text => text.startsWith('activity unavailable:')).length === 2,
+      'the changed code',
+    )
   } finally {
     host.dispose()
   }

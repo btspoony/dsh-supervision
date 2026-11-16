@@ -307,6 +307,8 @@ interface BridgeState {
   jobs: readonly JobActivityView[]
   /** Why the last job scan failed, or undefined while scans succeed. */
   activityError: string | undefined
+  /** That cause's stable identity, so a reworded message is not a new episode. */
+  activityCause: string | undefined
   /** One pending echo about a degraded or recovered scan. */
   activityNotice: string | undefined
 }
@@ -334,6 +336,23 @@ function refusalCode(error: unknown, fallback: ErrorCode): ErrorCode {
   // shortcut: only POSIX lock errors are detected; a DSH-level writer lock would
   // need its own error class, add one when session persistence defines it.
   return code === 'ELOCKED' || code === 'EBUSY' || code === 'EEXIST' ? 'locked' : fallback
+}
+
+/**
+ * The stable identity of a failed scan. The message is what the operator reads,
+ * but it cannot decide a new episode on its own: a cause that names its timeout
+ * duration or a session id would re-announce on every 2 s poll. A coded error is
+ * identified by its code; otherwise by its message with the volatile numbers
+ * elided.
+ * @param error - the thrown value.
+ * @returns the key two scans of the same cause share.
+ */
+function causeKeyOf(error: unknown): string {
+  const code: unknown = error instanceof Error && 'code' in error ? error.code : undefined
+  if (typeof code === 'string' && code !== '') return `code:${code}`
+  // shortcut: numbers are the volatility seen in practice (durations, ids,
+  // ports); a message that varies in words still reads as a new episode.
+  return `message:${reasonOf(error).replace(/\d+(?:\.\d+)?/g, '#')}`
 }
 
 /** A DSH call failed in a way the forwarder can act on. */
@@ -827,6 +846,9 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   // a placeholder that lacks the member is still waited on, and a service that
   // never becomes usable leaves that surface unmounted rather than failing the
   // plugin.
+  // Tracked so disposal cancels the chain: a disposed plugin must not fire its
+  // expiry line into stderr minutes after nothing is left to supervise.
+  const bootTimers = new Set<ReturnType<typeof setTimeout>>()
   const whenService = (
     name: string,
     ready: (value: unknown) => boolean,
@@ -840,7 +862,11 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
       return
     }
     if (remaining > 0) {
-      const timer = setTimeout(() => { whenService(name, ready, use, remaining - 1, expire) }, BOOT_POLL_MS)
+      const timer = setTimeout(() => {
+        bootTimers.delete(timer)
+        whenService(name, ready, use, remaining - 1, expire)
+      }, BOOT_POLL_MS)
+      bootTimers.add(timer)
       // A host that never mounts the service must not keep the process alive.
       if (typeof timer === 'object' && 'unref' in timer) timer.unref()
     } else {
@@ -864,8 +890,13 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   }, attempts)
   whenService('skills', value => isSkillsLike(value), () => { registerSkill(ctx) }, attempts, () => {
     // The same channel a refused provider uses: the manual is what the operator
-    // loses either way, and silence would read as a host that mounted it.
-    process.stderr.write(`dsh-supervision: skill unavailable: no skill service after ${String(BOOT_WINDOW_MS)} ms\n`)
+    // loses either way, and silence would read as a host that mounted it. The
+    // line names what the check proves — no registry accepted a provider — not a
+    // missing service: a read-only registry still answers `list` and `get`, so
+    // "no skill service" would name a cause that is not true.
+    process.stderr.write(
+      `dsh-supervision: skill unavailable: no skill registry accepted a provider within ${String(BOOT_WINDOW_MS)} ms\n`,
+    )
   })
 
   // Read reflectively like the rest: a host without a skill registry still loads,
@@ -876,6 +907,8 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   ctx.effect(() => () => {
     // A disposed plugin cannot answer anything: the parked asks fail closed
     // before the sockets go, so no asker waits on a supervisor that is gone.
+    for (const timer of bootTimers) clearTimeout(timer)
+    bootTimers.clear()
     dispose()
     for (const transport of transports) void transport.close()
   })
@@ -1101,19 +1134,22 @@ function handlersFor(
     if (bridged.get(state.agent.session.id) !== state) return
     const jobs = jobsOf(ctx.get?.('jobs'))
     let jobRows: readonly JobViewLike[] | undefined
-    let problem: string | undefined
+    /** The message the operator reads, and the stable key a repeat is judged by. */
+    let failure: { readonly message: string; readonly cause: string } | undefined
     if (jobs !== undefined) {
       try {
         jobRows = jobs.list(state.agent.session.id)
       } catch (error) {
         // A failed scan must not read as "the family ended": that would drop the
         // root to done and count a fabricated leave when the service recovers.
-        problem = reasonOf(error)
+        failure = { message: reasonOf(error), cause: causeKeyOf(error) }
       }
     } else if (state.activityError !== undefined || state.jobs.length > 0) {
       // A host that never mounts jobs is the documented empty family; a service
-      // that had reported and is now gone is a degradation worth one line.
-      problem = state.activityError ?? 'no jobs service'
+      // that had reported and is now gone is a degradation worth one line. Its
+      // cause is the fixed literal, so it never repeats: the message printed is
+      // whatever the vanished service last said.
+      failure = { message: state.activityError ?? 'no jobs service', cause: 'no jobs service' }
     }
     const live = ctx.agents.list()
     const agents: AgentActivityView[] = live.map(agent => {
@@ -1138,14 +1174,19 @@ function handlersFor(
         ...(job.owner === undefined ? {} : { owner: job.owner }),
         status: job.status,
       }))
-    if (problem !== undefined) {
+    if (failure !== undefined) {
       // One line per degradation episode, and a changed cause is a new episode:
-      // keeping the first message would report a cause that no longer holds.
-      if (state.activityError !== problem) state.activityNotice = `activity unavailable: ${problem}`
-      state.activityError = problem
+      // the cause is compared by its stable key, so a message that only renames
+      // its id or duration is the same episode; the full message is what prints.
+      if (state.activityCause !== failure.cause) {
+        state.activityNotice = `activity unavailable: ${failure.message}`
+      }
+      state.activityError = failure.message
+      state.activityCause = failure.cause
     } else if (jobRows !== undefined) {
       if (state.activityError !== undefined) state.activityNotice = 'activity recovered'
       state.activityError = undefined
+      state.activityCause = undefined
       state.jobs = jobsView
     }
     const activity = activityOf(state.agent.session.id, { agents, jobs: jobsView })
@@ -1595,6 +1636,7 @@ function handlersFor(
       staleNoted: false,
       jobs: [],
       activityError: undefined,
+      activityCause: undefined,
       activityNotice: undefined,
     }
     // Publish the state only now, with the menu in hand and no await left before

@@ -194,7 +194,10 @@ export function stdoutWriter(stdout: StdoutLike = process.stdout): TtyWriter {
  * The width this process's terminal reports, when it reports one. `/dev/tty`
  * exposes no size to Node, so stdout — the same terminal whenever it is one, and
  * the fallback writer otherwise — is what the surface wraps at. A terminal with
- * no width (a pty before its first resize) leaves the protocol default.
+ * no width (a pty before its first resize) leaves the protocol default. A
+ * redirected stdout names no width either, even while `/dev/tty` is a real
+ * surface, so the in-process mirror then wraps at the protocol default of 100
+ * columns: the width is the one thing that surface cannot measure for itself.
  * @returns columns, or `undefined` when the terminal names none.
  */
 function terminalColumns(): number | undefined {
