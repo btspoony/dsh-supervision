@@ -375,6 +375,18 @@ behaviour; a process inside an hc terminal exposes no such surface at all.
 | `hc kill w1` | kills the forwarder only. The agent, session and browser GUI keep running; approvals return to the GUI answerer |
 | browser `reclaim` | host sends `bye/reclaimed` and drops that bridge only. Forwarder path: the socket closes, the forwarder writes `clear` and exits 0. tty path: the process writes `clear` and stays mounted for `/new` or `/attach` — it must not exit, because exiting would drop every session the host is running. Approvals return to the GUI immediately in both cases; the UI banner disappears on the next poll |
 
+`dsh-sup list` resolves a batch of failures, not one: it asks every live
+backend at once, so the exit must not depend on which answer arrived first. A
+failure with no code — a lost socket or a `bye` — outranks every coded refusal
+and exits `1`, because a code means that backend is alive and its exit would
+erase a backend that is really gone. When every failure carries a code, that
+code decides through `exitCodeFor`; two distinct codes tie-break by name, so
+the rule stays order-free. Every failure is attributed on stderr before the
+exit is computed: `<socket>: <reason>` for a lost or disposing backend and
+`<socket>: <code>: <message>` for a refusal, so a batch that exits on one
+failure still explains the others. `packages/cli/src/list.ts` implements this
+rule and points back here.
+
 No automatic reconnect: a restarted `dsh web` is a new process with a new
 socket; the supervisor starts a new forwarder. Reconnecting would silently
 rebind a session the supervisor no longer holds.
@@ -424,8 +436,12 @@ back to the person already looking at the session.
    it hosts.
 3. Approvals for that session and its subagent tree immediately fall back to the
    browser answerer; the next gated tool shows its normal card.
-4. Reconnecting is allowed: a new `dsh-sup` takes the session again and the
-   banner returns. There is no "do not reconnect" tombstone.
+4. Reconnecting is allowed, and the two paths rebind differently. Forwarder
+   path: a new `dsh-sup` takes the session again and the banner returns. tty
+   path: there is no process to restart — the bridge was torn down and the
+   transport stayed mounted, so the host, its socket and every session it hosts
+   keep running, and the operator types `/new` or `/attach` on the same
+   keyboard to bind again. There is no "do not reconnect" tombstone.
 
 This replaces the earlier "GUI receives no banner" decision: the state must be
 visible, and the person must have an explicit way back. What does **not** change
