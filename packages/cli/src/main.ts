@@ -35,8 +35,17 @@ async function main(argv: readonly string[]): Promise<number> {
   }
 
   // Informational output: answered before the registry, so it works with no live dsh web.
+  // A packaged file that cannot be read is a usage failure, not a crash: the
+  // message already names the file, and stdout stays untouched.
   if (parsed.kind === 'version' || parsed.kind === 'skill') {
-    process.stdout.write(parsed.kind === 'version' ? `${version()}\n` : skillText());
+    let text: string;
+    try {
+      text = parsed.kind === 'version' ? `${version()}\n` : skillText();
+    } catch (error) {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      return EXIT.usage;
+    }
+    process.stdout.write(text);
     return EXIT.ok;
   }
 

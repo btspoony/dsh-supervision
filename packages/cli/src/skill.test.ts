@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { EXIT } from './exit.js';
 import { skillText, version } from './skill.js';
 
 test('version is the packaged CLI version', () => {
@@ -29,6 +30,28 @@ test('--skill prints the manual with the frontmatter stripped and the version fi
   assert.ok(text.endsWith('\n') && !text.endsWith('\n\n'));
   assert.match(text, /dsh-sup --skill/);
   assert.match(text, /dsh-sup --version/);
+});
+
+test('--skill names an unreadable manual on stderr and exits 2', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-sup-skill-'));
+  const bin = fileURLToPath(new URL('../bin/dsh-sup.mjs', import.meta.url));
+  const manual = fileURLToPath(new URL('../skills/use-dsh-sup/SKILL.md', import.meta.url));
+  // A broken install, not a flag mistake: the packaged manual is gone.
+  const parked = `${manual}.parked`;
+  renameSync(manual, parked);
+  try {
+    const run = spawnSync(process.execPath, [bin, '--skill'], {
+      env: { ...process.env, DSH_HOME: home },
+      encoding: 'utf8',
+    });
+    assert.equal(run.status, EXIT.usage);
+    assert.equal(run.stdout, '');
+    assert.match(run.stderr, /^cannot read .*SKILL\.md: /);
+    assert.equal(run.stderr.trimEnd().split('\n').length, 1, 'one stderr line');
+  } finally {
+    renameSync(parked, manual);
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('both flags answer without a registry or live backend', () => {
