@@ -166,6 +166,14 @@ While a session is bridged the GUI marks it in the sidebar and over the input ar
 
 The plugin ships a `use-dsh-supervision` skill, so the agent inside a supervised session knows it needs the same-version `dsh-sup` forwarder, checks it with `dsh-sup --version`, and offers the install only after the user agrees. `dsh-sup --skill` prints the forwarder's full manual.
 
+### Supervisor-side agent
+
+That skill lives inside the supervised session. The agent that drives the supervisor's terminal needs the forwarder before that, and it may not have it installed at all. Paste this prompt into it first:
+
+```text
+Read the installed plugin's version first: `dsh plugin --profile web list` prints `dsh-supervision@<version>`, and for a `link:` row read `version` from that path's `package.json`; if the `dsh` command is unavailable, ask me for the plugin version instead. Then run `dsh-sup --version`. If the command is missing or the printed version is not that exact string, say what you found and, only after I agree, install it with `npm i -g dsh-sup@<plugin-version>`. Then read the whole manual with `dsh-sup --skill`, use it to create or attach a session in this terminal, and write the install step, the exact-version coupling and the `new` / `attach <session-id>` / `list` / `--cwd` / `--pid`, `/status`, `/approve` / `/reject` and `/q` usage into the skill or AGENTS.md you use for supervisor work, closing that section with the commands I should run next.
+```
+
 ## How it reports
 
 One `dsh web` process owns one session tree; the plugin mounts in it and opens its control socket, plus an in-process tty when the process runs inside a supervised terminal.

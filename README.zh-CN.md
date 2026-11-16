@@ -116,6 +116,14 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 插件自带 `use-dsh-supervision` 技能：被监督会话里的 agent 因此知道需要同版本的 `dsh-sup` 转发器，会用 `dsh-sup --version` 核对，并在用户同意后才提出安装。`dsh-sup --skill` 会打印转发器的完整手册。
 
+### 给 supervisor 侧 agent 的提示词
+
+那个技能活在被监督的会话里。控制 supervisor 终端的 agent 更早就要用上转发器，而且它可能压根还没装。先把这段提示词粘给它：
+
+```text
+先读出已装插件的版本：`dsh plugin --profile web list` 会打印 `dsh-supervision@<版本>`，若该行是 `link:` 就打开那个路径的 `package.json` 读 `version`；`dsh` 命令不可用时改为直接问我插件版本。然后跑 `dsh-sup --version`：命令不存在，或打印的版本与那个字符串不是逐字一致，就把你看到的结果说出来，经我同意后再用 `npm i -g dsh-sup@<插件版本>` 装上。接着用 `dsh-sup --skill` 通读完整手册，据此在本终端新建或 attach 一个会话，并把安装步骤、版本必须逐字相同的耦合，以及 `new` / `attach <session-id>` / `list` / `--cwd` / `--pid`、`/status`、`/approve` / `/reject`、`/q` 的用法写进你 supervisor 工作用的 skill 或 AGENTS.md，末尾给出我下一步该敲的命令。
+```
+
 ## 如何上报
 
 一个 `dsh web` 进程拥有一棵会话树，插件挂在其中，开控制套接口；当进程本身跑在被监督的终端里时，再叠加一条进程内 tty 通路。
