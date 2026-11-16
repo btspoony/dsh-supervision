@@ -405,6 +405,9 @@ function parseCatalogSkills(value: unknown): readonly CatalogSkill[] | undefined
   return skills
 }
 
+// Accepted but no longer produced: this forwarder renders no host command, yet an
+// older plugin paired with it still sends the section, so the field stays decodable
+// and `MAX_CATALOG_COMMANDS` / `MAX_CATALOG_ARGUMENT_HINT` still bound what it carries.
 function parseCatalogCommands(value: unknown): readonly CatalogCommand[] | undefined {
   if (!Array.isArray(value)) return undefined
   const commands: CatalogCommand[] = []
