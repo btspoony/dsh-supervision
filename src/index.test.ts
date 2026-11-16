@@ -1652,6 +1652,41 @@ test('a refused hello never waits for the catalog', async () => {
   }
 })
 
+test('a bind a later one on the same connection replaced stays silent', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  let release: () => void = () => {}
+  host.catalogWait = new Promise<void>(resolve => { release = resolve })
+  mock.timers.enable({ apis: ['setTimeout'] })
+
+  try {
+    // `/attach` is fire-and-forget, so its bind is still inside the catalog
+    // prefetch when the hello behind it binds the same session on the same
+    // connection. The older bind must vanish without answering.
+    client.write({ t: 'line', text: '/attach session-1' })
+    await until(() => host.catalogLists === 2, 'the switch read to start')
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+    await until(() => host.catalogLists === 3, 'the hello read to start')
+    release()
+    await until(() => client.allFrames.filter(frame => frame.t === 'welcome').length === 2, 'the newer welcome')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+
+    assert.deepEqual(client.allFrames.filter(frame => frame.t === 'error'), [], 'a superseded bind never reports busy')
+    assert.deepEqual(client.allFrames.filter(frame => frame.t === 'echo'), [], 'a superseded bind writes no failure echo')
+    assert.deepEqual(client.allFrames.slice(-2).map(frame => frame.t), ['welcome', 'catalog'], 'the newer bind welcomes')
+    assert.equal(client.socket.destroyed, false, 'the connection the newer bind owns stays open')
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the superseded bind')
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
 test('a session switch resends the catalog once', async () => {
   const dir = tempDir()
   const host = new FakeHost()
