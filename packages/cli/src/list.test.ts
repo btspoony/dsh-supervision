@@ -205,6 +205,7 @@ test('a mixed loss and refusal exits 1 whichever backend the registry yields fir
   // Both causes reach stderr, each naming its own socket: the exit reports the
   // loss, not the refusal, so the operator must still see the refusal.
   assert.ok(forward.stderr.includes(lost.socket), 'the loss names its backend');
+  assert.ok(forward.stderr.includes(refused.socket), 'the refusal names its backend too');
   assert.match(forward.stderr, /protocol: frame exceeds/);
 });
 

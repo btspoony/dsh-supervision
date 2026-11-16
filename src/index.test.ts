@@ -164,6 +164,10 @@ class FakeHost {
   workspaceRecords: { path: string; sessionIds: string[] }[] | undefined = undefined
   /** Rows `ctx.skills.list` answers; `undefined` hides the skill service. */
   catalogSkills: { name: string; description: string }[] | undefined = undefined
+  /** Omits `ctx.skills.list`: a host that mounts only the body lookup. */
+  skillsWithoutList = false
+  /** Omits `ctx.skills.get`: a host that mounts only the menu half. */
+  skillsWithoutGet = false
   /** Bodies `ctx.skills.get` answers, keyed by the skill name. */
   readonly skillBodies = new Map<string, { description: string; content: string }>()
   /** When set, `ctx.skills.list` rejects with this message. */
@@ -271,20 +275,24 @@ class FakeHost {
               if (this.skillRegisterError !== undefined) throw new Error(this.skillRegisterError)
               return () => {}
             },
-            list: async () => {
-              this.catalogLists += 1
-              if (this.catalogWait !== undefined) await this.catalogWait
-              if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
-              return this.catalogSkills ?? []
-            },
-            get: async (skill: string) => {
-              this.skillGets.push(skill)
-              if (this.skillGetWait !== undefined) await this.skillGetWait
-              const body = this.skillBodies.get(skill)
-              return body === undefined
-                ? undefined
-                : { name: skill, description: body.description, content: body.content }
-            },
+            ...(this.skillsWithoutList ? {} : {
+              list: async () => {
+                this.catalogLists += 1
+                if (this.catalogWait !== undefined) await this.catalogWait
+                if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
+                return this.catalogSkills ?? []
+              },
+            }),
+            ...(this.skillsWithoutGet ? {} : {
+              get: async (skill: string) => {
+                this.skillGets.push(skill)
+                if (this.skillGetWait !== undefined) await this.skillGetWait
+                const body = this.skillBodies.get(skill)
+                return body === undefined
+                  ? undefined
+                  : { name: skill, description: body.description, content: body.content }
+              },
+            }),
           }
         }
         if (name === 'jobs') {
@@ -2045,6 +2053,54 @@ test('/skill echoes an unknown name and a skill with no body, and steers neither
     await until(() => client.frames.length >= 3, 'the empty-body echo')
     assert.deepEqual(client.frames[2], { t: 'echo', text: 'skill blank has no content' })
     assert.equal(host.steered.length, 0, 'a failed skill never reaches the agent')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a host that mounts only the skill menu keeps the catalog and loses only /skill:', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  host.skillsWithoutGet = true
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    // The menu half stands on its own: `list` alone still fills the catalog.
+    await until(() => catalogs(client).length === 1, 'the catalog the menu half feeds')
+    assert.deepEqual(catalogs(client)[0]?.skills, [{ name: 'use-dsh-sup', description: 'drive the terminal' }])
+    // The other half degrades by itself, with the same honest echo.
+    client.write({ t: 'line', text: '/skill:use-dsh-sup' })
+    await until(() => client.frames.length >= 2, 'the injection refusal')
+    assert.deepEqual(client.frames[1], { t: 'echo', text: 'skill service unavailable' })
+    assert.equal(host.steered.length, 0)
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a host that mounts only the skill body lookup keeps /skill: and loses only the menu', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.skillBodies.set('use-dsh-sup', { description: 'drive the terminal', content: 'Full manual body\n' })
+  host.skillsWithoutList = true
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => catalogs(client).length === 1, 'the menu half that is absent')
+    assert.deepEqual(catalogs(client)[0]?.skills, [], 'no list means no menu rows')
+    // The body half still answers, so naming a skill by hand keeps working.
+    client.write({ t: 'line', text: '/skill:use-dsh-sup' })
+    await until(() => host.steered.length === 1, 'the injected body')
+    const [steer] = host.steered
+    assert.equal(
+      steer === undefined ? '' : steeredText(steer.message),
+      '# Skill: use-dsh-sup\n\ndrive the terminal\n\nFull manual body\n',
+    )
   } finally {
     host.dispose()
   }

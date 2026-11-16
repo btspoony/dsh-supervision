@@ -191,6 +191,19 @@ export function stdoutWriter(stdout: StdoutLike = process.stdout): TtyWriter {
 }
 
 /**
+ * The width this process's terminal reports, when it reports one. `/dev/tty`
+ * exposes no size to Node, so stdout — the same terminal whenever it is one, and
+ * the fallback writer otherwise — is what the surface wraps at. A terminal with
+ * no width (a pty before its first resize) leaves the protocol default.
+ * @returns columns, or `undefined` when the terminal names none.
+ */
+function terminalColumns(): number | undefined {
+  // Live, not a snapshot: a resize must reach the next block, not the next mount.
+  const columns: number | undefined = process.stdout.columns
+  return columns !== undefined && columns > 0 ? columns : undefined
+}
+
+/**
  * Opens the reporting surface and the owning keyboard.
  * @param stdin - the process's own stdin, or a stub in a test.
  * @param openWriter - the terminal writer opener; a stub stands in for `/dev/tty`.
@@ -225,6 +238,10 @@ export function openTtyIO(
     io: {
       write,
       lines: () => feed.lines(),
+      // Read per frame, so a resize reaches the blocks that follow it.
+      get columns(): number | undefined {
+        return terminalColumns()
+      },
       close: () => {
         if (closed) return
         closed = true

@@ -8,8 +8,8 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
-import { PROTO } from 'dsh-supervision-protocol'
-import type { HelloFrame } from 'dsh-supervision-protocol'
+import { PROTO, renderMirror } from 'dsh-supervision-protocol'
+import type { HelloFrame, MirrorItem } from 'dsh-supervision-protocol'
 import { lineFeed, openTtyIO, stdoutWriter } from './tty.js'
 import type { LineSource, TtyStdin } from './tty.js'
 import { TtyTransport } from './tty-transport.js'
@@ -49,6 +49,8 @@ class Latch {
 /** A terminal that records what it received and replays lines a test pushes. */
 class FakeTty implements TtyIO {
   readonly out: string[] = []
+  /** The width this terminal reports; `undefined` is a pty with no size yet. */
+  columns: number | undefined = undefined
   closes = 0
   /** When set, every write throws: a pty the process can no longer reach. */
   broken = false
@@ -155,6 +157,27 @@ test('send renders through renderFrame and drops frames the tty cannot show', as
   transport.send({ t: 'osc', data: '\u001b]7501;state=working\u001b\\' })
   transport.send({ t: 'sessions', items: [] })
   assert.deepEqual(io.out, ['hello\n', '\u001b]7501;state=working\u001b\\'])
+})
+
+test('a mirror block wraps at this terminal width, not the protocol default', async () => {
+  const io = new FakeTty()
+  io.columns = 20
+  const host = new Host()
+  const transport = new TtyTransport(io)
+  await transport.start(host.handlers)
+  io.out.length = 0
+
+  const item: MirrorItem = { k: 'user', text: 'one two three four five six seven eight' }
+  transport.send({ t: 'mirror', item })
+  // The in-process surface renders at its own width, exactly as the forwarder's
+  // route does with `process.stdout.columns`.
+  assert.deepEqual(io.out, [`${renderMirror(item, 20)}\n`])
+  assert.notEqual(io.out[0], `${renderMirror(item)}\n`, 'not the protocol default')
+
+  // A terminal that reports no width keeps the protocol default, not width one.
+  io.columns = undefined
+  transport.send({ t: 'mirror', item })
+  assert.deepEqual(io.out[1], `${renderMirror(item)}\n`)
 })
 
 test('a frame addressed to another session is not written', async () => {
@@ -563,6 +586,30 @@ test('openTtyIO fails closed when stdin is not a terminal', () => {
   no.isTTY = false
   assert.equal(openTtyIO(no as TtyStdin).ok, false)
   assert.equal(no.listenerCount('data'), 0)
+})
+
+test('openTtyIO carries the terminal width the mirror renders at', () => {
+  const stdout = process.stdout as { columns?: number }
+  const own = Object.getOwnPropertyDescriptor(stdout, 'columns')
+  const stdin = new FakeStdin()
+  const open = (): ReturnType<typeof openTtyIO> => openTtyIO(stdin as TtyStdin, () => ({
+    ok: true,
+    writer: { write: () => true, close: () => {} },
+  }))
+
+  try {
+    Object.defineProperty(stdout, 'columns', { value: 37, configurable: true })
+    const sized = open()
+    assert.equal(sized.ok && sized.io.columns, 37)
+    // A terminal with no reported width leaves the renderer on the protocol
+    // default instead of wrapping at width one.
+    Object.defineProperty(stdout, 'columns', { value: undefined, configurable: true })
+    const unsized = open()
+    assert.equal(unsized.ok && unsized.io.columns, undefined)
+  } finally {
+    if (own === undefined) delete stdout.columns
+    else Object.defineProperty(stdout, 'columns', own)
+  }
 })
 
 test('a mounted bridge never puts the terminal into raw mode', async () => {

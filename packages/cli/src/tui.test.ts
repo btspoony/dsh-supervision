@@ -39,6 +39,7 @@ import {
   editorTheme,
   oscStatus,
   renderEntry,
+  clipStyled,
   afterAppend,
   chooseSurface,
   echoStatus,
@@ -547,6 +548,31 @@ test('a user entry keeps its text down to one column', () => {
       }
     }
   }
+});
+
+test('a clipped row gains one reset only when the cut leaves a style open', () => {
+  const plain = 'abcdefghij';
+  // Nothing was open, so nothing may be closed: the plain row keeps no escape.
+  assert.equal(clipStyled(plain, 4), 'abcd');
+  // A styled row carries its open SGR through the cut, so exactly one reset closes it.
+  assert.equal(clipStyled(`\x1b[2m${'x'.repeat(20)}`, 4), `\x1b[2mxxxx\x1b[0m`);
+  // A row that already fits is returned byte for byte.
+  assert.equal(clipStyled('ok', 4), 'ok');
+  // The reset is bounded to the clipped line: one per line, never two.
+  const clipped = clipStyled(`\x1b[48;5;236m${'y'.repeat(20)}`, 10);
+  assert.equal(clipped.split('\x1b[0m').length - 1, 1);
+  assert.ok(visibleWidth(clipped) <= 10);
+});
+
+test('the operator line renders as Markdown, the format the transcript uses', () => {
+  const color = createTheme({ color: true });
+  const rendered = renderEntry({ k: 'user', text: '# Plan\n\nuse **bold** text' }, 40, color).join('\n');
+  // Accepted by decision (I-000025): owner text is Markdown on every surface, so
+  // the heading marker is parsed rather than printed and inline bold is styled.
+  assert.doesNotMatch(rendered, /#/);
+  assert.doesNotMatch(rendered, /\*\*/);
+  assert.match(rendered, /Plan/);
+  assert.match(rendered, /\x1b\[1m/);
 });
 
 test('widths 1, 3, 10 and 40 keep every entry readable and inside the viewport', () => {

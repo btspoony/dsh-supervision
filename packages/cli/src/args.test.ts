@@ -64,7 +64,12 @@ test('--version and --skill are terminal flags that take no operand', () => {
   assert.deepEqual(parseArgs(['--version'], base), { kind: 'version' });
   assert.deepEqual(parseArgs(['--skill'], base), { kind: 'skill' });
   for (const argv of [['new', '--version'], ['--skill', '--pid', '7'], ['--skill', 'list']]) {
-    assert.equal(parseArgs(argv, base).kind, 'usage', `argv: ${argv.join(' ')}`);
+    const parsed = parseArgs(argv, base);
+    assert.equal(parsed.kind, 'usage', `argv: ${argv.join(' ')}`);
+    // A flag the usage lists is refused for its placement, not as a typo.
+    const reason = parsed.kind === 'usage' ? parsed.reason : '';
+    assert.match(reason, /must be used alone/, `argv: ${argv.join(' ')}`);
+    assert.doesNotMatch(reason, /unknown option/, `argv: ${argv.join(' ')}`);
   }
 });
 

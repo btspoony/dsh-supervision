@@ -414,12 +414,6 @@ function presetsOf(value: unknown): AgentPresetsLike | undefined {
   return value as AgentPresetsLike
 }
 
-/** One `ctx.skills.list` row: the menu fields only, never the body. */
-interface SkillSummaryLike {
-  readonly name: string
-  readonly description: string
-}
-
 /** One skill as `ctx.skills.get` returns it: the body `/skill:` injects. */
 interface SkillDefinitionLike {
   readonly name: string
@@ -427,17 +421,20 @@ interface SkillDefinitionLike {
   readonly content: string
 }
 
-/** The `ctx.skills` read surface: the menu rows and one skill's body. */
-interface SkillsLike {
-  list(options?: unknown): Promise<readonly SkillSummaryLike[]>
+/**
+ * The `ctx.skills` half a `/skill:` line needs: one body by name. The menu is
+ * the other half (`list`, read by `catalogOf`), and each degrades on its own —
+ * a host that mounts only one of them keeps that surface.
+ */
+interface SkillLookupLike {
   get(name: string, options?: unknown): Promise<SkillDefinitionLike | undefined>
 }
 
-/** @returns the host's skill catalog, when a usable one is mounted. */
-function skillsOf(value: unknown): SkillsLike | undefined {
+/** @returns the host's skill lookup, when the mounted service can answer a body. */
+function skillLookupOf(value: unknown): SkillLookupLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const { list, get } = value as { list?: unknown; get?: unknown }
-  return typeof list === 'function' && typeof get === 'function' ? value as SkillsLike : undefined
+  const get = (value as { get?: unknown }).get
+  return typeof get === 'function' ? value as SkillLookupLike : undefined
 }
 
 /** @returns the host's workspace registry, when a usable one is mounted. */
@@ -557,7 +554,9 @@ async function catalogWithin(ctx: PluginContext): Promise<Catalog> {
   })
   try {
     return await Promise.race([
-      catalogOf({ skills: skillsOf(ctx.get?.('skills')) }),
+      // The raw service: `catalogOf` reads only `list`, so a host that mounts
+      // the menu without a body lookup still contributes its rows.
+      catalogOf({ skills: ctx.get?.('skills') }),
       deadline,
     ])
   } finally {
@@ -1766,7 +1765,7 @@ function handlersFor(
           )
           return
         case 'skill': {
-          const skills = skillsOf(ctx.get?.('skills'))
+          const skills = skillLookupOf(ctx.get?.('skills'))
           if (skills === undefined) {
             bridge.send({ t: 'echo', text: 'skill service unavailable' })
             return

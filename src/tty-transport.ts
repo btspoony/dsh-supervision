@@ -21,6 +21,12 @@ export interface TtyIO {
   write(text: string): boolean
   /** Complete input lines from the owning keyboard, already split. */
   lines(): AsyncIterable<string>
+  /**
+   * This terminal's width in columns, or `undefined` when it reports none. A
+   * mirror block wraps at it instead of the protocol default, so a narrow
+   * terminal gets its own width the way the forwarder path does.
+   */
+  readonly columns?: number | undefined
   /** Release the terminal; idempotent. */
   close(): void
 }
@@ -153,7 +159,9 @@ export class TtyTransport implements Transport {
     // A dead surface has nothing left to say, and a failing write must never
     // reach the host that called `send`.
     if (this.#dead) return
-    const bytes = renderFrame(frame)
+    // This surface's own width: the forwarder path reads its terminal the same
+    // way, and a mirror wrapped at the protocol default would overflow here.
+    const bytes = renderFrame(frame, this.#io.columns)
     if (bytes === undefined) return
     let written: boolean
     try {

@@ -25,7 +25,8 @@ export const usageText = [
  */
 export function parseArgs(argv: readonly string[], base: string): Parsed {
   // The informational flags are terminal and take no operand, so they are only
-  // valid alone; anywhere else they stay unknown options.
+  // valid alone. Beside another argument they are refused as "used alone" rather
+  // than as an unknown option: `usageText` lists them, so a typo is not the fault.
   if (argv.length === 1 && argv[0] === '--version') return { kind: 'version' };
   if (argv.length === 1 && argv[0] === '--skill') return { kind: 'skill' };
 
@@ -41,6 +42,9 @@ export function parseArgs(argv: readonly string[], base: string): Parsed {
       continue;
     }
     if (arg !== '--pid' && arg !== '--cwd') {
+      if (arg === '--version' || arg === '--skill') {
+        return { kind: 'usage', reason: `${arg} must be used alone` };
+      }
       if (arg.startsWith('-')) return { kind: 'usage', reason: `unknown option ${arg}` };
       words.push(arg);
       continue;
