@@ -657,21 +657,16 @@ const SAMPLE: Catalog = {
     { name: 'use-dsh-supervision', description: 'supervised session guide' },
     { name: 'grill-me', description: 'stress-test a plan' },
   ],
-  commands: [
-    { name: 'status', description: 'show session state' },
-    { name: 'approve', description: 'answer a parked ask', argumentHint: '<ask-id>' },
-  ],
+  commands: [],
 };
 
-test('the catalog becomes one skill entry per skill plus one per host command', () => {
+test('the catalog becomes one skill entry per skill plus the local exits', () => {
   const entries = autocompleteCatalog(SAMPLE);
   assert.deepEqual(
     entries.map((entry) => entry.name),
-    ['skill:use-dsh-sup', 'skill:use-dsh-supervision', 'skill:grill-me', 'status', 'approve', 'q', 'quit', 'exit', 'bye'],
+    ['skill:use-dsh-sup', 'skill:use-dsh-supervision', 'skill:grill-me', ...LOCAL_EXITS],
   );
   assert.equal(entries[0]?.description, 'run the forwarder');
-  assert.equal(entries[4]?.argumentHint, '<ask-id>', 'the host argument hint is passed through');
-  assert.equal(entries[3]?.argumentHint, undefined);
   // The forwarder's own exits close the menu, so a host with no vocabulary
   // still offers a way out that the operator can discover.
   const local = entries.slice(-LOCAL_EXITS.length);
@@ -683,6 +678,20 @@ test('the catalog becomes one skill entry per skill plus one per host command', 
     empty.every((entry) => entry.getArgumentCompletions === undefined),
     'a local exit takes no argument',
   );
+});
+
+test('a skill name outside the plugin grammar never reaches the menu', () => {
+  const catalog: Catalog = {
+    skills: [
+      { name: 'foo:bar', description: 'a colon inside the name' },
+      { name: '-lead', description: 'a leading dash' },
+      { name: 'ok-skill', description: 'the only admissible row' },
+    ],
+    commands: [],
+  };
+  // Both rejected rows would otherwise be advertised as a slash command that
+  // parseLine answers with an unknown command.
+  assert.deepEqual(autocompleteCatalog(catalog).map((entry) => entry.name), ['skill:ok-skill', ...LOCAL_EXITS]);
 });
 
 test('the skill argument completions filter by prefix', async () => {
@@ -703,7 +712,6 @@ test('the provider lists skills for / and narrows to skills for /skill:', async 
   const signal = new AbortController().signal;
   const root = await provider.getSuggestions(['/'], 0, 1, { signal });
   assert.deepEqual(root?.items.map((item) => item.value).sort(), [
-    'approve',
     'bye',
     'exit',
     'q',
@@ -711,7 +719,6 @@ test('the provider lists skills for / and narrows to skills for /skill:', async 
     'skill:grill-me',
     'skill:use-dsh-sup',
     'skill:use-dsh-supervision',
-    'status',
   ]);
   assert.equal(root?.prefix, '/');
 
@@ -813,20 +820,10 @@ test('catalog rows with control bytes never reach the menu', async () => {
       { name: 'evil\nsplit', description: 'newline in the name' },
       { name: 'bad-desc', description: 'x\u001b]52;c;aGk=\u0007' },
     ],
-    commands: [
-      { name: 'safe', description: 'plain command', argumentHint: '<arg>' },
-      { name: 'bad-hint', description: 'plain', argumentHint: '<\u001b[2J>' },
-    ],
+    commands: [],
   };
   const entries = autocompleteCatalog(hostile);
-  assert.deepEqual(entries.map((entry) => entry.name), [
-    'skill:safe-skill',
-    'safe',
-    'bad-hint',
-    ...LOCAL_EXITS,
-  ]);
-  // Only the control-free hint survives.
-  assert.equal(entries[2]?.argumentHint, undefined);
+  assert.deepEqual(entries.map((entry) => entry.name), ['skill:safe-skill', ...LOCAL_EXITS]);
   for (const entry of entries) {
     assert.equal(entry.name.includes('\u001b'), false);
     assert.equal((entry.description ?? '').includes('\u001b'), false);

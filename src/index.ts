@@ -293,8 +293,6 @@ interface BridgeState {
   readonly calls: Map<string, CallRecord>
   /** Set only while an attach is replaying its session's persisted log. */
   replay?: ReplayWindow
-  /** This bind's catalog frame, in flight; `hello` awaits it before replay. */
-  catalog?: Promise<void>
   /** The non-turn families still running for this root. */
   activity: Activity
   /** Epoch milliseconds of the last activity identity change, for the stale guard. */
@@ -554,7 +552,7 @@ type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure
 async function catalogWithin(ctx: PluginContext): Promise<Catalog> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<Catalog>(resolve => {
-    timer = setTimeout(() => { resolve({ skills: [], commands: [] }) }, CATALOG_TIMEOUT_MS)
+    timer = setTimeout(() => { resolve({ skills: [], commands: [] }) }, CATALOG_PREFETCH_MS)
     if (typeof timer === 'object' && 'unref' in timer) timer.unref()
   })
   try {
@@ -761,10 +759,11 @@ const BOOT_POLL_MS = 500
  */
 const HISTORY_READ_TIMEOUT_MS = 4_000
 /**
- * How long the catalog may hold the wire behind the root word. A menu is a
- * convenience: half a conversation replayed late is not worth a hanging attach.
+ * How long the catalog read may delay the root word. The read sits inside the
+ * forwarder's 5 s reply deadline, so a menu — a convenience — is worth a short
+ * wait, never a late `welcome` that reads as a lost backend.
  */
-const CATALOG_TIMEOUT_MS = 2_000
+const CATALOG_PREFETCH_MS = 250
 /**
  * How often an active bridge re-reads the host's activity. Host events decide
  * when to look immediately; the poll only catches what never announced itself.
@@ -908,6 +907,13 @@ function handlersFor(
    * that carries it, and a `/attach` or `/new` switch keeps the same process.
    */
   const pids = new WeakMap<Bridge, number>()
+  /**
+   * The newest bind on each bridge, so a bind whose catalog read was overtaken
+   * by a later bind on the same connection can tell — `bridged` is not written
+   * until that read returns, so it cannot answer this.
+   */
+  const bindSeq = new WeakMap<Bridge, number>()
+  let bindCount = 0
 
   /** Attach to a live agent, or resume one from persistence. */
   const bind = async (session: string): Promise<AgentLike> => {
@@ -1324,15 +1330,13 @@ function handlersFor(
   }
 
   /**
-   * Send one bridge's catalog frame: once per bind and once per switch, behind
-   * the root word. Bounded by `catalogWithin`, so a slow service costs the
-   * attach a short wait and nothing else.
+   * Send one bridge's catalog frame: once per bind and once per switch, in the
+   * same turn as the root word. The payload is already read, so no await can
+   * separate the two and leave the menu empty on a `/` pressed at once.
    * @param state - the bridge that just took the session.
+   * @param catalog - the payload `establish` read before the root word.
    */
-  const sendCatalog = async (state: BridgeState): Promise<void> => {
-    const catalog = await catalogWithin(ctx)
-    // A switch during the fetch owns the bridge now; this menu is not its own.
-    if (bridged.get(state.agent.session.id) !== state) return
+  const sendCatalog = (state: BridgeState, catalog: Catalog): void => {
     // The codec refuses an oversized frame by closing the bridge, so the one
     // frame that must never fail is proven here; a menu that still cannot fit
     // is replaced by the empty one rather than costing the operator the attach.
@@ -1491,21 +1495,55 @@ function handlersFor(
    * @param agent - the session now under supervision.
    * @param bridge - the connection that drives it.
    * @param greet - `welcome` only for `hello`; the forwarder pumps stdin on it.
+   * @returns `bound` when this bridge now owns the session, `busy` when another
+   *   bridge does, and `superseded` when a later bind on this same bridge
+   *   replaced it while the menu was being read — that bind owns everything.
    */
-  const establish = (agent: AgentLike, bridge: Bridge, greet: 'welcome' | 'root'): boolean => {
+  const establish = async (
+    agent: AgentLike,
+    bridge: Bridge,
+    greet: 'welcome' | 'root',
+  ): Promise<'bound' | 'busy' | 'superseded'> => {
     const session = agent.session.id
     // The shared table is the single-owner rule across both surfaces: a claim
     // that only checks its own transport cannot see the other one, and two
     // racing hellos would last-write-wins. Refuse before any state is touched.
     const held = bridged.get(session)
-    if (held !== undefined && held.bridge !== bridge) return false
+    if (held !== undefined && held.bridge !== bridge) return 'busy'
     const previous = bridge.session
     // The claim is what makes a session single-owner and it precedes every
     // frame, so a racing second forwarder is refused rather than half-bound.
-    if (!bridge.claim(session)) return false
+    if (!bridge.claim(session)) return 'busy'
     // The transport releases the old session on a switch; repeating it here
     // keeps this function idempotent and independent of that ordering detail.
-    if (previous !== undefined) release(previous)
+    // Only this bridge's own entry may go: the name comes from the transport, and
+    // a bind that is about to be refused must not delete the surface that won.
+    if (previous !== undefined && bridged.get(previous)?.bridge === bridge) release(previous)
+
+    // The newest bind on a bridge owns what its read returns. `bridged` cannot
+    // answer that yet: nothing is published until the read is done, so a later
+    // bind on this bridge would find no state to compare against.
+    const ticket = ++bindCount
+    bindSeq.set(bridge, ticket)
+    // The menu is read after the claim — a refused hello never pays for it.
+    const catalog = await catalogWithin(ctx)
+    // A later bind on this same connection replaced this one: it publishes its
+    // own state and sends its own root word, so nothing here may answer.
+    // Superseded is not a lost claim: the newer bind on this same bridge holds
+    // it, and unclaiming here would clear that bind's session instead.
+    if (bindSeq.get(bridge) !== ticket) return 'superseded'
+    // Another surface may have bound this session while the menu was read. The
+    // shared table is the only single-owner rule across transports, and this bind
+    // has published nothing yet, so the check belongs here: no await follows it
+    // before `bridged.set`, so one of two racing surfaces wins and the other
+    // reports busy — nothing is constructed, sent or closed by the loser.
+    const rival = bridged.get(session)
+    if (rival !== undefined && rival.bridge !== bridge) {
+      // Refusing gives the transport claim back: without it the next line on
+      // this connection would resolve to the winner's state and steer it.
+      bridge.unclaim(session)
+      return 'busy'
+    }
 
     const root = createRootState(config.app, titleFor(agent, process.cwd()))
     const state: BridgeState = {
@@ -1525,6 +1563,10 @@ function handlersFor(
       activityError: undefined,
       activityNotice: undefined,
     }
+    // Publish the state only now, with the menu in hand and no await left before
+    // the root word. Another bridge may already have the process-global listeners
+    // open, and a state they can see would emit a transcript or OSC frame ahead
+    // of the `welcome`/`announce` that introduces it.
     bridged.set(session, state)
     openSubscriptions()
 
@@ -1549,6 +1591,10 @@ function handlersFor(
     } else {
       announce(state)
     }
+    // The menu follows every root word, bind and switch alike. No await sits
+    // between the two frames, so the forwarder cannot see a `/` pressed into a
+    // menu that is still empty.
+    sendCatalog(state, catalog)
     // A child report alone sets `reported`, so children follow the root word.
     seedChildren(state)
     // The snapshot is already in hand; report it once the root word has gone out.
@@ -1562,10 +1608,7 @@ function handlersFor(
         // A service that cannot subscribe still lists; the poll covers it.
       }
     }
-    // The menu follows every root word, bind and switch alike. `hello` awaits
-    // this promise so the replay can never overtake the catalog.
-    state.catalog = sendCatalog(state)
-    return true
+    return 'bound'
   }
 
   /**
@@ -1615,7 +1658,11 @@ function handlersFor(
 
       // The early attach check above is the fast path; this one catches a hello
       // that raced another bridge into the shared table while it was binding.
-      if (!establish(agent, bridge, 'welcome')) {
+      const outcome = await establish(agent, bridge, 'welcome')
+      // The later bind on this connection already owns it and sends its own root
+      // word; this hello has nothing left to say and must not close the socket.
+      if (outcome === 'superseded') return
+      if (outcome === 'busy') {
         bridge.send({
           t: 'error',
           code: 'busy',
@@ -1628,13 +1675,10 @@ function handlersFor(
       const state = bridged.get(session)
       if (state === undefined) return
       // The attach arm replays the persisted log; a fresh session has none. The
-      // window opens before anything awaits, so a live event that lands during
-      // the catalog fetch or the log read waits behind the replay instead of
-      // being lost — and the catalog itself is awaited so the menu precedes the
-      // transcript it describes.
-      const window = 'attach' in frame ? armReplay(state) : undefined
-      await state.catalog
-      if (window === undefined) return
+      // window opens before the read awaits, so a live event that lands during
+      // it waits behind the replay instead of being lost.
+      if (!('attach' in frame)) return
+      const window = armReplay(state)
       finishReplay(session, window, await readLog(ctx, session))
     },
 
@@ -1671,8 +1715,9 @@ function handlersFor(
             return
           }
           void create(cwd).then(
-            agent => {
-              if (!establish(agent, bridge, 'root')) {
+            async agent => {
+              // A superseded bind stays silent: the later one owns the connection.
+              if (await establish(agent, bridge, 'root') === 'busy') {
                 bridge.send({ t: 'echo', text: `new failed: session ${agent.session.id} is already bridged` })
               }
             },
@@ -1683,8 +1728,9 @@ function handlersFor(
         case 'attach':
           if (refuseWhileParked(state)) return
           void bind(command.session).then(
-            agent => {
-              if (!establish(agent, bridge, 'root')) {
+            async agent => {
+              // A superseded bind stays silent: the later one owns the connection.
+              if (await establish(agent, bridge, 'root') === 'busy') {
                 bridge.send({ t: 'echo', text: `attach failed: session ${agent.session.id} is already bridged` })
               }
             },

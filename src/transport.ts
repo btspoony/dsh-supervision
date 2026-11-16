@@ -40,6 +40,12 @@ export interface Bridge {
    * @returns true when the session is now bound here.
    */
   claim(session: string): boolean
+  /**
+   * Gives a claim back after `claim` already succeeded. A bind that ends up
+   * refusing the session must not leave this bridge naming it, or its next line
+   * resolves to whichever surface actually owns the session.
+   */
+  unclaim(session: string): void
   send(frame: OutFrame): void
   close(): void
   /** True only for the tty's synthesized first hello, which may wait for the factory. */
@@ -80,10 +86,16 @@ class Connection implements Bridge {
   #queue: Promise<void> = Promise.resolve()
   readonly socket: Socket
   readonly #bind: (connection: Connection, session: string) => boolean
+  readonly #unbind: (connection: Connection, session: string) => void
 
-  constructor(socket: Socket, bind: (connection: Connection, session: string) => boolean) {
+  constructor(
+    socket: Socket,
+    bind: (connection: Connection, session: string) => boolean,
+    unbind: (connection: Connection, session: string) => void,
+  ) {
     this.socket = socket
     this.#bind = bind
+    this.#unbind = unbind
   }
 
   claim(session: string): boolean {
@@ -91,6 +103,10 @@ class Connection implements Bridge {
     this.send({ t: 'error', code: 'busy', message: `session ${session} is already bridged` })
     this.close()
     return false
+  }
+
+  unclaim(session: string): void {
+    this.#unbind(this, session)
   }
 
   send(frame: OutFrame): void {
@@ -219,7 +235,11 @@ export class SocketTransport implements Transport {
   }
 
   #accept(socket: Socket): void {
-    const connection = new Connection(socket, (subject, session) => this.#claim(subject, session))
+    const connection = new Connection(
+      socket,
+      (subject, session) => this.#claim(subject, session),
+      (subject, session) => { this.#unclaim(subject, session) },
+    )
     this.#connections.add(connection)
     socket.setEncoding('utf8')
     socket.on('data', (chunk: string) => { this.#read(connection, chunk) })
@@ -245,6 +265,17 @@ export class SocketTransport implements Transport {
       this.#handlers?.bye(previous)
     }
     return true
+  }
+
+  /**
+   * Give one claim back. The table must stop naming a connection that refused
+   * the session, or a later attach to it would be refused as `busy` here for a
+   * session this transport no longer owns.
+   */
+  #unclaim(connection: Connection, session: string): void {
+    if (this.#bridged.get(session) !== connection) return
+    this.#bridged.delete(session)
+    if (connection.session === session) connection.session = undefined
   }
 
   #read(connection: Connection, chunk: string): void {

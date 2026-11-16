@@ -172,6 +172,8 @@ class FakeHost {
   skillRegisterError: string | undefined = undefined
   /** When set, `ctx.skills.list` holds its answer until this resolves. */
   catalogWait: Promise<void> | undefined = undefined
+  /** How many times `ctx.skills.list` was entered, pinned read or not. */
+  catalogLists = 0
   /** Every skill name `ctx.skills.get` was asked for, in call order. */
   readonly skillGets: string[] = []
   /** When set, `ctx.skills.get` holds its answer until this resolves. */
@@ -270,6 +272,7 @@ class FakeHost {
               return () => {}
             },
             list: async () => {
+              this.catalogLists += 1
               if (this.catalogWait !== undefined) await this.catalogWait
               if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
               return this.catalogSkills ?? []
@@ -516,6 +519,7 @@ test('enabled: false registers nothing at all', async () => {
 class FakeTty implements TtyIO {
   readonly out: string[] = []
   closes = 0
+  readonly #pending: string[] = []
   #wake: (() => void) | undefined
   #ended = false
 
@@ -530,9 +534,24 @@ class FakeTty implements TtyIO {
     this.#wake?.()
   }
 
+  /** Type one operator line into this terminal. */
+  feed(line: string): void {
+    this.#pending.push(line)
+    this.#wake?.()
+  }
+
   async *lines(): AsyncGenerator<string> {
-    // No keystrokes: the read loop parks until the transport closes.
-    while (!this.#ended) await new Promise<void>(resolve => { this.#wake = resolve })
+    // No keystrokes unless fed: the read loop parks until one arrives or the
+    // transport closes.
+    for (;;) {
+      const line = this.#pending.shift()
+      if (line !== undefined) {
+        yield line
+        continue
+      }
+      if (this.#ended) return
+      await new Promise<void>(resolve => { this.#wake = resolve })
+    }
   }
 }
 
@@ -1588,6 +1607,231 @@ test('a catalog frame follows welcome once and precedes the replayed history', a
   }
 })
 
+test('welcome waits for the catalog, so the menu is there when stdin pumps', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  // The read never answers on its own: only the mocked budget frees `welcome`,
+  // so no real-time window can decide this test.
+  host.catalogWait = new Promise<void>(() => {})
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  mock.timers.enable({ apis: ['setTimeout'] })
+
+  try {
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+    // The forwarder pumps stdin on `welcome`, so a menu still being read would be
+    // open to a `/` pressed on the readiness signal.
+    await until(() => host.catalogLists === 1, 'the catalog read to start')
+    assert.equal(client.allFrames.length, 0, 'no frame while the catalog is being read')
+    mock.timers.tick(249)
+    assert.equal(client.allFrames.length, 0, 'no frame before the budget expires')
+    mock.timers.tick(1)
+    await until(() => client.allFrames.length >= 2, 'the welcome and its catalog')
+    assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog'])
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+test('a refused hello never waits for the catalog', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  // A mounted skill service, so a read of the catalog would have something to wait on.
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const held = await attached(host, dir, 'session-1')
+  const mover = await attached(host, dir, 'session-2')
+
+  try {
+    // From here a catalog read could only finish by the mocked budget, so an echo
+    // that arrives proves the refusal ran before any read.
+    host.catalogWait = new Promise<void>(() => {})
+    const reads = host.catalogLists
+    mock.timers.enable({ apis: ['setTimeout'] })
+    mover.write({ t: 'line', text: '/attach session-1' })
+    await until(() => mover.frames.some(frame => frame.t === 'echo'), 'the refusal echo')
+    assert.deepEqual(
+      mover.frames.flatMap(frame => frame.t === 'echo' ? [frame.text] : []),
+      ['attach failed: session session-1 is already bridged'],
+    )
+    assert.equal(host.catalogLists, reads, 'a refused hello reads no catalog')
+    assert.equal(held.frames.filter(frame => frame.t === 'welcome').length, 1, 'the held bridge is untouched')
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+test('a bind a later one on the same connection replaced stays silent', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  let release: () => void = () => {}
+  host.catalogWait = new Promise<void>(resolve => { release = resolve })
+  mock.timers.enable({ apis: ['setTimeout'] })
+
+  try {
+    // `/attach` is fire-and-forget, so its bind is still inside the catalog
+    // prefetch when the hello behind it binds the same session on the same
+    // connection. The older bind must vanish without answering.
+    client.write({ t: 'line', text: '/attach session-1' })
+    await until(() => host.catalogLists === 2, 'the switch read to start')
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+    await until(() => host.catalogLists === 3, 'the hello read to start')
+    release()
+    await until(() => client.allFrames.filter(frame => frame.t === 'welcome').length === 2, 'the newer welcome')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+
+    assert.deepEqual(client.allFrames.filter(frame => frame.t === 'error'), [], 'a superseded bind never reports busy')
+    assert.deepEqual(client.allFrames.filter(frame => frame.t === 'echo'), [], 'a superseded bind writes no failure echo')
+    assert.deepEqual(client.allFrames.slice(-2).map(frame => frame.t), ['welcome', 'catalog'], 'the newer bind welcomes')
+    assert.equal(client.socket.destroyed, false, 'the connection the newer bind owns stays open')
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the superseded bind')
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+test('a claimed session reports nothing before its root word', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  // Bridge A opens the process-global listeners; bridge B is claimed while its
+  // own menu is still being read.
+  await attached(host, dir, 'session-1')
+  let release: () => void = () => {}
+  host.catalogWait = new Promise<void>(resolve => { release = resolve })
+  mock.timers.enable({ apis: ['setTimeout'] })
+  const b = new Client(await listening(dir))
+  await b.ready()
+
+  try {
+    b.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-2' })
+    await until(() => host.catalogLists === 2, 'the second bridge read to start')
+    // A live event for B lands inside that window: B has no state the listener
+    // loop can publish, so nothing may reach the wire before B's root word.
+    host.emit('session-2', { type: 'turn/start', data: { turn: 1 } })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(b.allFrames.length, 0, 'no frame before the root word')
+    release()
+    await until(() => catalogs(b).length === 1, 'the catalog behind the root word')
+    assert.deepEqual(b.allFrames.slice(0, 2).map(frame => frame.t), ['welcome', 'catalog'])
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+/**
+ * Race both surfaces into binding `session-1` with the catalog read pinned. The
+ * socket's read starts first, so it wins; the tty's `/attach` resumes second and
+ * is refused after the read. Runs `body` once both answers have landed.
+ */
+async function withRacedBind(
+  body: (race: {
+    readonly host: FakeHost
+    readonly tty: FakeTty
+    readonly client: Client
+    /** What the tty wrote from the moment its `/attach` was fed. */
+    readonly lost: readonly string[]
+  }) => Promise<void>,
+): Promise<void> {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  const tty = new FakeTty()
+  await withTerminal({ dshSup: 'tty-1' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    // The synthesized tty hello binds its own session first, so both surfaces exist.
+    await untilBridged(host)
+    let release: () => void = () => {}
+    host.catalogWait = new Promise<void>(resolve => { release = resolve })
+    mock.timers.enable({ apis: ['setTimeout'] })
+    const client = new Client(await listening(dir))
+    await client.ready()
+    try {
+      client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+      await until(() => host.catalogLists === 2, 'the socket read to start')
+      const before = tty.out.length
+      tty.feed('/attach session-1')
+      await until(() => host.catalogLists === 3, 'the tty read to start')
+      release()
+      await until(() => catalogs(client).length === 1, 'the socket catalog')
+      await new Promise<void>(resolve => { setImmediate(resolve) })
+      // The pinned window is over: later binds read the menu normally.
+      host.catalogWait = undefined
+      await body({ host, tty, client, lost: tty.out.slice(before) })
+    } finally {
+      mock.timers.reset()
+      host.dispose()
+    }
+  })
+}
+
+test('two surfaces cannot both bind one session across the catalog read', async () => {
+  await withRacedBind(async ({ host, client, lost }) => {
+    assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog'], 'one surface wins the session')
+    // The released session's child record may still be cleared here; a root word
+    // for the lost bind may not, and its refusal is the busy echo.
+    assert.deepEqual(lost.filter(line => /state=(idle|working|blocked)/.test(line)), [], 'the loser sends no root word')
+    assert.ok(lost.includes('attach failed: session session-1 is already bridged\n'), 'the loser reports busy')
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      ['session-1'],
+      'the loser leaves no shadow entry',
+    )
+  })
+})
+
+test('a refused bind cannot steer the surface that won the session', async () => {
+  await withRacedBind(async ({ host, tty, client }) => {
+    // The loser's claim is gone, so its next line is unbridged instead of a
+    // steer into the winner's state.
+    tty.feed('steer into the winner')
+    await until(() => tty.out.some(line => line.startsWith('no session bridged')), 'the unbridged echo')
+    assert.deepEqual(host.steered, [], 'the winner agent receives no steer')
+
+    // The winner keeps its entry and keeps reporting.
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => client.allFrames.length > 2, 'the winner still reports')
+  })
+})
+
+test('a later /new from the refused surface cannot take the winner entry', async () => {
+  await withRacedBind(async ({ host, tty, client }) => {
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      ['session-1'],
+      'one owner before the later bind',
+    )
+    tty.feed('/new')
+    await until(() => host.created.length === 2, 'the later bind')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      ['session-1', host.created[1] ?? ''],
+      'the winner entry survives the later bind',
+    )
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => client.allFrames.length > 2, 'the winner still reports')
+  })
+})
+
 test('a session switch resends the catalog once', async () => {
   const dir = tempDir()
   const host = new FakeHost()
@@ -1619,6 +1863,7 @@ test('a throwing skill service empties its section and still attaches', async ()
 
   try {
     await until(() => catalogs(client).length === 1, 'the degraded catalog')
+    assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog'], 'welcome, then the empty menu')
     const [catalog] = catalogs(client)
     assert.deepEqual(catalog?.skills, [], 'a throwing service is an empty section')
     assert.deepEqual(catalog?.commands, [], 'a host command is never advertised')
@@ -1663,15 +1908,20 @@ test('a hanging catalog service cannot hold the attach', async () => {
   apply(host.ctx, config({ socketDir: dir }))
   const client = new Client(await listening(dir))
   await client.ready()
-  // The catalog's 2 s deadline is created inside the hello handler, so the
+  // The catalog's 250 ms deadline is created inside the hello handler, so the
   // simulated clock has to be on before the hello is written.
   mock.timers.enable({ apis: ['setTimeout'] })
 
   try {
     client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
-    await client.take(1)
-    mock.timers.tick(2_000)
+    // `welcome` now waits behind the read, so the deadline is what frees it:
+    // tick only once the read is pinned, or the timer it arms would miss it.
+    await until(() => host.catalogLists === 1, 'the catalog read to start')
+    mock.timers.tick(250)
+    const [welcome] = await client.take(1)
+    assert.equal(welcome?.t, 'welcome', 'the deadline frees the root word')
     await until(() => catalogs(client).length === 1, 'the empty catalog after the deadline')
+    assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog'])
     assert.deepEqual(catalogs(client)[0], { t: 'catalog', skills: [], commands: [] })
     client.write({ t: 'line', text: 'still steers' })
     await until(() => host.steered.length === 1, 'a usable bridge after the timeout')

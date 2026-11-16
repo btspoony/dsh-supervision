@@ -31,7 +31,7 @@ npm i -g dsh-sup@{{version}}
 ## Create, attach, list
 
 ```sh
-dsh-sup                             # create a session in the dsh web process's directory
+dsh-sup                             # create a session in the dsh-sup process's directory
 dsh-sup new --cwd ~/work/project    # same, elsewhere; resolved here and sent absolute
 dsh-sup attach session-abc123       # attach an existing session
 dsh-sup session-abc123              # the same, as a bare session id
