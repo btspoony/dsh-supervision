@@ -1516,7 +1516,9 @@ function handlersFor(
     if (!bridge.claim(session)) return 'busy'
     // The transport releases the old session on a switch; repeating it here
     // keeps this function idempotent and independent of that ordering detail.
-    if (previous !== undefined) release(previous)
+    // Only this bridge's own entry may go: the name comes from the transport, and
+    // a bind that is about to be refused must not delete the surface that won.
+    if (previous !== undefined && bridged.get(previous)?.bridge === bridge) release(previous)
 
     // The newest bind on a bridge owns what its read returns. `bridged` cannot
     // answer that yet: nothing is published until the read is done, so a later
@@ -1527,6 +1529,8 @@ function handlersFor(
     const catalog = await catalogWithin(ctx)
     // A later bind on this same connection replaced this one: it publishes its
     // own state and sends its own root word, so nothing here may answer.
+    // Superseded is not a lost claim: the newer bind on this same bridge holds
+    // it, and unclaiming here would clear that bind's session instead.
     if (bindSeq.get(bridge) !== ticket) return 'superseded'
     // Another surface may have bound this session while the menu was read. The
     // shared table is the only single-owner rule across transports, and this bind
@@ -1534,7 +1538,12 @@ function handlersFor(
     // before `bridged.set`, so one of two racing surfaces wins and the other
     // reports busy — nothing is constructed, sent or closed by the loser.
     const rival = bridged.get(session)
-    if (rival !== undefined && rival.bridge !== bridge) return 'busy'
+    if (rival !== undefined && rival.bridge !== bridge) {
+      // Refusing gives the transport claim back: without it the next line on
+      // this connection would resolve to the winner's state and steer it.
+      bridge.unclaim(session)
+      return 'busy'
+    }
 
     const root = createRootState(config.app, titleFor(agent, process.cwd()))
     const state: BridgeState = {

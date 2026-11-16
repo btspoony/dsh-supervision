@@ -1736,7 +1736,20 @@ test('a claimed session reports nothing before its root word', async () => {
   }
 })
 
-test('two surfaces cannot both bind one session across the catalog read', async () => {
+/**
+ * Race both surfaces into binding `session-1` with the catalog read pinned. The
+ * socket's read starts first, so it wins; the tty's `/attach` resumes second and
+ * is refused after the read. Runs `body` once both answers have landed.
+ */
+async function withRacedBind(
+  body: (race: {
+    readonly host: FakeHost
+    readonly tty: FakeTty
+    readonly client: Client
+    /** What the tty wrote from the moment its `/attach` was fed. */
+    readonly lost: readonly string[]
+  }) => Promise<void>,
+): Promise<void> {
   const dir = tempDir()
   const host = new FakeHost()
   host.add('session-1', '/repo')
@@ -1751,10 +1764,7 @@ test('two surfaces cannot both bind one session across the catalog read', async 
     mock.timers.enable({ apis: ['setTimeout'] })
     const client = new Client(await listening(dir))
     await client.ready()
-
     try {
-      // The socket attaches first, so its read is the one the pinned promise
-      // resumes first; the tty's `/attach` enters the same window behind it.
       client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
       await until(() => host.catalogLists === 2, 'the socket read to start')
       const before = tty.out.length
@@ -1763,26 +1773,62 @@ test('two surfaces cannot both bind one session across the catalog read', async 
       release()
       await until(() => catalogs(client).length === 1, 'the socket catalog')
       await new Promise<void>(resolve => { setImmediate(resolve) })
-
-      assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog'], 'one surface wins the session')
-      // The released session's child record may still be cleared here; a root
-      // word for the lost bind may not, and its refusal is the busy echo.
-      const lost = tty.out.slice(before)
-      assert.deepEqual(
-        lost.filter(line => /state=(idle|working|blocked)/.test(line)),
-        [],
-        'the loser sends no root word',
-      )
-      assert.ok(lost.includes('attach failed: session session-1 is already bridged\n'), 'the loser reports busy')
-      assert.deepEqual(
-        Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
-        ['session-1'],
-        'the loser leaves no shadow entry',
-      )
+      // The pinned window is over: later binds read the menu normally.
+      host.catalogWait = undefined
+      await body({ host, tty, client, lost: tty.out.slice(before) })
     } finally {
       mock.timers.reset()
       host.dispose()
     }
+  })
+}
+
+test('two surfaces cannot both bind one session across the catalog read', async () => {
+  await withRacedBind(async ({ host, client, lost }) => {
+    assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog'], 'one surface wins the session')
+    // The released session's child record may still be cleared here; a root word
+    // for the lost bind may not, and its refusal is the busy echo.
+    assert.deepEqual(lost.filter(line => /state=(idle|working|blocked)/.test(line)), [], 'the loser sends no root word')
+    assert.ok(lost.includes('attach failed: session session-1 is already bridged\n'), 'the loser reports busy')
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      ['session-1'],
+      'the loser leaves no shadow entry',
+    )
+  })
+})
+
+test('a refused bind cannot steer the surface that won the session', async () => {
+  await withRacedBind(async ({ host, tty, client }) => {
+    // The loser's claim is gone, so its next line is unbridged instead of a
+    // steer into the winner's state.
+    tty.feed('steer into the winner')
+    await until(() => tty.out.some(line => line.startsWith('no session bridged')), 'the unbridged echo')
+    assert.deepEqual(host.steered, [], 'the winner agent receives no steer')
+
+    // The winner keeps its entry and keeps reporting.
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => client.allFrames.length > 2, 'the winner still reports')
+  })
+})
+
+test('a later /new from the refused surface cannot take the winner entry', async () => {
+  await withRacedBind(async ({ host, tty, client }) => {
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      ['session-1'],
+      'one owner before the later bind',
+    )
+    tty.feed('/new')
+    await until(() => host.created.length === 2, 'the later bind')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.deepEqual(
+      Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+      ['session-1', host.created[1] ?? ''],
+      'the winner entry survives the later bind',
+    )
+    host.emit('session-1', { type: 'turn/start', data: { turn: 1 } })
+    await until(() => client.allFrames.length > 2, 'the winner still reports')
   })
 })
 

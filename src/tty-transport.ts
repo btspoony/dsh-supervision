@@ -54,6 +54,9 @@ export class TtyTransport implements Transport {
         return self.#booting
       },
       claim: session => self.#bind(session),
+      // Only a refused bind's own claim is given back; the supersede path never
+      // calls this, because a newer bind on this bridge holds the same name.
+      unclaim: session => { if (self.#session === session) self.#session = undefined },
       send: frame => { self.#write(frame) },
       // This bridge is finished; the transport stays mounted for a re-entry.
       close: () => { self.#release() },
