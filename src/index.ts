@@ -833,6 +833,7 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
     ready: (value: unknown) => boolean,
     use: (value: unknown) => void,
     remaining: number,
+    expire?: () => void,
   ): void => {
     const value: unknown = ctx.get?.(name)
     if (ready(value)) {
@@ -840,9 +841,11 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
       return
     }
     if (remaining > 0) {
-      const timer = setTimeout(() => { whenService(name, ready, use, remaining - 1) }, BOOT_POLL_MS)
+      const timer = setTimeout(() => { whenService(name, ready, use, remaining - 1, expire) }, BOOT_POLL_MS)
       // A host that never mounts the service must not keep the process alive.
       if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+    } else {
+      expire?.()
     }
   }
   const attempts = BOOT_WINDOW_MS / BOOT_POLL_MS
@@ -860,7 +863,11 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
       },
     }))
   }, attempts)
-  whenService('skills', value => isSkillsLike(value), () => { registerSkill(ctx) }, attempts)
+  whenService('skills', value => isSkillsLike(value), () => { registerSkill(ctx) }, attempts, () => {
+    // The same channel a refused provider uses: the manual is what the operator
+    // loses either way, and silence would read as a host that mounted it.
+    process.stderr.write(`dsh-supervision: skill unavailable: no skill service after ${String(BOOT_WINDOW_MS)} ms\n`)
+  })
 
   // Read reflectively like the rest: a host without a skill registry still loads,
   // and the manual is the only copy of what the agent needs to know. The same
@@ -1109,7 +1116,8 @@ function handlersFor(
       // that had reported and is now gone is a degradation worth one line.
       problem = state.activityError ?? 'no jobs service'
     }
-    const agents: AgentActivityView[] = ctx.agents.list().map(agent => {
+    const live = ctx.agents.list()
+    const agents: AgentActivityView[] = live.map(agent => {
       const header = agent.session.header
       return {
         sessionId: agent.session.id,
@@ -1118,6 +1126,9 @@ function handlersFor(
         status: agent.status,
       }
     })
+    // The same listing is what proves a child record stale, so one scan serves
+    // both: a session that left it can never emit another fact of its own.
+    pruneChildren(state, live)
     // The last successful snapshot is what a failed scan keeps reporting; only a
     // successful list may replace it.
     const jobsView: readonly JobActivityView[] = jobRows === undefined
@@ -1129,9 +1140,9 @@ function handlersFor(
         status: job.status,
       }))
     if (problem !== undefined) {
-      // One line per degradation episode; neither the snapshot nor the stale
-      // clock moves, so a genuinely stuck job still falls back on schedule.
-      if (state.activityError === undefined) state.activityNotice = `activity unavailable: ${problem}`
+      // One line per degradation episode, and a changed cause is a new episode:
+      // keeping the first message would report a cause that no longer holds.
+      if (state.activityError !== problem) state.activityNotice = `activity unavailable: ${problem}`
       state.activityError = problem
     } else if (jobRows !== undefined) {
       if (state.activityError !== undefined) state.activityNotice = 'activity recovered'
@@ -1267,13 +1278,30 @@ function handlersFor(
     }
   }
 
+  /** Drop one child's reported row; herdr-core forgets an id it is told to clear. */
+  const clearChild = (state: BridgeState, id: string): void => {
+    if (!config.programStatus) return
+    const data = clearProgramStatus(id)
+    if (data !== '') state.bridge.send({ t: 'osc', data })
+  }
+
+  /**
+   * Retire the child records whose session the host no longer lists. Absence is
+   * the only staleness the seam proves: a departed session cannot emit a fact,
+   * and `AgentLike.status` has no terminal value to wait for.
+   */
+  const pruneChildren = (state: BridgeState, live: readonly AgentLike[]): void => {
+    const kept = new Set(live.map(agent => childIdOf(agent)))
+    for (const id of state.children.keys()) {
+      if (kept.has(id)) continue
+      clearChild(state, id)
+      state.children.delete(id)
+    }
+  }
+
   /** Remove every child record this bridge reported. */
   const clearChildren = (state: BridgeState): void => {
-    for (const id of state.children.keys()) {
-      if (!config.programStatus) continue
-      const data = clearProgramStatus(id)
-      if (data !== '') state.bridge.send({ t: 'osc', data })
-    }
+    for (const id of state.children.keys()) clearChild(state, id)
     state.children.clear()
   }
 

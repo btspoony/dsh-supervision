@@ -365,6 +365,12 @@ class FakeHost {
     return agent
   }
 
+  /** Drop an agent from the listing, as the host does when its session is disposed. */
+  remove(id: string): void {
+    const index = this.agents.findIndex(agent => agent.id === id)
+    if (index >= 0) this.agents.splice(index, 1)
+  }
+
   emit(session: string, event: SessionEvent): void {
     for (const listener of this.#sessionListeners) listener({ id: session }, event)
   }
@@ -1899,6 +1905,35 @@ test('a skill registry that refuses the provider logs one line and leaves the so
   }
 })
 
+test('a host that never mounts the skills service says so once, when the window closes', () => {
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  const written: string[] = []
+  const original = process.stderr.write
+  // Simulated from before `apply`: the retry chain is what expires the window.
+  mock.timers.enable({ apis: ['setTimeout'] })
+  process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
+  try {
+    apply(host.ctx, config({ socketDir: tempDir() }))
+    let ticks = 0
+    // Nothing while the window is open: the service may still arrive.
+    while (written.length === 0 && ticks < 70) {
+      mock.timers.tick(500)
+      ticks += 1
+    }
+    assert.deepEqual(written, ['dsh-supervision: skill unavailable: no skill service after 30000 ms\n'])
+    assert.ok(ticks > 50, 'the line waited for the boot window, not the first poll')
+
+    // A retry chain that outlived the window would write a second line here.
+    for (let extra = 0; extra < 20; extra += 1) mock.timers.tick(500)
+    assert.equal(written.length, 1, 'one line per boot, not one per retry')
+  } finally {
+    process.stderr.write = original
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
 test('a hanging catalog service cannot hold the attach', async () => {
   const dir = tempDir()
   const host = new FakeHost()
@@ -2214,6 +2249,43 @@ test('a failing jobs scan keeps the known job and counts no fabricated leave', a
       'activity recovered',
       '[turn 1] idle',
     ])
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a changed jobs-scan cause is announced again and the fresh cause is what sticks', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    host.jobsListError = 'jobs down'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: jobs down'), 'the first cause')
+
+    // A different failure is a new episode: keeping the first line would report
+    // a cause that no longer holds.
+    host.jobsListError = 'registry closed'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: registry closed'), 'the second cause')
+
+    // The stored cause is the fresh one: a repeat of it must stay silent, which
+    // it cannot if the first cause were still the one compared against.
+    host.emitJob()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      echoesOf(client).filter(text => text.startsWith('activity unavailable:')).length,
+      2,
+      'two episodes, one line each',
+    )
+    assert.equal(lastRootFields(client).state, 'working', 'the known job still keeps the word')
   } finally {
     host.dispose()
   }
@@ -2808,6 +2880,57 @@ test('an in-process subagent reports sub/<session> and a switch clears every chi
   assert.deepEqual(client.frames[5], { t: 'osc', data: '\u001b]7501;state=clear:id=session-3\u001b\\' })
   assert.deepEqual(client.frames[6], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=Yg==\u001b\\' })
   host.dispose()
+})
+
+test('a child record whose session left the listing is retired, not kept forever', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  try {
+    // The host disposing a session is what removes it from the listing; the
+    // subagent/end edge is where a scan next runs.
+    host.remove('session-2')
+    host.emitSubagent()
+    await until(
+      () => client.frames.some(frame => oscData(frame) === '\u001b]7501;state=clear:id=session-2\u001b\\'),
+      'the retired child record',
+    )
+
+    // A retired session cannot come back through a late event of its own.
+    const settled = client.frames.length
+    host.emit('session-2', { type: 'turn/start', data: { turn: 1 } })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(client.frames.length, settled, 'no record is re-created for a session the host forgot')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a child record for a session still listed survives the scan', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  try {
+    host.emitSubagent()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      client.frames.filter(frame => oscData(frame).includes('id=session-2')).length,
+      1,
+      'a listed session keeps its record',
+    )
+  } finally {
+    host.dispose()
+  }
 })
 
 /** The ask id an echo line names. */
