@@ -552,7 +552,7 @@ type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure
 async function catalogWithin(ctx: PluginContext): Promise<Catalog> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<Catalog>(resolve => {
-    timer = setTimeout(() => { resolve({ skills: [], commands: [] }) }, CATALOG_TIMEOUT_MS)
+    timer = setTimeout(() => { resolve({ skills: [], commands: [] }) }, CATALOG_PREFETCH_MS)
     if (typeof timer === 'object' && 'unref' in timer) timer.unref()
   })
   try {
@@ -759,10 +759,11 @@ const BOOT_POLL_MS = 500
  */
 const HISTORY_READ_TIMEOUT_MS = 4_000
 /**
- * How long the catalog may hold the wire behind the root word. A menu is a
- * convenience: half a conversation replayed late is not worth a hanging attach.
+ * How long the catalog read may delay the root word. The read sits inside the
+ * forwarder's 5 s reply deadline, so a menu — a convenience — is worth a short
+ * wait, never a late `welcome` that reads as a lost backend.
  */
-const CATALOG_TIMEOUT_MS = 2_000
+const CATALOG_PREFETCH_MS = 250
 /**
  * How often an active bridge re-reads the host's activity. Host events decide
  * when to look immediately; the poll only catches what never announced itself.

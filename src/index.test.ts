@@ -1692,7 +1692,7 @@ test('a hanging catalog service cannot hold the attach', async () => {
   apply(host.ctx, config({ socketDir: dir }))
   const client = new Client(await listening(dir))
   await client.ready()
-  // The catalog's 2 s deadline is created inside the hello handler, so the
+  // The catalog's 250 ms deadline is created inside the hello handler, so the
   // simulated clock has to be on before the hello is written.
   mock.timers.enable({ apis: ['setTimeout'] })
 
@@ -1701,7 +1701,7 @@ test('a hanging catalog service cannot hold the attach', async () => {
     // `welcome` now waits behind the read, so the deadline is what frees it:
     // tick only once the read is pinned, or the timer it arms would miss it.
     await until(() => host.catalogLists === 1, 'the catalog read to start')
-    mock.timers.tick(2_000)
+    mock.timers.tick(250)
     const [welcome] = await client.take(1)
     assert.equal(welcome?.t, 'welcome', 'the deadline frees the root word')
     await until(() => catalogs(client).length === 1, 'the empty catalog after the deadline')
