@@ -128,6 +128,8 @@ class FakeHost {
   readonly cancelled: string[] = []
   /** Stands in for `ctx.get('subagents')`; undefined mimics a host without one. */
   subagentRoots: Map<string, string> | undefined
+  /** When set, `subagents.rootOf` throws with this message. */
+  subagentRootError: string | undefined = undefined
   /** Stands in for `ctx.get('agentDefaultModel')`; undefined mimics a host without one. */
   defaultModel: { readonly provider: string; readonly model: string } | undefined
   /** Stands in for `ctx.get('agentPresets')`; undefined mimics a host without one. */
@@ -334,6 +336,7 @@ class FakeHost {
         if (name !== 'subagents' || this.subagentRoots === undefined) return undefined
         return {
           rootOf: (agent: FakeAgent) => {
+            if (this.subagentRootError !== undefined) throw new Error(this.subagentRootError)
             const root = this.subagentRoots?.get(agent.id)
             return root === undefined ? agent : this.agents.find(candidate => candidate.id === root) ?? agent
           },
@@ -2983,6 +2986,46 @@ test('a child record for a session still listed survives the scan', async () => 
       client.frames.filter(frame => oscData(frame).includes('id=session-2')).length,
       1,
       'a listed session keeps its record',
+    )
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a lineage lookup that throws retires no live subagent record', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-child', '/repo')
+  host.subagentRoots = new Map([['session-child', 'session-1']])
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded subagent record')
+
+  try {
+    // The record was stored as `sub/<id>` because lineage proved it earlier. A
+    // scan whose `rootOf` throws proves nothing, so the record key — not a fresh
+    // lookup — decides: the live row must survive.
+    host.subagentRootError = 'no lineage'
+    host.emitSubagent()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      client.frames.filter(frame => oscData(frame).includes('id=sub/session-child')).length,
+      1,
+      'the live subagent keeps its record',
+    )
+    assert.equal(
+      client.frames.some(frame => oscData(frame).startsWith('\u001b]7501;state=clear:id=sub/session-child')),
+      false,
+      'an unproven lineage clears nothing',
+    )
+
+    // Only the session leaving the listing is staleness the seam proves.
+    host.remove('session-child')
+    host.emitSubagent()
+    await until(
+      () => client.frames.some(frame => oscData(frame) === '\u001b]7501;state=clear:id=sub/session-child\u001b\\'),
+      'the retired subagent record',
     )
   } finally {
     host.dispose()

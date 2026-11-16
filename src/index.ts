@@ -1261,9 +1261,12 @@ function handlersFor(
     return root !== undefined && root !== agent
   }
 
+  /** The record id prefix for a session the host proved is a subagent. */
+  const SUB_PREFIX = 'sub/'
+
   /** The child record id for a live session that is not the attached one. */
   const childIdOf = (agent: AgentLike): string =>
-    isSubagent(agent) ? `sub/${agent.session.id}` : agent.session.id
+    isSubagent(agent) ? `${SUB_PREFIX}${agent.session.id}` : agent.session.id
 
   /** Report every other live session as a child record. */
   const seedChildren = (state: BridgeState): void => {
@@ -1287,12 +1290,16 @@ function handlersFor(
   /**
    * Retire the child records whose session the host no longer lists. Absence is
    * the only staleness the seam proves: a departed session cannot emit a fact,
-   * and `AgentLike.status` has no terminal value to wait for.
+   * and `AgentLike.status` has no terminal value to wait for. The record's own
+   * key decides, not a fresh lineage lookup: `rootOf` throwing is "could not
+   * tell", and re-deriving the id from it would turn a live `sub/<id>` into a
+   * bare id and retire a running subagent.
    */
   const pruneChildren = (state: BridgeState, live: readonly AgentLike[]): void => {
-    const kept = new Set(live.map(agent => childIdOf(agent)))
+    const listed = new Set(live.map(agent => agent.session.id))
     for (const id of state.children.keys()) {
-      if (kept.has(id)) continue
+      const session = id.startsWith(SUB_PREFIX) ? id.slice(SUB_PREFIX.length) : id
+      if (listed.has(session)) continue
       clearChild(state, id)
       state.children.delete(id)
     }
