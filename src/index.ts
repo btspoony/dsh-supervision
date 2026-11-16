@@ -1528,6 +1528,13 @@ function handlersFor(
     // A later bind on this same connection replaced this one: it publishes its
     // own state and sends its own root word, so nothing here may answer.
     if (bindSeq.get(bridge) !== ticket) return 'superseded'
+    // Another surface may have bound this session while the menu was read. The
+    // shared table is the only single-owner rule across transports, and this bind
+    // has published nothing yet, so the check belongs here: no await follows it
+    // before `bridged.set`, so one of two racing surfaces wins and the other
+    // reports busy — nothing is constructed, sent or closed by the loser.
+    const rival = bridged.get(session)
+    if (rival !== undefined && rival.bridge !== bridge) return 'busy'
 
     const root = createRootState(config.app, titleFor(agent, process.cwd()))
     const state: BridgeState = {

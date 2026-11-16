@@ -519,6 +519,7 @@ test('enabled: false registers nothing at all', async () => {
 class FakeTty implements TtyIO {
   readonly out: string[] = []
   closes = 0
+  readonly #pending: string[] = []
   #wake: (() => void) | undefined
   #ended = false
 
@@ -533,9 +534,24 @@ class FakeTty implements TtyIO {
     this.#wake?.()
   }
 
+  /** Type one operator line into this terminal. */
+  feed(line: string): void {
+    this.#pending.push(line)
+    this.#wake?.()
+  }
+
   async *lines(): AsyncGenerator<string> {
-    // No keystrokes: the read loop parks until the transport closes.
-    while (!this.#ended) await new Promise<void>(resolve => { this.#wake = resolve })
+    // No keystrokes unless fed: the read loop parks until one arrives or the
+    // transport closes.
+    for (;;) {
+      const line = this.#pending.shift()
+      if (line !== undefined) {
+        yield line
+        continue
+      }
+      if (this.#ended) return
+      await new Promise<void>(resolve => { this.#wake = resolve })
+    }
   }
 }
 
@@ -1718,6 +1734,56 @@ test('a claimed session reports nothing before its root word', async () => {
     mock.timers.reset()
     host.dispose()
   }
+})
+
+test('two surfaces cannot both bind one session across the catalog read', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  const tty = new FakeTty()
+  await withTerminal({ dshSup: 'tty-1' }, async () => {
+    apply(host.ctx, config({ socketDir: dir }), () => ({ ok: true, io: tty }))
+    // The synthesized tty hello binds its own session first, so both surfaces exist.
+    await untilBridged(host)
+    let release: () => void = () => {}
+    host.catalogWait = new Promise<void>(resolve => { release = resolve })
+    mock.timers.enable({ apis: ['setTimeout'] })
+    const client = new Client(await listening(dir))
+    await client.ready()
+
+    try {
+      // The socket attaches first, so its read is the one the pinned promise
+      // resumes first; the tty's `/attach` enters the same window behind it.
+      client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+      await until(() => host.catalogLists === 2, 'the socket read to start')
+      const before = tty.out.length
+      tty.feed('/attach session-1')
+      await until(() => host.catalogLists === 3, 'the tty read to start')
+      release()
+      await until(() => catalogs(client).length === 1, 'the socket catalog')
+      await new Promise<void>(resolve => { setImmediate(resolve) })
+
+      assert.deepEqual(client.allFrames.map(frame => frame.t), ['welcome', 'catalog'], 'one surface wins the session')
+      // The released session's child record may still be cleared here; a root
+      // word for the lost bind may not, and its refusal is the busy echo.
+      const lost = tty.out.slice(before)
+      assert.deepEqual(
+        lost.filter(line => /state=(idle|working|blocked)/.test(line)),
+        [],
+        'the loser sends no root word',
+      )
+      assert.ok(lost.includes('attach failed: session session-1 is already bridged\n'), 'the loser reports busy')
+      assert.deepEqual(
+        Object.keys(sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)),
+        ['session-1'],
+        'the loser leaves no shadow entry',
+      )
+    } finally {
+      mock.timers.reset()
+      host.dispose()
+    }
+  })
 })
 
 test('a session switch resends the catalog once', async () => {
