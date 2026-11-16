@@ -19,9 +19,11 @@ const SUMMARY_KEYS = ['description', 'command', 'path', 'query', 'pattern'] as c
 /**
  * Renders one frame for a terminal, newline included.
  * @param frame - any frame the plugin may write.
+ * @param width - columns a `mirror` block wraps to; the caller's terminal width,
+ *   or {@link DEFAULT_WIDTH} when it has none.
  * @returns bytes to write, or `undefined` when this transport has nothing to say.
  */
-export function renderFrame(frame: OutFrame): string | undefined {
+export function renderFrame(frame: OutFrame, width?: number): string | undefined {
   switch (frame.t) {
     case 'welcome':
       // `state` and `turn` are not written: hc replaces the record whole, so the
@@ -36,7 +38,7 @@ export function renderFrame(frame: OutFrame): string | undefined {
       // `renderMirror` is the pure block with no terminator; this arm adds the
       // one newline every tty record ends with, exactly like `echo` does, so a
       // following OSC record never glues onto the transcript's last line.
-      return `${renderMirror(frame.item)}\n`
+      return `${renderMirror(frame.item, width)}\n`
     case 'sessions':
     case 'catalog':
       // Machine surfaces: a listing belongs to the socket's list command and a

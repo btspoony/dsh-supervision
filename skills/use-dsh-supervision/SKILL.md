@@ -7,8 +7,9 @@ description: Use when a DSH session runs the dsh-supervision plugin or needs ter
 
 This session runs the `dsh-supervision` plugin, version {{version}}. Terminal
 supervision goes through the `dsh-sup` forwarder CLI, which must be the **same
-exact version** as the plugin: there is no protocol negotiation, so a mismatch
-fails in confusing ways.
+exact version** as the plugin. A version mismatch is unsupported, and a
+protocol mismatch is quieter than that: the plugin's registry entry is skipped
+as not live, so the CLI reports `no running dsh web found`.
 
 ## Check the forwarder
 
@@ -16,7 +17,8 @@ fails in confusing ways.
 dsh-sup --version
 ```
 
-If the command is missing, or prints anything other than `{{version}}`, tell the
+`--version` prints one line. If the command is missing, or that line with its
+surrounding whitespace trimmed is anything other than `{{version}}`, tell the
 user what you found. Installing or upgrading the CLI is the user's decision: ask
 for permission, and only then run
 

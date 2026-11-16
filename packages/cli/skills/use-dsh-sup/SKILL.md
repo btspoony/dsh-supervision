@@ -1,6 +1,6 @@
 ---
 name: use-dsh-sup
-description: Run the dsh-sup forwarder CLI to bridge a DSH session into a terminal supervisor — commands, options, exit codes, environment variables, and the exact version it must match the dsh-supervision plugin. Load before running dsh-sup.
+description: Run the dsh-sup forwarder CLI to bridge a DSH session into a terminal supervisor — commands, options, exit codes, environment variables, and the exact dsh-supervision plugin version it must match. Load before running dsh-sup.
 ---
 
 # dsh-sup
@@ -13,8 +13,9 @@ session. This build is version {{version}}.
 ## Version coupling
 
 The `dsh-supervision` plugin and this CLI are released together and must be the
-**same exact version**. There is no protocol negotiation, so a mismatch fails in
-confusing ways; do not accept a nearby version.
+**same exact version**; do not accept a nearby version. A version mismatch is
+unsupported. A protocol mismatch is quieter: the registry entry is skipped as
+not live, so it reads as `no running dsh web found`.
 
 ```sh
 dsh-sup --version        # prints {{version}}

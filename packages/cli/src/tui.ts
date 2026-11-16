@@ -662,6 +662,12 @@ class Gutter implements Component {
 /**
  * The user's own line: a tinted block with a gutter, so the thing a person
  * typed never reads like model output.
+ *
+ * The text renders as Markdown on purpose (issue I-000025, accepted): the
+ * transcript is Markdown on both surfaces, the GUI renders operator input the
+ * same way, and this block is fed by the same `mirror` frame the GUI reads.
+ * Rendering it verbatim would make the terminal the only view that disagrees
+ * about input the person just wrote and can see.
  */
 function userEntry(text: string, width: number, theme: Theme): string[] {
   const bg = (line: string): string => theme.bg('userBg', line);
@@ -801,11 +807,17 @@ function wrapPlain(text: string, width: number): string[] {
 /**
  * Fits a styled line to `width` by slicing visible columns. `truncateToWidth`
  * replaces an overflowing line with an ellipsis, which loses the content; a
- * slice keeps it and appends one reset for whatever style was still open.
+ * slice keeps it. A row that still carries SGR at the cut gets exactly one
+ * reset, so the style cannot bleed into the padding of its own row; a row with
+ * no SGR gets none, because there is nothing to close. Every rendered entry
+ * already fits the viewport, so this is the last-resort guard.
  */
-function clipStyled(line: string, width: number): string {
+export function clipStyled(line: string, width: number): string {
   if (visibleWidth(line) <= width) return line;
-  return `${sliceByColumn(line, 0, width, true)}\x1b[0m`;
+  const clipped = sliceByColumn(line, 0, width, true);
+  // The slice keeps whatever SGR was open at the cut, so a reset is needed only
+  // when it kept one; a plain row would otherwise gain an escape it never had.
+  return clipped.includes('\x1b') ? `${clipped}\x1b[0m` : clipped;
 }
 
 /** Truncates to `width` visible columns by code point; adds no escape sequence. */

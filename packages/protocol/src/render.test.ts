@@ -183,6 +183,13 @@ test('a mirror frame renders exactly the item it carries, plus one newline', () 
   assert.equal(renderFrame({ t: 'mirror', item }), `${block}\n`)
 })
 
+test('a mirror frame wraps at the width its caller names, not the protocol default', () => {
+  const item: MirrorItem = { k: 'user', text: 'one two three four five six seven eight' }
+  const narrow = renderMirror(item, 20)
+  assert.notEqual(narrow, renderMirror(item, 100), 'the widths differ for this item')
+  assert.equal(renderFrame({ t: 'mirror', item }, 20), `${narrow}\n`)
+})
+
 /** C0 (minus `\n` and `\t`), DEL, C1, and the bidi controls: none may print. */
 const UNSAFE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/
 

@@ -41,12 +41,12 @@ export function listFrom(socket: string, cwd: string | undefined): Promise<ListR
         if (frame.t === 'sessions') settle({ ok: true, items: frame.items });
         if (frame.t === 'bye') {
           // Several backends answer at once, so the reason alone would leave the
-          // operator guessing which one left; the socket names it.
+          // operator guessing which one left; every failure names its socket.
           process.stderr.write(`${socket}: ${frame.reason}\n`);
           settle({ ok: false });
         }
         if (frame.t === 'error') {
-          process.stderr.write(`${frame.code}: ${frame.message}\n`);
+          process.stderr.write(`${socket}: ${frame.code}: ${frame.message}\n`);
           settle({ ok: false, code: frame.code });
         }
       },
@@ -56,7 +56,7 @@ export function listFrom(socket: string, cwd: string | undefined): Promise<ListR
         settle({ ok: false });
       },
       onRefused: (detail) => {
-        process.stderr.write(`${detail}\n`);
+        process.stderr.write(`${socket}: ${detail}\n`);
         settle({ ok: false, code: 'protocol' });
       },
     });
@@ -92,7 +92,9 @@ export async function runList(entries: readonly RegistryEntry[], cwd: string | u
   // means the backend is alive, so letting a local refusal win would erase a
   // backend that really is gone. Only when every failure carries a code does
   // that code decide; two distinct codes tie-break by name, which keeps even
-  // that case order-free.
+  // that case order-free. Every failure has already named its socket on stderr
+  // above, so the exit code never stands alone. This is the rule ADR § Lifecycle
+  // and failure states for `list`; change one, change both.
   const failed = results.filter((result) => !result.ok);
   if (failed.some((result) => result.code === undefined)) return EXIT.backendLost;
   if (failed.length === 0) return EXIT.ok;

@@ -307,6 +307,8 @@ interface BridgeState {
   jobs: readonly JobActivityView[]
   /** Why the last job scan failed, or undefined while scans succeed. */
   activityError: string | undefined
+  /** That cause's stable identity, so a reworded message is not a new episode. */
+  activityCause: string | undefined
   /** One pending echo about a degraded or recovered scan. */
   activityNotice: string | undefined
 }
@@ -334,6 +336,23 @@ function refusalCode(error: unknown, fallback: ErrorCode): ErrorCode {
   // shortcut: only POSIX lock errors are detected; a DSH-level writer lock would
   // need its own error class, add one when session persistence defines it.
   return code === 'ELOCKED' || code === 'EBUSY' || code === 'EEXIST' ? 'locked' : fallback
+}
+
+/**
+ * The stable identity of a failed scan. The message is what the operator reads,
+ * but it cannot decide a new episode on its own: a cause that names its timeout
+ * duration or a session id would re-announce on every 2 s poll. A coded error is
+ * identified by its code; otherwise by its message with the volatile numbers
+ * elided.
+ * @param error - the thrown value.
+ * @returns the key two scans of the same cause share.
+ */
+function causeKeyOf(error: unknown): string {
+  const code: unknown = error instanceof Error && 'code' in error ? error.code : undefined
+  if (typeof code === 'string' && code !== '') return `code:${code}`
+  // shortcut: numbers are the volatility seen in practice (durations, ids,
+  // ports); a message that varies in words still reads as a new episode.
+  return `message:${reasonOf(error).replace(/\d+(?:\.\d+)?/g, '#')}`
 }
 
 /** A DSH call failed in a way the forwarder can act on. */
@@ -414,12 +433,6 @@ function presetsOf(value: unknown): AgentPresetsLike | undefined {
   return value as AgentPresetsLike
 }
 
-/** One `ctx.skills.list` row: the menu fields only, never the body. */
-interface SkillSummaryLike {
-  readonly name: string
-  readonly description: string
-}
-
 /** One skill as `ctx.skills.get` returns it: the body `/skill:` injects. */
 interface SkillDefinitionLike {
   readonly name: string
@@ -427,17 +440,20 @@ interface SkillDefinitionLike {
   readonly content: string
 }
 
-/** The `ctx.skills` read surface: the menu rows and one skill's body. */
-interface SkillsLike {
-  list(options?: unknown): Promise<readonly SkillSummaryLike[]>
+/**
+ * The `ctx.skills` half a `/skill:` line needs: one body by name. The menu is
+ * the other half (`list`, read by `catalogOf`), and each degrades on its own —
+ * a host that mounts only one of them keeps that surface.
+ */
+interface SkillLookupLike {
   get(name: string, options?: unknown): Promise<SkillDefinitionLike | undefined>
 }
 
-/** @returns the host's skill catalog, when a usable one is mounted. */
-function skillsOf(value: unknown): SkillsLike | undefined {
+/** @returns the host's skill lookup, when the mounted service can answer a body. */
+function skillLookupOf(value: unknown): SkillLookupLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const { list, get } = value as { list?: unknown; get?: unknown }
-  return typeof list === 'function' && typeof get === 'function' ? value as SkillsLike : undefined
+  const get = (value as { get?: unknown }).get
+  return typeof get === 'function' ? value as SkillLookupLike : undefined
 }
 
 /** @returns the host's workspace registry, when a usable one is mounted. */
@@ -557,7 +573,9 @@ async function catalogWithin(ctx: PluginContext): Promise<Catalog> {
   })
   try {
     return await Promise.race([
-      catalogOf({ skills: skillsOf(ctx.get?.('skills')) }),
+      // The raw service: `catalogOf` reads only `list`, so a host that mounts
+      // the menu without a body lookup still contributes its rows.
+      catalogOf({ skills: ctx.get?.('skills') }),
       deadline,
     ])
   } finally {
@@ -828,11 +846,15 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   // a placeholder that lacks the member is still waited on, and a service that
   // never becomes usable leaves that surface unmounted rather than failing the
   // plugin.
+  // Tracked so disposal cancels the chain: a disposed plugin must not fire its
+  // expiry line into stderr minutes after nothing is left to supervise.
+  const bootTimers = new Set<ReturnType<typeof setTimeout>>()
   const whenService = (
     name: string,
     ready: (value: unknown) => boolean,
     use: (value: unknown) => void,
     remaining: number,
+    expire?: () => void,
   ): void => {
     const value: unknown = ctx.get?.(name)
     if (ready(value)) {
@@ -840,9 +862,15 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
       return
     }
     if (remaining > 0) {
-      const timer = setTimeout(() => { whenService(name, ready, use, remaining - 1) }, BOOT_POLL_MS)
+      const timer = setTimeout(() => {
+        bootTimers.delete(timer)
+        whenService(name, ready, use, remaining - 1, expire)
+      }, BOOT_POLL_MS)
+      bootTimers.add(timer)
       // A host that never mounts the service must not keep the process alive.
       if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+    } else {
+      expire?.()
     }
   }
   const attempts = BOOT_WINDOW_MS / BOOT_POLL_MS
@@ -860,7 +888,16 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
       },
     }))
   }, attempts)
-  whenService('skills', value => isSkillsLike(value), () => { registerSkill(ctx) }, attempts)
+  whenService('skills', value => isSkillsLike(value), () => { registerSkill(ctx) }, attempts, () => {
+    // The same channel a refused provider uses: the manual is what the operator
+    // loses either way, and silence would read as a host that mounted it. The
+    // line names what the check proves — no registry accepted a provider — not a
+    // missing service: a read-only registry still answers `list` and `get`, so
+    // "no skill service" would name a cause that is not true.
+    process.stderr.write(
+      `dsh-supervision: skill unavailable: no skill registry accepted a provider within ${String(BOOT_WINDOW_MS)} ms\n`,
+    )
+  })
 
   // Read reflectively like the rest: a host without a skill registry still loads,
   // and the manual is the only copy of what the agent needs to know. The same
@@ -870,6 +907,8 @@ export function apply(ctx: PluginContext, config: Config, openTty: () => TtyOpen
   ctx.effect(() => () => {
     // A disposed plugin cannot answer anything: the parked asks fail closed
     // before the sockets go, so no asker waits on a supervisor that is gone.
+    for (const timer of bootTimers) clearTimeout(timer)
+    bootTimers.clear()
     dispose()
     for (const transport of transports) void transport.close()
   })
@@ -1095,21 +1134,25 @@ function handlersFor(
     if (bridged.get(state.agent.session.id) !== state) return
     const jobs = jobsOf(ctx.get?.('jobs'))
     let jobRows: readonly JobViewLike[] | undefined
-    let problem: string | undefined
+    /** The message the operator reads, and the stable key a repeat is judged by. */
+    let failure: { readonly message: string; readonly cause: string } | undefined
     if (jobs !== undefined) {
       try {
         jobRows = jobs.list(state.agent.session.id)
       } catch (error) {
         // A failed scan must not read as "the family ended": that would drop the
         // root to done and count a fabricated leave when the service recovers.
-        problem = reasonOf(error)
+        failure = { message: reasonOf(error), cause: causeKeyOf(error) }
       }
     } else if (state.activityError !== undefined || state.jobs.length > 0) {
       // A host that never mounts jobs is the documented empty family; a service
-      // that had reported and is now gone is a degradation worth one line.
-      problem = state.activityError ?? 'no jobs service'
+      // that had reported and is now gone is a degradation worth one line. Its
+      // cause is the fixed literal, so it never repeats: the message printed is
+      // whatever the vanished service last said.
+      failure = { message: state.activityError ?? 'no jobs service', cause: 'no jobs service' }
     }
-    const agents: AgentActivityView[] = ctx.agents.list().map(agent => {
+    const live = ctx.agents.list()
+    const agents: AgentActivityView[] = live.map(agent => {
       const header = agent.session.header
       return {
         sessionId: agent.session.id,
@@ -1118,6 +1161,9 @@ function handlersFor(
         status: agent.status,
       }
     })
+    // The same listing is what proves a child record stale, so one scan serves
+    // both: a session that left it can never emit another fact of its own.
+    pruneChildren(state, live)
     // The last successful snapshot is what a failed scan keeps reporting; only a
     // successful list may replace it.
     const jobsView: readonly JobActivityView[] = jobRows === undefined
@@ -1128,14 +1174,19 @@ function handlersFor(
         ...(job.owner === undefined ? {} : { owner: job.owner }),
         status: job.status,
       }))
-    if (problem !== undefined) {
-      // One line per degradation episode; neither the snapshot nor the stale
-      // clock moves, so a genuinely stuck job still falls back on schedule.
-      if (state.activityError === undefined) state.activityNotice = `activity unavailable: ${problem}`
-      state.activityError = problem
+    if (failure !== undefined) {
+      // One line per degradation episode, and a changed cause is a new episode:
+      // the cause is compared by its stable key, so a message that only renames
+      // its id or duration is the same episode; the full message is what prints.
+      if (state.activityCause !== failure.cause) {
+        state.activityNotice = `activity unavailable: ${failure.message}`
+      }
+      state.activityError = failure.message
+      state.activityCause = failure.cause
     } else if (jobRows !== undefined) {
       if (state.activityError !== undefined) state.activityNotice = 'activity recovered'
       state.activityError = undefined
+      state.activityCause = undefined
       state.jobs = jobsView
     }
     const activity = activityOf(state.agent.session.id, { agents, jobs: jobsView })
@@ -1251,9 +1302,12 @@ function handlersFor(
     return root !== undefined && root !== agent
   }
 
+  /** The record id prefix for a session the host proved is a subagent. */
+  const SUB_PREFIX = 'sub/'
+
   /** The child record id for a live session that is not the attached one. */
   const childIdOf = (agent: AgentLike): string =>
-    isSubagent(agent) ? `sub/${agent.session.id}` : agent.session.id
+    isSubagent(agent) ? `${SUB_PREFIX}${agent.session.id}` : agent.session.id
 
   /** Report every other live session as a child record. */
   const seedChildren = (state: BridgeState): void => {
@@ -1267,13 +1321,34 @@ function handlersFor(
     }
   }
 
+  /** Drop one child's reported row; herdr-core forgets an id it is told to clear. */
+  const clearChild = (state: BridgeState, id: string): void => {
+    if (!config.programStatus) return
+    const data = clearProgramStatus(id)
+    if (data !== '') state.bridge.send({ t: 'osc', data })
+  }
+
+  /**
+   * Retire the child records whose session the host no longer lists. Absence is
+   * the only staleness the seam proves: a departed session cannot emit a fact,
+   * and `AgentLike.status` has no terminal value to wait for. The record's own
+   * key decides, not a fresh lineage lookup: `rootOf` throwing is "could not
+   * tell", and re-deriving the id from it would turn a live `sub/<id>` into a
+   * bare id and retire a running subagent.
+   */
+  const pruneChildren = (state: BridgeState, live: readonly AgentLike[]): void => {
+    const listed = new Set(live.map(agent => agent.session.id))
+    for (const id of state.children.keys()) {
+      const session = id.startsWith(SUB_PREFIX) ? id.slice(SUB_PREFIX.length) : id
+      if (listed.has(session)) continue
+      clearChild(state, id)
+      state.children.delete(id)
+    }
+  }
+
   /** Remove every child record this bridge reported. */
   const clearChildren = (state: BridgeState): void => {
-    for (const id of state.children.keys()) {
-      if (!config.programStatus) continue
-      const data = clearProgramStatus(id)
-      if (data !== '') state.bridge.send({ t: 'osc', data })
-    }
+    for (const id of state.children.keys()) clearChild(state, id)
     state.children.clear()
   }
 
@@ -1561,6 +1636,7 @@ function handlersFor(
       staleNoted: false,
       jobs: [],
       activityError: undefined,
+      activityCause: undefined,
       activityNotice: undefined,
     }
     // Publish the state only now, with the menu in hand and no await left before
@@ -1738,7 +1814,7 @@ function handlersFor(
           )
           return
         case 'skill': {
-          const skills = skillsOf(ctx.get?.('skills'))
+          const skills = skillLookupOf(ctx.get?.('skills'))
           if (skills === undefined) {
             bridge.send({ t: 'echo', text: 'skill service unavailable' })
             return

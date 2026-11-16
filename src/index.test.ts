@@ -128,6 +128,8 @@ class FakeHost {
   readonly cancelled: string[] = []
   /** Stands in for `ctx.get('subagents')`; undefined mimics a host without one. */
   subagentRoots: Map<string, string> | undefined
+  /** When set, `subagents.rootOf` throws with this message. */
+  subagentRootError: string | undefined = undefined
   /** Stands in for `ctx.get('agentDefaultModel')`; undefined mimics a host without one. */
   defaultModel: { readonly provider: string; readonly model: string } | undefined
   /** Stands in for `ctx.get('agentPresets')`; undefined mimics a host without one. */
@@ -164,6 +166,12 @@ class FakeHost {
   workspaceRecords: { path: string; sessionIds: string[] }[] | undefined = undefined
   /** Rows `ctx.skills.list` answers; `undefined` hides the skill service. */
   catalogSkills: { name: string; description: string }[] | undefined = undefined
+  /** Omits `ctx.skills.list`: a host that mounts only the body lookup. */
+  skillsWithoutList = false
+  /** Omits `ctx.skills.get`: a host that mounts only the menu half. */
+  skillsWithoutGet = false
+  /** Omits `ctx.skills.registerProvider`: a read-only registry. */
+  skillsWithoutRegister = false
   /** Bodies `ctx.skills.get` answers, keyed by the skill name. */
   readonly skillBodies = new Map<string, { description: string; content: string }>()
   /** When set, `ctx.skills.list` rejects with this message. */
@@ -184,6 +192,8 @@ class FakeHost {
   readonly jobListeners = new Set<() => void>()
   /** When set, `ctx.jobs.list` throws with this message. */
   jobsListError: string | undefined = undefined
+  /** The `code` that thrown failure carries, when the host sets one. */
+  jobsListErrorCode: string | undefined = undefined
   /** Sessions whose resume must fail, for the attach-failure branch. */
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
@@ -267,24 +277,30 @@ class FakeHost {
         if (name === 'skills') {
           if (this.catalogSkills === undefined && this.skillBodies.size === 0) return undefined
           return {
-            registerProvider: () => {
-              if (this.skillRegisterError !== undefined) throw new Error(this.skillRegisterError)
-              return () => {}
-            },
-            list: async () => {
-              this.catalogLists += 1
-              if (this.catalogWait !== undefined) await this.catalogWait
-              if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
-              return this.catalogSkills ?? []
-            },
-            get: async (skill: string) => {
-              this.skillGets.push(skill)
-              if (this.skillGetWait !== undefined) await this.skillGetWait
-              const body = this.skillBodies.get(skill)
-              return body === undefined
-                ? undefined
-                : { name: skill, description: body.description, content: body.content }
-            },
+            ...(this.skillsWithoutRegister ? {} : {
+              registerProvider: () => {
+                if (this.skillRegisterError !== undefined) throw new Error(this.skillRegisterError)
+                return () => {}
+              },
+            }),
+            ...(this.skillsWithoutList ? {} : {
+              list: async () => {
+                this.catalogLists += 1
+                if (this.catalogWait !== undefined) await this.catalogWait
+                if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
+                return this.catalogSkills ?? []
+              },
+            }),
+            ...(this.skillsWithoutGet ? {} : {
+              get: async (skill: string) => {
+                this.skillGets.push(skill)
+                if (this.skillGetWait !== undefined) await this.skillGetWait
+                const body = this.skillBodies.get(skill)
+                return body === undefined
+                  ? undefined
+                  : { name: skill, description: body.description, content: body.content }
+              },
+            }),
           }
         }
         if (name === 'jobs') {
@@ -292,7 +308,11 @@ class FakeHost {
             ? undefined
             : {
                 list: () => {
-                  if (this.jobsListError !== undefined) throw new Error(this.jobsListError)
+                  if (this.jobsListError !== undefined) {
+                    const failure: Error & { code?: string } = new Error(this.jobsListError)
+                    if (this.jobsListErrorCode !== undefined) failure.code = this.jobsListErrorCode
+                    throw failure
+                  }
                   return this.jobRows ?? []
                 },
                 events: {
@@ -326,6 +346,7 @@ class FakeHost {
         if (name !== 'subagents' || this.subagentRoots === undefined) return undefined
         return {
           rootOf: (agent: FakeAgent) => {
+            if (this.subagentRootError !== undefined) throw new Error(this.subagentRootError)
             const root = this.subagentRoots?.get(agent.id)
             return root === undefined ? agent : this.agents.find(candidate => candidate.id === root) ?? agent
           },
@@ -363,6 +384,12 @@ class FakeHost {
     }
     this.agents.push(agent)
     return agent
+  }
+
+  /** Drop an agent from the listing, as the host does when its session is disposed. */
+  remove(id: string): void {
+    const index = this.agents.findIndex(agent => agent.id === id)
+    if (index >= 0) this.agents.splice(index, 1)
   }
 
   emit(session: string, event: SessionEvent): void {
@@ -1899,6 +1926,93 @@ test('a skill registry that refuses the provider logs one line and leaves the so
   }
 })
 
+test('a host that never mounts the skills service says so once, when the window closes', () => {
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  const written: string[] = []
+  const original = process.stderr.write
+  // Simulated from before `apply`: the retry chain is what expires the window.
+  mock.timers.enable({ apis: ['setTimeout'] })
+  process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
+  try {
+    apply(host.ctx, config({ socketDir: tempDir() }))
+    let ticks = 0
+    // Nothing while the window is open: the service may still arrive.
+    while (written.length === 0 && ticks < 70) {
+      mock.timers.tick(500)
+      ticks += 1
+    }
+    assert.deepEqual(written, [
+      'dsh-supervision: skill unavailable: no skill registry accepted a provider within 30000 ms\n',
+    ])
+    assert.ok(ticks > 50, 'the line waited for the boot window, not the first poll')
+
+    // A retry chain that outlived the window would write a second line here.
+    for (let extra = 0; extra < 20; extra += 1) mock.timers.tick(500)
+    assert.equal(written.length, 1, 'one line per boot, not one per retry')
+  } finally {
+    process.stderr.write = original
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
+test('a read-only skill registry keeps the menu, and the closed window blames only the provider', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  host.skillBodies.set('use-dsh-sup', { description: 'drive the terminal', content: 'Full manual body\n' })
+  // `list` and `get` only: the shape this batch made independently usable.
+  host.skillsWithoutRegister = true
+  const written: string[] = []
+  const original = process.stderr.write
+  mock.timers.enable({ apis: ['setTimeout'] })
+  process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
+  try {
+    apply(host.ctx, config({ socketDir: dir }))
+    const client = await attached(host, dir, 'session-1')
+    try {
+      // Both halves answer without a provider, so the line must not say the
+      // service is missing: it names the one member the check looked for.
+      await until(() => catalogs(client).length === 1, 'the read-only menu')
+      client.write({ t: 'line', text: '/skill:use-dsh-sup' })
+      await until(() => host.steered.length === 1, 'the body the read-only lookup serves')
+      for (let tick = 0; tick < 70; tick += 1) mock.timers.tick(500)
+      assert.deepEqual(written, [
+        'dsh-supervision: skill unavailable: no skill registry accepted a provider within 30000 ms\n',
+      ])
+    } finally {
+      host.dispose()
+    }
+  } finally {
+    process.stderr.write = original
+    mock.timers.reset()
+  }
+})
+
+test('a disposed plugin stops its boot window before the expiry line can fire', () => {
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  const written: string[] = []
+  const original = process.stderr.write
+  mock.timers.enable({ apis: ['setTimeout'] })
+  process.stderr.write = ((chunk: string) => { written.push(chunk); return true }) as typeof process.stderr.write
+  try {
+    apply(host.ctx, config({ socketDir: tempDir() }))
+    // The window is still open when the plugin goes: nothing to supervise.
+    for (let tick = 0; tick < 10; tick += 1) mock.timers.tick(500)
+    host.dispose()
+    // Disposal clears the chain, so the remaining window writes no stderr line.
+    for (let tick = 0; tick < 70; tick += 1) mock.timers.tick(500)
+    assert.deepEqual(written, [], 'a disposed plugin reports nothing')
+  } finally {
+    process.stderr.write = original
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
 test('a hanging catalog service cannot hold the attach', async () => {
   const dir = tempDir()
   const host = new FakeHost()
@@ -2010,6 +2124,54 @@ test('/skill echoes an unknown name and a skill with no body, and steers neither
     await until(() => client.frames.length >= 3, 'the empty-body echo')
     assert.deepEqual(client.frames[2], { t: 'echo', text: 'skill blank has no content' })
     assert.equal(host.steered.length, 0, 'a failed skill never reaches the agent')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a host that mounts only the skill menu keeps the catalog and loses only /skill:', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  host.skillsWithoutGet = true
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    // The menu half stands on its own: `list` alone still fills the catalog.
+    await until(() => catalogs(client).length === 1, 'the catalog the menu half feeds')
+    assert.deepEqual(catalogs(client)[0]?.skills, [{ name: 'use-dsh-sup', description: 'drive the terminal' }])
+    // The other half degrades by itself, with the same honest echo.
+    client.write({ t: 'line', text: '/skill:use-dsh-sup' })
+    await until(() => client.frames.length >= 2, 'the injection refusal')
+    assert.deepEqual(client.frames[1], { t: 'echo', text: 'skill service unavailable' })
+    assert.equal(host.steered.length, 0)
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a host that mounts only the skill body lookup keeps /skill: and loses only the menu', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.skillBodies.set('use-dsh-sup', { description: 'drive the terminal', content: 'Full manual body\n' })
+  host.skillsWithoutList = true
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => catalogs(client).length === 1, 'the menu half that is absent')
+    assert.deepEqual(catalogs(client)[0]?.skills, [], 'no list means no menu rows')
+    // The body half still answers, so naming a skill by hand keeps working.
+    client.write({ t: 'line', text: '/skill:use-dsh-sup' })
+    await until(() => host.steered.length === 1, 'the injected body')
+    const [steer] = host.steered
+    assert.equal(
+      steer === undefined ? '' : steeredText(steer.message),
+      '# Skill: use-dsh-sup\n\ndrive the terminal\n\nFull manual body\n',
+    )
   } finally {
     host.dispose()
   }
@@ -2214,6 +2376,119 @@ test('a failing jobs scan keeps the known job and counts no fabricated leave', a
       'activity recovered',
       '[turn 1] idle',
     ])
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a changed jobs-scan cause is announced again and the fresh cause is what sticks', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    host.jobsListError = 'jobs down'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: jobs down'), 'the first cause')
+
+    // A different failure is a new episode: keeping the first line would report
+    // a cause that no longer holds.
+    host.jobsListError = 'registry closed'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: registry closed'), 'the second cause')
+
+    // The stored cause is the fresh one: a repeat of it must stay silent, which
+    // it cannot if the first cause were still the one compared against.
+    host.emitJob()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      echoesOf(client).filter(text => text.startsWith('activity unavailable:')).length,
+      2,
+      'two episodes, one line each',
+    )
+    assert.equal(lastRootFields(client).state, 'working', 'the known job still keeps the word')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a cause that only renames its duration is one episode, not one line per poll', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    host.jobsListError = 'scan timed out after 1200 ms'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: scan timed out after 1200 ms'), 'the first cause')
+
+    // The same timeout, reported with a different duration: the 2 s poll must
+    // not turn one episode into one line per scan.
+    host.jobsListError = 'scan timed out after 1500 ms'
+    host.emitJob()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      echoesOf(client).filter(text => text.startsWith('activity unavailable:')).length,
+      1,
+      'a renumbered duration is the same episode',
+    )
+
+    // A different cause is still news.
+    host.jobsListError = 'registry closed'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: registry closed'), 'the changed cause')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a coded failure is the episode, not the message it happens to carry', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    host.jobRows = [{ id: 'job-1', owner: 'session-1', status: 'running' }]
+    host.emitJob()
+    await until(() => lastRootFields(client).state === 'working', 'working for the job')
+
+    host.jobsListError = 'lock held by session-9'
+    host.jobsListErrorCode = 'ELOCKED'
+    host.emitJob()
+    await until(() => echoesOf(client).includes('activity unavailable: lock held by session-9'), 'the first cause')
+
+    // Same code, another id in the message: one episode, and the full message
+    // the operator already read is not replaced by a second one.
+    host.jobsListError = 'lock held by session-12'
+    host.emitJob()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      echoesOf(client).filter(text => text.startsWith('activity unavailable:')).length,
+      1,
+      'the code decides, not the id in the message',
+    )
+
+    // A different code under the same message is a new episode.
+    host.jobsListErrorCode = 'EBUSY'
+    host.emitJob()
+    await until(
+      () => echoesOf(client).filter(text => text.startsWith('activity unavailable:')).length === 2,
+      'the changed code',
+    )
   } finally {
     host.dispose()
   }
@@ -2808,6 +3083,97 @@ test('an in-process subagent reports sub/<session> and a switch clears every chi
   assert.deepEqual(client.frames[5], { t: 'osc', data: '\u001b]7501;state=clear:id=session-3\u001b\\' })
   assert.deepEqual(client.frames[6], { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=Yg==\u001b\\' })
   host.dispose()
+})
+
+test('a child record whose session left the listing is retired, not kept forever', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  try {
+    // The host disposing a session is what removes it from the listing; the
+    // subagent/end edge is where a scan next runs.
+    host.remove('session-2')
+    host.emitSubagent()
+    await until(
+      () => client.frames.some(frame => oscData(frame) === '\u001b]7501;state=clear:id=session-2\u001b\\'),
+      'the retired child record',
+    )
+
+    // A retired session cannot come back through a late event of its own.
+    const settled = client.frames.length
+    host.emit('session-2', { type: 'turn/start', data: { turn: 1 } })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(client.frames.length, settled, 'no record is re-created for a session the host forgot')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a child record for a session still listed survives the scan', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  try {
+    host.emitSubagent()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      client.frames.filter(frame => oscData(frame).includes('id=session-2')).length,
+      1,
+      'a listed session keeps its record',
+    )
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a lineage lookup that throws retires no live subagent record', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-child', '/repo')
+  host.subagentRoots = new Map([['session-child', 'session-1']])
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded subagent record')
+
+  try {
+    // The record was stored as `sub/<id>` because lineage proved it earlier. A
+    // scan whose `rootOf` throws proves nothing, so the record key — not a fresh
+    // lookup — decides: the live row must survive.
+    host.subagentRootError = 'no lineage'
+    host.emitSubagent()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    assert.equal(
+      client.frames.filter(frame => oscData(frame).includes('id=sub/session-child')).length,
+      1,
+      'the live subagent keeps its record',
+    )
+    assert.equal(
+      client.frames.some(frame => oscData(frame).startsWith('\u001b]7501;state=clear:id=sub/session-child')),
+      false,
+      'an unproven lineage clears nothing',
+    )
+
+    // Only the session leaving the listing is staleness the seam proves.
+    host.remove('session-child')
+    host.emitSubagent()
+    await until(
+      () => client.frames.some(frame => oscData(frame) === '\u001b]7501;state=clear:id=sub/session-child\u001b\\'),
+      'the retired subagent record',
+    )
+  } finally {
+    host.dispose()
+  }
 })
 
 /** The ask id an echo line names. */

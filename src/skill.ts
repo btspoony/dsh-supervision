@@ -105,6 +105,9 @@ export function skillProvider(read: () => SkillManual = readManual): SkillProvid
     },
     get: async (requested) => {
       if (requested.name !== SKILL_NAME) return undefined
+      // `list` hands out `locator: manualPath`, so a same-named candidate from
+      // another provider must not borrow this body through a bare name match.
+      if (requested.locator !== undefined && requested.locator !== manualPath) return undefined
       const { description, body } = read()
       if (description === '') return undefined
       return { ...summary(description), content: body }

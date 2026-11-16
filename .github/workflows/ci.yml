@@ -36,6 +36,6 @@ jobs:
       # package as well, so the plugin and both packages/* are covered.
       - run: pnpm -r typecheck
 
-      - run: pnpm -r build
-
+      # No standalone build: each package's `test` script builds first, so a
+      # separate step would compile everything twice.
       - run: pnpm -r test

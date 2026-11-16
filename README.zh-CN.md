@@ -131,7 +131,7 @@ dsh web (the process you already run)
 
 **挂载规则。**插件总是先把套接口发现面打开——监听器、`0600` 套接口，以及指向它的 `<pid>-<8hex>.json` 注册表条目——这样转发器才有东西可连。效果层（会话监听、OSC 上报、echo 行、stdin 处理）按桥接打开，"有一条桥接"和"有转发器已连接"是同一件事。因此一个只开 GUI 的 `dsh web` 只暴露一个不干活的套接口，别的什么都没有。当 `DSH_SUP_TERMINAL_ID` 非空（或 herdr-core 的 `HC_TERMINAL_ID` 非空）时，进程同时监督自己所在的终端：同样的记录写到自己的 `/dev/tty`，套接口仍然为别处的 `dsh-sup` 开着。一个会话在两条通路上仍只有一条桥接，第二个认领者会收到 `busy`。如果终端打不开——既没有 `/dev/tty`、stdout 也不是 TTY，或者 stdin 不是终端——插件把原因写到 stderr，并保留套接口这条路。
 
-**对话输出。**桥接也会把对话本身转发出来。一条 `mirror` 帧携带一个条目——操作者的一句话、一条助手回复（适配器上报了 token 用量时才多一行 `⟦↑in ↓out⟧`）、或一次工具调用——转发器按人看的形态呈现它：行模式下是只追加的行（无颜色、无 markdown、无 spinner、不切备用屏，写出的行从不重写），全屏 attach 下则画进 transcript 视口。attach 会先把该会话持久化日志中最近 200 个条目当作普通 `mirror` 帧回放，被截断（`history: showing last 200 items`）或日志读不到时用一行 `echo` 说明。OSC 7501 记录照旧写到 `/dev/tty`，真正的 supervisor 读的仍是这个机器面；行模式输出写到 stdout，且只在 stdout 是 TTY 时写，所以 `dsh-sup … | tee log` 写出的文件依然干净，而全屏交互面只在 stdin 与 stdout 都是终端时才有。`echo` 行只去一个去处：行模式下操作者有 TTY 时是 stdout，全屏 attach 下是 transcript 视口，否则是 `/dev/tty`。
+**对话输出。**桥接也会把对话本身转发出来。一条 `mirror` 帧携带一个条目——操作者的一句话、一条助手回复（适配器上报了 token 用量时才多一行 `⟦↑in ↓out⟧`）、或一次工具调用——转发器按人看的形态呈现它：行模式下是只追加的行（无颜色、无 markdown、无 spinner、不切备用屏，写出的行从不重写），全屏 attach 下则画进 transcript 视口。attach 会先把该会话持久化日志中最近 200 个条目当作普通 `mirror` 帧回放，被截断（`history: showing last 200 items`）或日志读不到时用一行 `echo` 说明。OSC 7501 记录照旧写到 `/dev/tty`，真正的 supervisor 读的仍是这个机器面；行模式输出写到 stdout，且只在 stdout 是 TTY 时写，所以 `dsh-sup … | tee log` 写出的文件依然干净，而全屏交互面只在 stdin 与 stdout 都是终端时才有。`echo` 行只去一个去处：行模式下操作者有 TTY 时是 stdout，全屏 attach 下是 transcript 视口，否则是 `/dev/tty`。mirror 块按终端自身宽度折行，每帧现读；stdout 被重定向时报不出宽度，此时进程内 mirror 退回协议默认的 100 列，即使 `/dev/tty` 是真实面也一样。
 
 ```text
 ❯ 把 mirror 实现出来

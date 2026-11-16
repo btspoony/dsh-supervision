@@ -92,6 +92,24 @@ test('a foreign candidate is not ours to load', async () => {
   assert.equal(await skillProvider().get(foreign), undefined)
 })
 
+test('a same-named candidate from a foreign locator is refused, the listed one is served', async () => {
+  const provider = skillProvider()
+  const [candidate] = await provider.list()
+  assert.ok(candidate)
+
+  // `list` hands out its own locator, so the candidate it produced still loads.
+  const served = await provider.get(candidate)
+  assert.ok(served)
+  assert.ok(served.content.includes('use-dsh-supervision'))
+
+  // Another provider's same-named skill must not borrow this body through a
+  // bare name match: the locator is the only thing that tells them apart.
+  assert.equal(await provider.get({ ...candidate, locator: '/tmp/other/SKILL.md' }), undefined)
+  // A host that drops the locator on the way back leaves only the name to match,
+  // which is the pre-existing contract and stays served.
+  assert.ok(await provider.get({ ...candidate, locator: undefined }))
+})
+
 test('a manual without a description yields no candidate and no throw', async () => {
   // The host rejects an empty description outside its per-provider catch, so
   // offering no candidate is the only safe answer to an unparseable manual.

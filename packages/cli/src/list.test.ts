@@ -12,13 +12,23 @@ const MAIN = fileURLToPath(new URL('./main.js', import.meta.url));
 
 interface Backend {
   readonly socket: string;
+  /** Resolves once the socket is bound and accept-ready. */
+  readonly listening: Promise<void>;
   readonly close: () => void;
 }
 
 function listen(socket: string, onPeer: (socket: Socket) => void): Backend {
   const server: Server = createServer(onPeer);
   server.listen(socket);
-  return { socket, close: () => server.close() };
+  return { socket, listening: once(server, 'listening'), close: () => server.close() };
+}
+
+/** Resolve on `event`, so a caller can await the socket existing instead of sleeping. */
+function once(server: Server, event: 'listening'): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once(event, resolve);
+    server.once('error', reject);
+  });
 }
 
 /** A backend that answers `list` with `items`. */
@@ -71,10 +81,12 @@ const HEADER_ALONE = COLUMNS.join('  ');
  * Runs `dsh-sup list` against a temporary supervision registry. The listing
  * writes its table to stdout, so a real process is the faithful assertion.
  */
-function list(
+async function list(
   backends: readonly Backend[],
   extra: readonly string[] = [],
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  // The registry names a path, so a child spawned before the bind would race it.
+  await Promise.all(backends.map(async (backend) => backend.listening));
   const home = mkdtempSync('/tmp/dsh-list-home-');
   const registry = join(home, 'supervision');
   mkdirSync(registry, { recursive: true });
@@ -193,6 +205,7 @@ test('a mixed loss and refusal exits 1 whichever backend the registry yields fir
   // Both causes reach stderr, each naming its own socket: the exit reports the
   // loss, not the refusal, so the operator must still see the refusal.
   assert.ok(forward.stderr.includes(lost.socket), 'the loss names its backend');
+  assert.ok(forward.stderr.includes(refused.socket), 'the refusal names its backend too');
   assert.match(forward.stderr, /protocol: frame exceeds/);
 });
 
