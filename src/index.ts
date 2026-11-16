@@ -293,8 +293,6 @@ interface BridgeState {
   readonly calls: Map<string, CallRecord>
   /** Set only while an attach is replaying its session's persisted log. */
   replay?: ReplayWindow
-  /** This bind's catalog frame, in flight; `hello` awaits it before replay. */
-  catalog?: Promise<void>
   /** The non-turn families still running for this root. */
   activity: Activity
   /** Epoch milliseconds of the last activity identity change, for the stale guard. */
@@ -1324,15 +1322,13 @@ function handlersFor(
   }
 
   /**
-   * Send one bridge's catalog frame: once per bind and once per switch, behind
-   * the root word. Bounded by `catalogWithin`, so a slow service costs the
-   * attach a short wait and nothing else.
+   * Send one bridge's catalog frame: once per bind and once per switch, in the
+   * same turn as the root word. The payload is already read, so no await can
+   * separate the two and leave the menu empty on a `/` pressed at once.
    * @param state - the bridge that just took the session.
+   * @param catalog - the payload `establish` read before the root word.
    */
-  const sendCatalog = async (state: BridgeState): Promise<void> => {
-    const catalog = await catalogWithin(ctx)
-    // A switch during the fetch owns the bridge now; this menu is not its own.
-    if (bridged.get(state.agent.session.id) !== state) return
+  const sendCatalog = (state: BridgeState, catalog: Catalog): void => {
     // The codec refuses an oversized frame by closing the bridge, so the one
     // frame that must never fail is proven here; a menu that still cannot fit
     // is replaced by the empty one rather than costing the operator the attach.
@@ -1492,7 +1488,13 @@ function handlersFor(
    * @param bridge - the connection that drives it.
    * @param greet - `welcome` only for `hello`; the forwarder pumps stdin on it.
    */
-  const establish = (agent: AgentLike, bridge: Bridge, greet: 'welcome' | 'root'): boolean => {
+  const establish = async (agent: AgentLike, bridge: Bridge, greet: 'welcome' | 'root'): Promise<boolean> => {
+    // The menu is read before the session is claimed, so its payload is in hand
+    // when the root word goes out: a slow service then costs the root word a
+    // bounded wait instead of leaving the menu empty behind an early `welcome`.
+    // Reading it first is also what keeps the claim atomic — no await separates
+    // the single-owner check from the claim.
+    const catalog = await catalogWithin(ctx)
     const session = agent.session.id
     // The shared table is the single-owner rule across both surfaces: a claim
     // that only checks its own transport cannot see the other one, and two
@@ -1549,6 +1551,10 @@ function handlersFor(
     } else {
       announce(state)
     }
+    // The menu follows every root word, bind and switch alike. No await sits
+    // between the two frames, so the forwarder cannot see a `/` pressed into a
+    // menu that is still empty.
+    sendCatalog(state, catalog)
     // A child report alone sets `reported`, so children follow the root word.
     seedChildren(state)
     // The snapshot is already in hand; report it once the root word has gone out.
@@ -1562,9 +1568,6 @@ function handlersFor(
         // A service that cannot subscribe still lists; the poll covers it.
       }
     }
-    // The menu follows every root word, bind and switch alike. `hello` awaits
-    // this promise so the replay can never overtake the catalog.
-    state.catalog = sendCatalog(state)
     return true
   }
 
@@ -1615,7 +1618,7 @@ function handlersFor(
 
       // The early attach check above is the fast path; this one catches a hello
       // that raced another bridge into the shared table while it was binding.
-      if (!establish(agent, bridge, 'welcome')) {
+      if (!(await establish(agent, bridge, 'welcome'))) {
         bridge.send({
           t: 'error',
           code: 'busy',
@@ -1628,13 +1631,10 @@ function handlersFor(
       const state = bridged.get(session)
       if (state === undefined) return
       // The attach arm replays the persisted log; a fresh session has none. The
-      // window opens before anything awaits, so a live event that lands during
-      // the catalog fetch or the log read waits behind the replay instead of
-      // being lost — and the catalog itself is awaited so the menu precedes the
-      // transcript it describes.
-      const window = 'attach' in frame ? armReplay(state) : undefined
-      await state.catalog
-      if (window === undefined) return
+      // window opens before the read awaits, so a live event that lands during
+      // it waits behind the replay instead of being lost.
+      if (!('attach' in frame)) return
+      const window = armReplay(state)
       finishReplay(session, window, await readLog(ctx, session))
     },
 
@@ -1671,8 +1671,8 @@ function handlersFor(
             return
           }
           void create(cwd).then(
-            agent => {
-              if (!establish(agent, bridge, 'root')) {
+            async agent => {
+              if (!(await establish(agent, bridge, 'root'))) {
                 bridge.send({ t: 'echo', text: `new failed: session ${agent.session.id} is already bridged` })
               }
             },
@@ -1683,8 +1683,8 @@ function handlersFor(
         case 'attach':
           if (refuseWhileParked(state)) return
           void bind(command.session).then(
-            agent => {
-              if (!establish(agent, bridge, 'root')) {
+            async agent => {
+              if (!(await establish(agent, bridge, 'root'))) {
                 bridge.send({ t: 'echo', text: `attach failed: session ${agent.session.id} is already bridged` })
               }
             },
