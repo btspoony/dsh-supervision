@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -35,13 +35,16 @@ test('--skill prints the manual with the frontmatter stripped and the version fi
 test('--skill names an unreadable manual on stderr and exits 2', () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-sup-skill-'));
   // A throwaway copy of the entry points without the packaged manual: a broken
-  // install, with nothing in the tree under test moved or touched.
-  const pkg = mkdtempSync(join(fileURLToPath(new URL('..', import.meta.url)), '.skill-test-'));
+  // install, with nothing in the tree under test moved or touched. It lives in
+  // the temp dir, so even a killed run leaves the checkout alone.
+  const pkg = mkdtempSync(join(tmpdir(), 'dsh-sup-pkg-'));
   const bin = join(pkg, 'bin', 'dsh-sup.mjs');
   mkdirSync(join(pkg, 'bin'), { recursive: true });
   mkdirSync(join(pkg, 'lib'), { recursive: true });
   copyFileSync(fileURLToPath(new URL('../bin/dsh-sup.mjs', import.meta.url)), bin);
   copyFileSync(fileURLToPath(new URL('./main.js', import.meta.url)), join(pkg, 'lib', 'main.js'));
+  // The copy sits outside the package, so its runtime deps come from this one.
+  symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), join(pkg, 'node_modules'), 'dir');
   try {
     const run = spawnSync(process.execPath, [bin, '--skill'], {
       env: { ...process.env, DSH_HOME: home },
