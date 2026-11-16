@@ -41,6 +41,14 @@ npm i -g dsh-sup                               # the forwarder, for the supervis
 
 `dsh-sup` is a separate package because it runs as its own program in the supervisor's PTY. Pin a version with `@<version>`.
 
+### Supervisor-side agent
+
+Give this to the agent that drives the supervisor's terminal: it sets up the matching forwarder, reads the manual, and keeps what it learned for later sessions:
+
+```text
+Read the installed plugin's version: `dsh plugin --profile web list` prints `dsh-supervision@<version>`, and for a `link:` row read `version` from that path's `package.json`. If the `dsh` command is missing or the list shows no `dsh-supervision` (a desktop DSH has no CLI), ask me whether to install the forwarder, and on my yes run `npm i -g dsh-sup@latest` — latest, without asking about a version again. Otherwise run `dsh-sup --version`: if the command is missing or prints anything other than that exact string, say what you found and, only after I agree, install it with `npm i -g dsh-sup@<plugin-version>`. Then run `dsh-sup --skill` and treat that printed manual as the authority: record how to use the forwarder — the version coupling, install and upgrade, and the session operations in the manual's own terms — in the skill, memory or AGENTS.md you use for supervisor work. Do not create or attach a session now; this is only about knowing how to use it before the work starts.
+```
+
 ### Connect a session
 
 ```sh
@@ -165,14 +173,6 @@ While a session is bridged the GUI marks it in the sidebar and over the input ar
 ### Agent skill
 
 The plugin ships a `use-dsh-supervision` skill, so the agent inside a supervised session knows it needs the same-version `dsh-sup` forwarder, checks it with `dsh-sup --version`, and offers the install only after the user agrees. `dsh-sup --skill` prints the forwarder's full manual.
-
-### Supervisor-side agent
-
-Give this to the agent that drives the supervisor's terminal: it sets up the matching forwarder, reads the manual, and keeps what it learned for later sessions:
-
-```text
-Read the installed plugin's version: `dsh plugin --profile web list` prints `dsh-supervision@<version>`, and for a `link:` row read `version` from that path's `package.json`. If the `dsh` command is missing or the list shows no `dsh-supervision` (a desktop DSH has no CLI), ask me whether to install the forwarder, and on my yes run `npm i -g dsh-sup@latest` — latest, without asking about a version again. Otherwise run `dsh-sup --version`: if the command is missing or prints anything other than that exact string, say what you found and, only after I agree, install it with `npm i -g dsh-sup@<plugin-version>`. Then run `dsh-sup --skill` and treat that printed manual as the authority: record how to use the forwarder — the version coupling, install and upgrade, and the session operations in the manual's own terms — in the skill, memory or AGENTS.md you use for supervisor work. Do not create or attach a session now; this is only about knowing how to use it before the work starts.
-```
 
 ## How it reports
 
