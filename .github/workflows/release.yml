@@ -222,14 +222,16 @@ jobs:
       # the dist-tag are not carried — the publish job re-derives both from the
       # same merge commit, which is deterministic and leaves nothing to drift.
       #
-      # The attempt suffix is what keeps the resume contract above reachable:
-      # upload-artifact v4 artifacts are immutable and unique per run, so a
-      # whole-workflow re-run would fail here on the previous attempt's name and
-      # skip `publish` entirely.
+      # The artifact name is constant on purpose: both resume shapes have to
+      # resolve it. A whole-workflow re-run runs `build` again and `overwrite`
+      # (v4.4+) deletes the previous attempt's artifact first, which is what
+      # makes a second upload under the same name legal; a failed-jobs-only
+      # re-run skips `build` and `publish` reads what attempt 1 left behind.
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-build-${{ github.run_attempt }}
+          name: release-build
+          overwrite: true
           path: |
             lib
             packages/cli/lib
@@ -269,7 +271,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-build-${{ github.run_attempt }}
+          name: release-build
           path: .
 
       # Both values are re-derived, not carried: the version is the manifest in
