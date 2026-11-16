@@ -1730,6 +1730,49 @@ test('a bind a later one on the same connection replaced stays silent', async ()
   }
 })
 
+test('a superseded /new tells the operator the session it created survives', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  host.catalogSkills = [{ name: 'use-dsh-sup', description: 'drive the terminal' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  let release: () => void = () => {}
+  host.catalogWait = new Promise<void>(resolve => { release = resolve })
+  mock.timers.enable({ apis: ['setTimeout'] })
+
+  try {
+    // `/new` is fire-and-forget, so its bind is still inside the catalog prefetch
+    // when the hello behind it binds another session on the same connection. The
+    // session it created is real and listed, so the loser owes the operator one
+    // line saying so; `/attach` supersession created nothing and stays silent.
+    client.write({ t: 'line', text: '/new' })
+    await until(() => host.catalogLists === 2, 'the new bind read to start')
+    const created = host.created[0] ?? ''
+    assert.ok(created.startsWith('session-'), 'the host recorded a created session')
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-2' })
+    await until(() => host.catalogLists === 3, 'the hello read to start')
+    release()
+    await until(() => client.allFrames.filter(frame => frame.t === 'welcome').length === 2, 'the newer welcome')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+
+    assert.deepEqual(
+      client.allFrames.flatMap(frame => frame.t === 'echo' ? [frame.text] : []),
+      [`new superseded: session ${created} was created; it stays in your session list`],
+      'the losing /new says its session survives, once',
+    )
+    const types = client.allFrames.map(frame => frame.t)
+    const secondWelcome = types.lastIndexOf('welcome')
+    assert.equal(types[secondWelcome + 1], 'catalog', 'the winning bind reaches welcome then catalog')
+    assert.ok(types.indexOf('echo') < secondWelcome, 'the losing /new answers before the winner binds')
+    assert.deepEqual(host.created, [created], 'the host recorded one created session')
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
 test('a claimed session reports nothing before its root word', async () => {
   const dir = tempDir()
   const host = new FakeHost()
