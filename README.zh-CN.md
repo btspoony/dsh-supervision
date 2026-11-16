@@ -44,7 +44,7 @@ npm i -g dsh-sup                               # the forwarder, for the supervis
 ### 连接会话
 
 ```sh
-dsh-sup                                  # create a session in the dsh web process's directory
+dsh-sup                                  # create a session in the dsh-sup process's directory
 dsh-sup --cwd ~/work/project             # create it elsewhere (resolved here, then sent absolute)
 dsh-sup attach session-abc123            # attach an existing session (or: dsh-sup session-abc123)
 dsh-sup --pid 4711 new                   # pick the backend when several dsh web processes run
