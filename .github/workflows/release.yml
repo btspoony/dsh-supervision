@@ -22,6 +22,16 @@ name: Release
 # target event only bought a workflow-file pin at the cost of a release pipeline
 # that never publishes.
 #
+# Two jobs. `build` reads the merge commit and produces the publishable output
+# (install, guard, changelog gate, build, dist-tag) under an explicit
+# `permissions: contents: read`: a read-only token, no repository write and no
+# OIDC credential (`id-token` is never part of the default scopes, and this job
+# does not ask for it). `publish` holds `contents: write` + `id-token: write`
+# for the tag, the GitHub Release and npm's OIDC exchange, receives the built
+# output as an artifact, and installs nothing. A compromised dependency
+# lifecycle script or build tool in the first job has no token to mint and no
+# repository write to make.
+#
 # No NPM_TOKEN / NODE_AUTH_TOKEN secret: npm auth is Trusted Publishing over
 # OIDC, which needs the `id-token: write` scope and setup-node's `registry-url`
 # so the registry scope key exists, with `NODE_AUTH_TOKEN: ""` on the publish
@@ -38,16 +48,18 @@ on:
     types: [closed]
     branches: [main]
 
-permissions:
-  contents: write
-  id-token: write
-
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
+  # `contents: read` is declared, not omitted: an omitted `permissions` key
+  # means the repository/organization default applies, which may be read-write.
+  # Declaring it is what guarantees a read-only token for the install, guard and
+  # build steps — no repository write and no OIDC credential.
+  build:
+    permissions:
+      contents: read
     # Trigger only on PRs opened by the Release prep workflow: merged, from
     # this repository's own `release/v*` branch, authored by the prep actor
     # (`github-actions[bot]` when prep pushes with GITHUB_TOKEN, or the
@@ -158,13 +170,16 @@ jobs:
       # Extract and REQUIRE the changelog section before anything irreversible:
       # publishing first would leave the registry ahead of the release record,
       # and the later refusal could not roll either back.
+      #
+      # The notes file is written into the workspace, not `$RUNNER_TEMP`: it
+      # crosses the job boundary as an artifact and the publish job's GitHub
+      # Release reads it back from the workspace root.
       - name: Extract changelog notes
-        id: changelog
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          NOTES_FILE="${RUNNER_TEMP}/release-notes-${VERSION}.md"
+          NOTES_FILE="release-notes-${VERSION}.md"
           awk -v v="$VERSION" '
             /^## \[/ { if (found) exit }
             index($0, "## [" v "]") == 1 { found = 1 }
@@ -177,7 +192,6 @@ jobs:
             echo "::error::No changelog content found for v${VERSION} in CHANGELOG.md; refusing to publish or tag without release notes."
             exit 1
           fi
-          echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
 
       # Both published packages are built here: the root `build` script only
       # builds the plugin, while `dsh-sup` ships its own `lib/`.
@@ -193,6 +207,80 @@ jobs:
       # `1.0.0-rc.1` -> `rc`). The derivation rejects an empty channel, a
       # digit-only channel and `latest` for a prerelease, so a prerelease never
       # steals the stable channel.
+      - name: Resolve npm dist-tag
+        id: disttag
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="$(node scripts/dist-tag.mjs "$VERSION")"
+          echo "Resolved npm dist-tag: ${TAG} (version ${VERSION})"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # Everything the publish job consumes travels as one artifact: the two
+      # published packages' build output and the changelog notes. The version and
+      # the dist-tag are not carried — the publish job re-derives both from the
+      # same merge commit, which is deterministic and leaves nothing to drift.
+      #
+      # The artifact name is constant on purpose: both resume shapes have to
+      # resolve it. A whole-workflow re-run runs `build` again and `overwrite`
+      # (v4.4+) deletes the previous attempt's artifact first, which is what
+      # makes a second upload under the same name legal; a failed-jobs-only
+      # re-run skips `build` and `publish` reads what attempt 1 left behind.
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build
+          overwrite: true
+          path: |
+            lib
+            packages/cli/lib
+            release-notes-*.md
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    # The only job that may write the repository or mint an npm credential: the
+    # tag push and the GitHub Release need `contents: write`, npm's Trusted
+    # Publishing exchange needs `id-token: write`, and nothing here installs or
+    # builds anything.
+    permissions:
+      contents: write
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      # Same `registry-url` contract as the build job: it writes the
+      # `//registry.npmjs.org/:_authToken` key that the OIDC exchange fills.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-build
+          path: .
+
+      # Both values are re-derived, not carried: the version is the manifest in
+      # the merge commit the build job cross-checked against the PR title, and the
+      # dist-tag comes from the same script on the same version.
+      - name: Resolve version
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
       - name: Resolve npm dist-tag
         id: disttag
         env:
@@ -318,7 +406,7 @@ jobs:
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: v${{ steps.ver.outputs.version }}
-          body_path: ${{ steps.changelog.outputs.notes_file }}
+          body_path: release-notes-${{ steps.ver.outputs.version }}.md
           draft: false
           # The channel signal is the version-derived npm dist-tag (`latest`
           # for stable, the prerelease channel such as `alpha`); the GitHub

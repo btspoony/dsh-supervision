@@ -1570,6 +1570,8 @@ function handlersFor(
    * @param agent - the session now under supervision.
    * @param bridge - the connection that drives it.
    * @param greet - `welcome` only for `hello`; the forwarder pumps stdin on it.
+   * @param created - whether this bind created a fresh session (`/new`), which
+   *   exists on the host even when this bind loses it.
    * @returns `bound` when this bridge now owns the session, `busy` when another
    *   bridge does, and `superseded` when a later bind on this same bridge
    *   replaced it while the menu was being read — that bind owns everything.
@@ -1578,6 +1580,7 @@ function handlersFor(
     agent: AgentLike,
     bridge: Bridge,
     greet: 'welcome' | 'root',
+    created: boolean,
   ): Promise<'bound' | 'busy' | 'superseded'> => {
     const session = agent.session.id
     // The shared table is the single-owner rule across both surfaces: a claim
@@ -1603,10 +1606,23 @@ function handlersFor(
     // The menu is read after the claim — a refused hello never pays for it.
     const catalog = await catalogWithin(ctx)
     // A later bind on this same connection replaced this one: it publishes its
-    // own state and sends its own root word, so nothing here may answer.
+    // own state and sends its own root word, so nothing here may answer for it.
     // Superseded is not a lost claim: the newer bind on this same bridge holds
     // it, and unclaiming here would clear that bind's session instead.
-    if (bindSeq.get(bridge) !== ticket) return 'superseded'
+    if (bindSeq.get(bridge) !== ticket) {
+      // A `/new` created a session the host keeps, so losing the bind must not
+      // look like nothing happened: one line on this connection, and the winner
+      // stays untouched. A superseded `/attach` created nothing and stays silent.
+      if (created) {
+        // The way back in is the id, not the list: a session with no turn yet is
+        // blank, and both `list` and the sidebar hide it until one arrives. If the
+        // winning hello then loses its own claim it closes this socket, and a write
+        // after that close raises ERR_STREAM_WRITE_AFTER_END, which the transport's
+        // socket error handler drops: this line is lost, never thrown.
+        bridge.send({ t: 'echo', text: `new superseded: session ${session} was created; re-attach with /attach ${session}` })
+      }
+      return 'superseded'
+    }
     // Another surface may have bound this session while the menu was read. The
     // shared table is the only single-owner rule across transports, and this bind
     // has published nothing yet, so the check belongs here: no await follows it
@@ -1734,7 +1750,7 @@ function handlersFor(
 
       // The early attach check above is the fast path; this one catches a hello
       // that raced another bridge into the shared table while it was binding.
-      const outcome = await establish(agent, bridge, 'welcome')
+      const outcome = await establish(agent, bridge, 'welcome', !('attach' in frame))
       // The later bind on this connection already owns it and sends its own root
       // word; this hello has nothing left to say and must not close the socket.
       if (outcome === 'superseded') return
@@ -1792,8 +1808,8 @@ function handlersFor(
           }
           void create(cwd).then(
             async agent => {
-              // A superseded bind stays silent: the later one owns the connection.
-              if (await establish(agent, bridge, 'root') === 'busy') {
+              // `establish` already echoed a superseded /new's session; only busy needs a word.
+              if (await establish(agent, bridge, 'root', true) === 'busy') {
                 bridge.send({ t: 'echo', text: `new failed: session ${agent.session.id} is already bridged` })
               }
             },
@@ -1805,8 +1821,8 @@ function handlersFor(
           if (refuseWhileParked(state)) return
           void bind(command.session).then(
             async agent => {
-              // A superseded bind stays silent: the later one owns the connection.
-              if (await establish(agent, bridge, 'root') === 'busy') {
+              // A superseded /attach stays silent: nothing was created.
+              if (await establish(agent, bridge, 'root', false) === 'busy') {
                 bridge.send({ t: 'echo', text: `attach failed: session ${agent.session.id} is already bridged` })
               }
             },
