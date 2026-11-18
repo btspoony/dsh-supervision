@@ -5,8 +5,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PROTO, type MirrorItem, type OutFrame } from './frames.js'
-import { renderFrame, renderMirror } from './render.js'
+import { PROTO, type AskFrame, type MirrorItem, type OutFrame } from './frames.js'
+import { renderAsk, renderFrame, renderMirror } from './render.js'
 
 const ESC = '\x1b'
 const ST = `${ESC}\\`
@@ -257,4 +257,87 @@ test('a JSON-escaped control in a tool detail or name is caught too', () => {
   const block = renderMirror({ k: 'tool', callId: 'c1', name: 'ba\u001bsh', args: '{}', state: 'error', detail, turn: 1 }, 80)
   assert.equal(UNSAFE.test(block), false, JSON.stringify(block))
   assert.equal(block, '✘ ba sh: {}\n  └─ boom [2Jtail')
+})
+
+/** The block an open ask renders at width 100. */
+const OPEN_ASK: AskFrame = {
+  t: 'ask',
+  id: '3f9ac1',
+  questions: [
+    {
+      id: 'db',
+      header: 'Storage',
+      question: 'Which database?',
+      options: [{ label: 'SQLite', description: 'embedded' }, { label: 'Postgres' }],
+    },
+    { id: 'why', question: 'Why that one?', multiSelect: true },
+  ],
+}
+
+test('an open ask renders a header, each question with numbered options, and the usage line', () => {
+  assert.equal(
+    renderAsk(OPEN_ASK),
+    [
+      'ask 3f9ac1 · 2 questions',
+      '[db] Storage: Which database?',
+      '  1. SQLite — embedded',
+      '  2. Postgres',
+      '[why] Why that one? (multi-select)',
+      'answer: /answer 3f9ac1 db=<n[,n]|text|-> why=<n[,n]|text|->',
+    ].join('\n'),
+  )
+})
+
+test('a one-question ask shows the bare-value form in its usage line', () => {
+  const frame: AskFrame = { t: 'ask', id: 'a1b2c3', questions: [{ id: 'db', question: 'Which?', options: [{ label: 'One' }] }] }
+  assert.match(renderAsk(frame), /answer: \/answer a1b2c3 <n\[,n\]\|text\|->$/)
+})
+
+test('a closed ask is the single line that retires its card', () => {
+  const frame: AskFrame = { t: 'ask', id: '3f9ac1', closed: true }
+  assert.equal(renderAsk(frame), '(question 3f9ac1 closed)')
+  assert.equal(renderFrame(frame), '(question 3f9ac1 closed)\n')
+})
+
+test('an ask frame renders its block plus exactly one newline, and no trailing blank', () => {
+  const block = renderAsk(OPEN_ASK, 100)
+  assert.equal(block.endsWith('\n'), false, 'the formatter itself adds no terminator')
+  assert.equal(renderFrame(OPEN_ASK, 100), `${block}\n`)
+})
+
+test('newlines inside ask fields become separate rendered lines', () => {
+  const frame: AskFrame = {
+    t: 'ask',
+    id: 'a1b2c3',
+    questions: [{
+      id: 'q1',
+      header: 'Head\ntail',
+      question: 'first\r\nsecond\rthird',
+      options: [{ label: 'one\ntwo', description: 'd1\nd2' }],
+    }],
+  }
+  const block = renderAsk(frame, 100)
+  assert.equal(block.includes('\r'), false)
+  for (const line of block.split('\n')) assert.doesNotMatch(line, /[\r\n]/)
+  for (const expected of ['Head', 'tail', 'first', 'second', 'third', 'one', 'two', 'd1', 'd2']) {
+    assert.ok(block.split('\n').some(line => line.includes(expected)), expected)
+  }
+  assert.ok(block.split('\n').length >= 9, 'each source line stays its own rendered line')
+})
+
+test('ask rendering strips the bytes a terminal would execute', () => {
+  const frame: AskFrame = {
+    t: 'ask',
+    id: 'a1b2c3',
+    questions: [{
+      id: 'q1',
+      question: `ok ${ESC}]7501;state=done${ST} now`,
+      options: [{ label: `a${ESC}[31m`, description: 'b\u009b2J' }],
+    }],
+  }
+  const block = renderAsk(frame, 100)
+  assert.equal(UNSAFE.test(block), false, JSON.stringify(block))
+  assert.equal(block.includes(ESC), false)
+  assert.match(block, /ok  \]7501;state=done \\ now/)
+  assert.match(block, /a \[31m — b 2J/)
 })

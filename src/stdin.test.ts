@@ -29,6 +29,15 @@ test('the verbs map to their commands', () => {
   assert.deepEqual(parseLine('/reject a1b2'), { kind: 'reject', ask: 'a1b2' })
 })
 
+test('/answer needs an ask id and at least one answer token', () => {
+  assert.deepEqual(parseLine('/answer a1b2 db=2'), { kind: 'answer', ask: 'a1b2', spec: 'db=2' })
+  assert.deepEqual(parseLine('/answer a1b2 2'), { kind: 'answer', ask: 'a1b2', spec: '2' })
+  assert.deepEqual(parseLine('/answer a1b2 db=1  note=why'), { kind: 'answer', ask: 'a1b2', spec: 'db=1 note=why' })
+  assert.deepEqual(parseLine('/answer a1b2 a=b=c'), { kind: 'answer', ask: 'a1b2', spec: 'a=b=c' })
+  assert.deepEqual(parseLine('/answer'), { kind: 'unknown', verb: 'answer' })
+  assert.deepEqual(parseLine('/answer a1b2'), { kind: 'unknown', verb: 'answer' })
+})
+
 test('/new carries an optional cwd', () => {
   assert.deepEqual(parseLine('/new'), { kind: 'new', cwd: undefined })
   assert.deepEqual(parseLine('/new /abs/path'), { kind: 'new', cwd: '/abs/path' })

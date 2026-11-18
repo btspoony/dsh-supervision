@@ -12,7 +12,7 @@ import type { ProgramState } from './osc.js'
 /** One frame, newline included, never larger than this. */
 export const MAX_FRAME = 64 * 1024
 /** The only protocol version either side speaks. */
-export const PROTO = 3
+export const PROTO = 4
 
 // The catalog frame is one menu, so its sections are bounded rather than
 // streamed: a host with hundreds of skills must not push a menu (or a frame)
@@ -24,6 +24,17 @@ export const MAX_CATALOG_COMMANDS = 50
 export const MAX_CATALOG_NAME = 64
 export const MAX_CATALOG_DESCRIPTION = 160
 export const MAX_CATALOG_ARGUMENT_HINT = 64
+
+// An ask frame is one question card, bounded for the same reason as the menu:
+// a host tool call must not push a frame past what a terminal or a decoder can
+// carry. Text fields are trimmed rather than rejected; the ids are keys, so an
+// over-long answer id is the one thing the codec refuses to repair.
+export const MAX_ASK_QUESTIONS = 16
+export const MAX_ASK_OPTIONS = 16
+export const MAX_ASK_TEXT = 2048
+export const MAX_ASK_LABEL = 120
+export const MAX_ASK_DESCRIPTION = 300
+export const MAX_ASK_ID = 32
 
 // Caps a mirror frame's strings so one assistant block still encodes. Each is a
 // UTF-8 byte budget, not a character count: JSON escaping and multibyte text
@@ -106,6 +117,30 @@ export type MirrorItem =
       readonly turn: number
     }
 
+/** One selectable answer a question offers. */
+export interface AskOption {
+  readonly label: string
+  readonly description?: string
+}
+
+/** One question an agent asked (`ask_user_question`), reduced to what a supervisor answers. */
+export interface AskQuestion {
+  readonly id: string
+  readonly question: string
+  readonly header?: string
+  readonly multiSelect?: boolean
+  readonly options?: readonly AskOption[]
+}
+
+/**
+ * One pending agent question, or the close of one the supervisor can no longer
+ * answer. The closed form carries no questions: a surface that answers by id
+ * must forget the card, not re-render it.
+ */
+export type AskFrame =
+  | { readonly t: 'ask'; readonly id: string; readonly questions: readonly AskQuestion[] }
+  | { readonly t: 'ask'; readonly id: string; readonly closed: true }
+
 /** One catalog row: a name and the one-line description a menu shows. */
 export interface CatalogEntry {
   readonly name: string
@@ -130,6 +165,7 @@ export type OutFrame =
       readonly skills: readonly CatalogSkill[]
       readonly commands: readonly CatalogCommand[]
     }
+  | AskFrame
   | { readonly t: 'error'; readonly code: ErrorCode; readonly message: string }
   | { readonly t: 'bye'; readonly reason: string }
 
@@ -286,6 +322,8 @@ function parseOutFrame(line: string): OutFrame | undefined {
       return parseSessions(parsed['items'])
     case 'catalog':
       return parseCatalog(parsed)
+    case 'ask':
+      return parseAsk(parsed)
     case 'mirror':
       return parseMirror(parsed['item'])
     case 'error': {
@@ -446,6 +484,93 @@ function catalogName(value: string): string | undefined {
  * execute, whatever the peer sent.
  */
 function catalogText(text: string, limit: number): string {
+  const clean = stripControls(text)
+  return clean.length > limit ? clean.slice(0, limit) : clean
+}
+
+/**
+ * The ask frame: a question card or its close. Ids are keys an answer names, so
+ * an empty or over-cap ask id is malformed instead of repaired; every other text
+ * is sanitized and truncated like the menu's. A closed frame that still carries
+ * questions is contradictory, which is malformed rather than a precedence guess.
+ */
+function parseAsk(frame: Record<string, unknown>): OutFrame | undefined {
+  const id = askKey(frame['id'])
+  if (id === undefined) return undefined
+  if (frame['closed'] !== undefined) {
+    if (frame['closed'] !== true || frame['questions'] !== undefined) return undefined
+    return { t: 'ask', id, closed: true }
+  }
+  const raw = frame['questions']
+  if (!Array.isArray(raw) || raw.length === 0) return undefined
+  const questions: AskQuestion[] = []
+  for (const entry of raw.slice(0, MAX_ASK_QUESTIONS)) {
+    const question = parseAskQuestion(entry)
+    if (question === undefined) return undefined
+    questions.push(question)
+  }
+  return { t: 'ask', id, questions }
+}
+
+/**
+ * The ask id a surface answers by.
+ * @param value - the decoded field.
+ * @returns the control-free id, or undefined when it is missing, blank or too long to key on.
+ */
+function askKey(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const clean = stripControls(value)
+  return clean === '' || clean.length > MAX_ASK_ID ? undefined : clean
+}
+
+/** One question, or undefined when a field that makes it answerable is unusable. */
+function parseAskQuestion(value: unknown): AskQuestion | undefined {
+  if (!isRecord(value)) return undefined
+  const rawId = value['id']
+  const text = value['question']
+  const header = value['header']
+  const multiSelect = value['multiSelect']
+  if (typeof rawId !== 'string' || typeof text !== 'string') return undefined
+  if (header !== undefined && typeof header !== 'string') return undefined
+  if (multiSelect !== undefined && typeof multiSelect !== 'boolean') return undefined
+  const id = askText(rawId, MAX_ASK_ID)
+  const question = askText(text, MAX_ASK_TEXT)
+  if (id === '' || question.trim() === '') return undefined
+  const options = parseAskOptions(value['options'])
+  if (options === null) return undefined
+  return {
+    id,
+    question,
+    ...(header === undefined ? {} : { header: askText(header, MAX_ASK_LABEL) }),
+    ...(multiSelect === undefined ? {} : { multiSelect }),
+    ...(options === undefined ? {} : { options }),
+  }
+}
+
+/**
+ * The numbered options of one question.
+ * @returns the options, undefined when the field is absent, or null when it is malformed.
+ */
+function parseAskOptions(value: unknown): readonly AskOption[] | undefined | null {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) return null
+  const options: AskOption[] = []
+  for (const entry of value.slice(0, MAX_ASK_OPTIONS)) {
+    if (!isRecord(entry)) return null
+    const label = entry['label']
+    const description = entry['description']
+    if (typeof label !== 'string') return null
+    if (description !== undefined && typeof description !== 'string') return null
+    options.push({
+      label: askText(label, MAX_ASK_LABEL),
+      ...(description === undefined ? {} : { description: askText(description, MAX_ASK_DESCRIPTION) }),
+    })
+  }
+  return options
+}
+
+/** One capped, control-free ask text field; a terminal renders every one of them. */
+function askText(text: string, limit: number): string {
   const clean = stripControls(text)
   return clean.length > limit ? clean.slice(0, limit) : clean
 }

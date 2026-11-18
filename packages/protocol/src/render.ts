@@ -7,7 +7,7 @@
  * lines, wrapped to the width the caller names and never coloured or rewritten.
  */
 
-import { isRecord, type MirrorItem, type OutFrame } from './frames.js'
+import { isRecord, type AskFrame, type MirrorItem, type OutFrame } from './frames.js'
 import { APP_NAME, encodeReport, stripControls } from './osc.js'
 
 /** Default wrap width when the caller has no terminal width of its own. */
@@ -39,6 +39,10 @@ export function renderFrame(frame: OutFrame, width?: number): string | undefined
       // one newline every tty record ends with, exactly like `echo` does, so a
       // following OSC record never glues onto the transcript's last line.
       return `${renderMirror(frame.item, width)}\n`
+    case 'ask':
+      // Same contract as `mirror`: a pure block, one terminator, no colour or
+      // cursor movement, so a supervisor may append it to any transcript.
+      return `${renderAsk(frame, width)}\n`
     case 'sessions':
     case 'catalog':
       // Machine surfaces: a listing belongs to the socket's list command and a
@@ -117,6 +121,55 @@ export function renderMirror(item: MirrorItem, width: number = DEFAULT_WIDTH): s
  */
 function trimTail(lines: string[]): void {
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+}
+
+/**
+ * Renders one pending agent question as an append-only block: a header naming
+ * the ask, each question with its options numbered from 1, and the usage line
+ * the answer grammar expects. A closed ask is a single line, so the surface that
+ * saw the card can retire it. No colour, no cursor movement, no trailing newline.
+ * @param frame - the ask frame to render, open or closed.
+ * @param width - columns to wrap to; defaults to {@link DEFAULT_WIDTH}.
+ * @returns the block's lines joined with `\n`.
+ */
+export function renderAsk(frame: AskFrame, width: number = DEFAULT_WIDTH): string {
+  if ('closed' in frame) return stripControls(`(question ${frame.id} closed)`, '\t')
+  const w = Math.max(1, Math.floor(width))
+  const lines: string[] = []
+  const count = frame.questions.length
+  wrapLines(`ask ${frame.id} · ${String(count)} ${count === 1 ? 'question' : 'questions'}`, w, '', '', lines)
+  for (const question of frame.questions) {
+    // The id stays on the question line: an answer token names it, and a person
+    // reading the card needs that token without opening the manual.
+    const header = question.header === undefined ? '' : `${question.header}: `
+    const multi = question.multiSelect === true ? ' (multi-select)' : ''
+    wrapLines(`[${question.id}] ${header}${question.question}${multi}`, w, '', '  ', lines)
+    for (const [index, option] of (question.options ?? []).entries()) {
+      const text = option.description === undefined ? option.label : `${option.label} — ${option.description}`
+      wrapLines(`${String(index + 1)}. ${text}`, w, '  ', '    ', lines)
+    }
+  }
+  // The grammar is restated per ask id: one token per question, so a multi-question
+  // card shows every question id its answer has to name.
+  const spec = count === 1
+    ? '<n[,n]|text|->'
+    : frame.questions.map(question => `${question.id}=<n[,n]|text|->`).join(' ')
+  wrapLines(`answer: /answer ${frame.id} ${spec}`, w, '', '', lines)
+  trimTail(lines)
+  return lines.map(line => stripControls(line, '\t')).join('\n')
+}
+
+/**
+ * Wraps every source line of one field separately, so a newline a caller carried
+ * becomes a line break instead of one long line with a collapsed space.
+ * @param source - the field text, newlines included.
+ * @param width - columns to wrap to.
+ * @param first - prefix for the first line of each source line.
+ * @param rest - prefix for a wrapped continuation.
+ * @param into - the block being built.
+ */
+function wrapLines(source: string, width: number, first: string, rest: string, into: string[]): void {
+  for (const line of source.split(/\r\n|\r|\n/)) wrap(line, width, first, rest, into)
 }
 
 /**
