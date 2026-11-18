@@ -180,6 +180,15 @@ export const CTRL_C_HINT = 'Ctrl+C again to exit';
 export const LOCAL_EXITS = ['q', 'quit', 'exit', 'bye'] as const;
 
 /**
+ * Every slash verb the plugin resolves before the host command seam
+ * (`src/stdin.ts` `parseLine`), exits included and last — the order the menu
+ * renders them. A host row with one of these names can never run from the
+ * terminal: `parseLine` answers the line with the local meaning, so the menu
+ * must not offer it.
+ */
+const LOCAL_VERBS = ['cancel', 'status', 'new', 'attach', 'approve', 'reject', 'skill', 'y', 'n', ...LOCAL_EXITS] as const;
+
+/**
  * Whether one submitted line is a forwarder-local exit. Anything longer or
  * differently cased is ordinary input for the session.
  * Trailing whitespace is ignored because accepting a menu entry appends a space.
@@ -353,9 +362,9 @@ export function catalogOf(frame: unknown): Catalog | undefined {
  * The slash menu for one catalog: a `skill:<name>` entry per skill (typed as
  * `/skill:`, which the provider fuzzy-matches against the bare names), then the
  * registered host commands the bridge can execute, then the forwarder's own
- * exit commands. A host row named like a local exit is dropped, so the exit
- * keeps its row and its meaning; the same priority applies to every other local
- * verb on the line. Argument completions filter the skills again, so a
+ * exit commands. A host row whose name is a local verb is dropped, so the local
+ * row keeps its meaning and the menu never offers a line the plugin would
+ * resolve elsewhere. Argument completions filter the skills again, so a
  * half-typed name narrows instead of guessing.
  * @param catalog - the host's advertised vocabulary; an empty one still offers
  *   the forwarder-local exits.
@@ -365,7 +374,7 @@ export function autocompleteCatalog(catalog: Catalog): SlashCommand[] {
   // verbatim: a control byte there is an escape sequence or a split into the
   // editor's inserted text. Unsafe rows are dropped, never silently rewritten.
   const safeSkills = catalog.skills.filter(
-    (skill) => MENU_ROW_NAME.test(skill.name) && isPlainText(skill.name) && isPlainText(skill.description),
+    (skill) => SKILL_ROW_NAME.test(skill.name) && isPlainText(skill.name) && isPlainText(skill.description),
   );
   const items = (prefix: string): AutocompleteItem[] =>
     safeSkills
@@ -379,8 +388,8 @@ export function autocompleteCatalog(catalog: Catalog): SlashCommand[] {
   }));
   const safeCommands = catalog.commands.filter(
     (command) =>
-      MENU_ROW_NAME.test(command.name) &&
-      !(LOCAL_EXITS as readonly string[]).includes(command.name) &&
+      COMMAND_ROW_NAME.test(command.name) &&
+      !(LOCAL_VERBS as readonly string[]).includes(command.name) &&
       isPlainText(command.name) &&
       isPlainText(command.description) &&
       (command.argumentHint === undefined || isPlainText(command.argumentHint)),
@@ -424,9 +433,10 @@ export function providerFor(catalog: Catalog, basePath: string): CombinedAutocom
   return new CombinedAutocompleteProvider(autocompleteCatalog(catalog), basePath, fdBinary() ?? null);
 }
 
-// The plugin's menu-name shape: a catalog row outside it could never be typed
-// as a slash command, so the menu would advertise a dead row.
-const MENU_ROW_NAME = /^[a-z0-9][a-z0-9-]*$/;
+// The plugin's skill-name shape: `/skill:<name>` outside it would be refused.
+const SKILL_ROW_NAME = /^[a-z0-9][a-z0-9-]*$/;
+// dsh's COMMAND_NAME: lowercase, `_` allowed, never a leading dash or a colon.
+const COMMAND_ROW_NAME = /^[a-z][a-z0-9_-]*$/;
 
 /** True when a catalog field carries no control bytes a terminal would obey. */
 function isPlainText(value: string): boolean {

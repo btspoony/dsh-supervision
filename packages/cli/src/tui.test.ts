@@ -708,13 +708,20 @@ test('the catalog becomes one skill entry per skill plus the local exits', () =>
 
 
 test('host command rows join the menu after skills and before the local exits', () => {
+  const localVerbRows = ['cancel', 'status', 'new', 'attach', 'approve', 'reject', 'skill', 'y', 'n'].map(
+    (name) => ({ name, description: `a host row the local /${name} owns` }),
+  );
   const catalog: Catalog = {
     skills: [{ name: 'use-dsh-sup', description: 'run the forwarder' }],
     commands: [
       { name: 'compact', description: 'shrink the context', argumentHint: 'focus' },
       { name: 'goal', description: 'set a goal' },
+      { name: 'code_review', description: 'underscores are part of a command name' },
+      ...localVerbRows,
       { name: 'q', description: 'a host row the local exit owns' },
-      { name: 'bad name', description: 'not a command name' },
+      { name: '-lead', description: 'a leading dash is no command name' },
+      { name: 'foo:bar', description: 'a colon is no command name' },
+      { name: 'bad name', description: 'a space is no command name' },
       { name: 'evil\u001b]0;pwned\u0007', description: 'control bytes in the name' },
       { name: 'bad-hint', description: 'control bytes in the hint', argumentHint: 'x\u001b]52;c;aGk=\u0007' },
     ],
@@ -722,12 +729,12 @@ test('host command rows join the menu after skills and before the local exits', 
   const entries = autocompleteCatalog(catalog);
   assert.deepEqual(
     entries.map((entry) => entry.name),
-    ['skill:use-dsh-sup', 'compact', 'goal', ...LOCAL_EXITS],
+    ['skill:use-dsh-sup', 'compact', 'goal', 'code_review', ...LOCAL_EXITS],
   );
   assert.equal(entries[1]?.description, 'shrink the context');
   assert.equal(entries[1]?.argumentHint, 'focus');
   assert.equal(entries[2]?.argumentHint, undefined);
-  // The local exit keeps its own row and meaning; the host row is dropped.
+  // Every local verb keeps its own meaning, exits included; its host row is gone.
   assert.equal(entries.at(-1)?.name, 'bye');
   assert.equal(entries.at(-1)?.description, 'leave dsh-sup (local)');
 })

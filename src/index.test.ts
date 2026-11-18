@@ -166,7 +166,12 @@ class FakeHost {
   workspaceRecords: { path: string; sessionIds: string[] }[] | undefined = undefined
   /** Rows `ctx.skills.list` answers; `undefined` hides the skill service. */
   catalogSkills:
-    | { name: string; description: string; invocation?: { modelInvocable: boolean; userInvocable: boolean } }[]
+    | {
+        name: string
+        description: string
+        content?: string
+        invocation?: { modelInvocable: boolean; userInvocable: boolean }
+      }[]
     | undefined = undefined
   /** Omits `ctx.skills.list`: a host that mounts no skill catalog. */
   skillsWithoutList = false
@@ -180,12 +185,16 @@ class FakeHost {
   catalogWait: Promise<void> | undefined = undefined
   /** How many times `ctx.skills.list` was entered, pinned read or not. */
   catalogLists = 0
+  /** The options each `ctx.skills.list` call carried, in call order. */
+  readonly skillListCalls: { readonly cwd?: string; readonly scope?: unknown }[] = []
   /** Rows `ctx.commands.list` answers; `undefined` hides the command service. */
   commandRows: { name: string; description: string; input?: { hint: string } }[] | undefined = undefined
   /** The outcome `ctx.commands.execute` settles with. */
   commandResult: { kind: 'success'; text?: string } | { kind: 'error'; text: string } = { kind: 'success' }
   /** When set, `ctx.commands.list` rejects with this message. */
   commandListError: string | undefined = undefined
+  /** When set, `ctx.commands.list` holds its answer until this resolves. */
+  commandListWait: Promise<void> | undefined = undefined
   /** When set, `ctx.commands.execute` rejects with this message. */
   commandError: string | undefined = undefined
   /** When set, `ctx.commands.execute` holds its answer until this resolves. */
@@ -299,8 +308,9 @@ class FakeHost {
               },
             }),
             ...(this.skillsWithoutList ? {} : {
-              list: async () => {
+              list: async (options: { readonly cwd?: string; readonly scope?: unknown } = {}) => {
                 this.catalogLists += 1
+                this.skillListCalls.push(options)
                 if (this.catalogWait !== undefined) await this.catalogWait
                 if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
                 // The host resolves an omitted policy to both invocations.
@@ -315,8 +325,9 @@ class FakeHost {
         if (name === 'commands') {
           if (this.commandRows === undefined) return undefined
           return {
-            list: (agent: FakeAgent) => {
+            list: async (agent: FakeAgent) => {
               this.commandLists.push(agent.id)
+              if (this.commandListWait !== undefined) await this.commandListWait
               if (this.commandListError !== undefined) throw new Error(this.commandListError)
               return this.commandRows ?? []
             },
@@ -2134,6 +2145,35 @@ test('a hanging catalog service cannot hold the attach', async () => {
   }
 })
 
+
+test('a hanging command list cannot hold the attach', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.commandRows = [{ name: 'compact', description: 'shrink the context' }]
+  host.commandListWait = new Promise<void>(() => {})
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = new Client(await listening(dir))
+  await client.ready()
+  // The catalog's 250 ms deadline is armed inside the hello handler.
+  mock.timers.enable({ apis: ['setTimeout'] })
+
+  try {
+    client.write({ t: 'hello', proto: PROTO, pid: process.pid, attach: 'session-1' })
+    await until(() => host.commandLists.length === 1, 'the command read to start')
+    mock.timers.tick(250)
+    const [welcome] = await client.take(1)
+    assert.equal(welcome?.t, 'welcome', 'the deadline frees the root word')
+    await until(() => catalogs(client).length === 1, 'the empty catalog after the deadline')
+    assert.deepEqual(catalogs(client)[0], { t: 'catalog', skills: [], commands: [] })
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a usable bridge after the timeout')
+  } finally {
+    mock.timers.reset()
+    host.dispose()
+  }
+})
+
 test('/skill: steers the /name gesture and lets the host inject the body', async () => {
   const dir = tempDir()
   const host = new FakeHost()
@@ -2150,6 +2190,11 @@ test('/skill: steers the /name gesture and lets the host inject the body', async
     assert.equal(steer?.message.role, 'user')
     assert.deepEqual(steer?.message.source, { kind: 'user' })
     assert.equal(steer === undefined ? '' : steeredText(steer.message), '/use-dsh-sup')
+    // The catalog is read for this agent and its workspace, the view the web
+    // composer loads, so project-level and scoped skills are not lost.
+    assert.equal(host.skillListCalls.length, 2)
+    assert.equal(host.skillListCalls[1]?.cwd, '/repo')
+    assert.equal(host.skillListCalls[1]?.scope, host.agents[0])
     // The space spelling resolves the same skill.
     client.write({ t: 'line', text: '/skill use-dsh-sup' })
     await until(() => host.steered.length === 2, 'the second gesture')
@@ -2192,6 +2237,27 @@ test('a switch during the skill catalog read never steers into the previous sess
     host.dispose()
   }
 })
+
+test('a skill the host renders from an empty body still steers /name', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  // The bridge never reads the body any more: the host's pre-step renders it,
+  // so the old "has no content" refusal is gone by design.
+  host.catalogSkills = [{ name: 'bodyless', description: 'rendered elsewhere', content: '' }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/skill:bodyless' })
+    await until(() => host.steered.length === 1, 'the gesture')
+    assert.equal(host.steered[0] === undefined ? '' : steeredText(host.steered[0].message), '/bodyless')
+    assert.deepEqual(host.steered[0]?.message.source, { kind: 'user' })
+  } finally {
+    host.dispose()
+  }
+})
+
 test('/skill echoes an unknown or non-user-invocable name, and steers neither', async () => {
   const dir = tempDir()
   const host = new FakeHost()
@@ -2328,7 +2394,7 @@ test('a registered host command executes in-process and echoes its result', asyn
   }
 })
 
-test('a silent success and a failure each map to one echo line', async () => {
+test('a silent or blank success and a failure each map to one echo line', async () => {
   const dir = tempDir()
   const host = new FakeHost()
   host.add('session-1', '/repo')
@@ -2341,14 +2407,25 @@ test('a silent success and a failure each map to one echo line', async () => {
     client.write({ t: 'line', text: '/compact' })
     await until(() => echoesOf(client).length === 1, 'the ok echo')
     assert.deepEqual(echoesOf(client), ['/compact: ok'])
+    // An empty or blank success is absent, never a blank echo line.
+    for (const [index, blank] of ['', '   '].entries()) {
+      host.commandResult = { kind: 'success', text: blank }
+      client.write({ t: 'line', text: '/compact' })
+      await until(() => echoesOf(client).length === index + 2, 'the blank-success echo')
+    }
+    assert.deepEqual(echoesOf(client), ['/compact: ok', '/compact: ok', '/compact: ok'])
+    host.commandResult = { kind: 'success', text: 'compacted' }
+    client.write({ t: 'line', text: '/compact' })
+    await until(() => echoesOf(client).length === 4, 'the real-text echo')
+    assert.deepEqual(echoesOf(client)[3], 'compacted')
     host.commandResult = { kind: 'error', text: 'cannot compact yet' }
     client.write({ t: 'line', text: '/compact' })
-    await until(() => echoesOf(client).length === 2, 'the error echo')
-    assert.deepEqual(echoesOf(client), ['/compact: ok', 'cannot compact yet'])
+    await until(() => echoesOf(client).length === 5, 'the error echo')
+    assert.deepEqual(echoesOf(client)[4], 'cannot compact yet')
     host.commandError = 'registry broke'
     client.write({ t: 'line', text: '/compact' })
-    await until(() => echoesOf(client).length === 3, 'the thrown-seam echo')
-    assert.deepEqual(echoesOf(client), ['/compact: ok', 'cannot compact yet', 'command failed: registry broke'])
+    await until(() => echoesOf(client).length === 6, 'the thrown-seam echo')
+    assert.deepEqual(echoesOf(client)[5], 'command failed: registry broke')
   } finally {
     host.dispose()
   }
@@ -2369,6 +2446,27 @@ test('an unknown host command keeps the unknown-command echo and steers nothing'
     assert.deepEqual(host.commandFinds, ['nope'])
     assert.equal(host.commandCalls.length, 0)
     assert.equal(host.steered.length, 0)
+  } finally {
+    host.dispose()
+  }
+})
+
+
+test('a local non-exit verb never reaches the command seam', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.commandRows = [{ name: 'status', description: 'a host row the local verb shadows' }]
+  host.commandResult = { kind: 'success', text: 'host status' }
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/status' })
+    await until(() => client.frames.length >= 2, 'the local status answer')
+    assert.match(echoesOf(client)[0] ?? '', /^session=session-1 state=idle/)
+    assert.deepEqual(host.commandFinds, [], 'the local verb is resolved before the seam')
+    assert.equal(host.commandCalls.length, 0)
   } finally {
     host.dispose()
   }

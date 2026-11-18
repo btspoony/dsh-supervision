@@ -441,7 +441,7 @@ function presetsOf(value: unknown): AgentPresetsLike | undefined {
  * so the bridge only forwards the gesture.
  */
 interface SkillCatalogLike {
-  list(options?: unknown): Promise<readonly unknown[]>
+  list(options: { readonly cwd?: string; readonly scope?: unknown }): Promise<readonly unknown[]>
 }
 
 /** @returns the host's skill catalog, when the mounted service can list it. */
@@ -1799,9 +1799,13 @@ function handlersFor(
           return
         }
         const { result } = execution
+        // A command that succeeds without words says nothing; a blank result
+        // would otherwise echo an empty line and look like a failure.
         bridge.send({
           t: 'echo',
-          text: result.kind === 'success' ? result.text ?? `/${name}: ok` : result.text,
+          text: result.kind === 'success'
+            ? result.text === undefined || result.text.trim() === '' ? `/${name}: ok` : result.text
+            : result.text,
         })
       } catch (error) {
         if (bridged.get(session) !== state) return
@@ -1932,9 +1936,12 @@ function handlersFor(
           const session = state.agent.session.id
           // The line handler returns at once, so the read may outlive this bind:
           // a /new or /attach switch meanwhile must win over the stale steer.
+          const cwd = state.agent.session.header?.cwd
           void (async (): Promise<void> => {
             try {
-              const rows = await skills.list()
+              // The same view the web composer loads: project-level and
+              // agent-scoped skills would otherwise read as missing here.
+              const rows = await skills.list({ ...(cwd === undefined ? {} : { cwd }), scope: state.agent })
               if (bridged.get(session) !== state) return
               // The host injects the body from a user-sourced `/name` gesture, so
               // the catalog decides whether this name may take that path.

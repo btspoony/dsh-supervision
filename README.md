@@ -131,14 +131,15 @@ menu: typing `/` lists every entry, typing `/skill:` narrows to the session's
 skills as `/skill:<name>` (fuzzy-matching the bare name works too); Tab inserts
 the highlighted completion, while Enter accepts and sends it immediately. Skills
 come first, then the host commands the bridge can execute, then the forwarder's
-own exits. Local verbs win: an exit's host row is never offered, and a host
-command whose name collides with `/cancel`, `/status`, `/new`, `/attach`,
-`/approve`, `/reject` or `/skill:` still runs the local meaning when typed. A
-host command such as `/compact` executes in-process against the attached session
-and answers as one
-echo line — its own result text, or `/<name>: ok` when it reports none — without
-sending a model message or adding a transcript item. The catalog frame is surface
-input only — it never reaches stdout or `/dev/tty`, and line mode ignores it.
+own exits. Local verbs win: a host row whose name the plugin resolves locally
+— `/cancel`, `/status`, `/new`, `/attach`, `/approve`, `/reject`, bare
+`/skill`, `/y`, `/n` and the exits — is not offered, and typing that name runs
+the local meaning. A host command such as `/compact` executes in-process against
+the attached session and answers as one echo line — its own result text, or
+`/<name>: ok` when it reports none — without sending a model message; the session
+log still records `command/run` and `command/done`, which the web view can show.
+The catalog frame is surface input only — it never reaches stdout or `/dev/tty`,
+and line mode ignores it.
 `@file` completion resolves against the session's directory when the `fd` binary
 is installed. `/skill:<name>` is rewritten to `/<name>` (plus any words after
 it) and steered as one user message; the host then injects the rendered skill
