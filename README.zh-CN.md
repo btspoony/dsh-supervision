@@ -95,7 +95,7 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 
 **未验证的平台。** Windows 终端（ConPTY）与 tmux 尚未验证：全屏交互面还没有在那里跑过。真去跑时先查三件事——每条退出路径（`Ctrl+D`、`/q`、后端断开）都能恢复备用屏；终端会上报交互面认识的键盘协议（modifyOtherKeys 或 Kitty 协议，决定 `Shift+Enter` 的行为）；pane 里有桥接能打开的 `/dev/tty`，没有的话只有套接口面挂载，原因写到 stderr。
 
-**补全。** attach 建立后插件会发来一条 `catalog` 帧，只携带该会话的 skills；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。菜单只提供 skills 与 forwarder 自己的退出命令，没有别的：像 `/compact` 这样的宿主斜杠命令在这里不可达——桥接无法执行它，提交只会得到 `unknown command /<verb>`——那些命令属于 web 输入框。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。`/skill:<name>` 与普通输入一样转发，由插件注入该 skill 的正文。skill 行可以在名字之后带额外文本（`/skill:use-dsh-sup focus on the retry`）；这些词会作为 `## Operator note` 附在正文之后到达模型。
+**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与已注册的宿主命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。菜单先列 skills，再列桥接能够执行的宿主命令，最后是 forwarder 自己的退出命令。本地动词优先：退出命令对应的宿主行不会出现在菜单里；宿主命令若与 `/cancel`、`/status`、`/new`、`/attach`、`/approve`、`/reject` 或 `/skill:` 同名，输入时执行的仍是本地含义。像 `/compact` 这样的宿主命令会在进程内对当前会话执行，结果只以一行 echo 回到终端——命令自己的结果文本，或它没有文本时的 `/<name>: ok`——既不会给模型发消息，也不会新增 transcript 条目。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。`/skill:<name>` 会被改写为 `/<name>`（并带上名字之后的词）作为一条用户消息 steer 出去，由宿主注入渲染好的 skill 正文，行为与 web 输入框一致。未知或不允许用户调用的名字会得到 `skill not found: <name>`。已知限制：桥接不传附件；命令生命周期（`command/run`/`command/done`）不会镜像到终端，echo 行就是全部报告。
 
 **退出。** `/q`、`/quit`、`/exit`、`/bye`——单独一行、全小写、后面不带参数——在两种界面（TUI 与 `--no-tui`）都能退出 attach：转发器发出 `bye`、恢复终端并以 0 退出，且它们不会被转发给会话，不会留下挂起的模型请求。转发器还会把它们追加到 `/`
 菜单末尾并标注 `leave dsh-sup (local)`，因此退出方式不依赖宿主 catalog 提供了
@@ -196,7 +196,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 | `GET /dsh-supervision/state` | `{"proto":1,"sessions":{"<session id>":{"bridged":true,"terminal":"…","pid":<n>,"since":<ms>,"asks":["<ask id>"]}}}`；其他方法 `405` |
 | `POST /dsh-supervision/reclaim` | `content-type: application/json`，请求体 `{"session":"<id>"}` 且小于 4 KiB → `200 {"reclaimed":true}`；没有桥接持有该会话时 `409 {"reclaimed":false}`；其他 content type `415`，请求体不合法 `400` |
 
-**监督方读到的 echo 行**，按写入顺序：状态变化时 `[turn <n>] <state>`，`[ask <id>] <tool> parked (<session>)`，`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`，上面那条 `/status` 应答，`refused: <n> approval(s) parked`，`new failed: …`，`attach failed: …`，`unknown command /<verb>`；subagent/job 活动超出窗口时，那一行 `activity stale: …` 写在同一轮 publish 的 `[turn <n>] <state>` 行之前。
+**监督方读到的 echo 行**，按写入顺序：状态变化时 `[turn <n>] <state>`，`[ask <id>] <tool> parked (<session>)`，`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`，上面那条 `/status` 应答，`refused: <n> approval(s) parked`，`new failed: …`，`attach failed: …`，host 命令的结果（命令自己的文本、`/<name>: ok` 或 `command failed: …`），`unknown command /<verb>`；subagent/job 活动超出窗口时，那一行 `activity stale: …` 写在同一轮 publish 的 `[turn <n>] <state>` 行之前。
 
 **`dsh-sup` 退出码：**`0` 正常 `bye`，`1` 后端丢失，`2` 用法错误或没有存活后端，`3` `busy`，`4` `locked`，`5` `create-failed`，`6` `protocol`（本进程拒发某帧，说明后端还活着）。
 

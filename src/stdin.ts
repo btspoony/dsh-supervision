@@ -12,6 +12,7 @@ export type Command =
   | { readonly kind: 'new'; readonly cwd: string | undefined }
   | { readonly kind: 'attach'; readonly session: string }
   | { readonly kind: 'skill'; readonly name: string; readonly args: readonly string[] }
+  | { readonly kind: 'command'; readonly name: string; readonly text: string }
   | { readonly kind: 'approve'; readonly ask: string }
   | { readonly kind: 'reject'; readonly ask: string }
   | { readonly kind: 'yes' }
@@ -66,7 +67,12 @@ export function parseLine(line: string): Command | undefined {
       ? { kind: 'skill', name: skillName, args: verb === 'skill' ? args.slice(1) : args }
       : { kind: 'unknown', verb: 'skill' }
   }
+  // No verb at all is not a command name; the bridge answers it as unknown.
+  if (verb === '') return { kind: 'unknown', verb }
   switch (verb) {
+    // A bare `/skill` names nothing; its colon spellings were handled above.
+    case 'skill':
+      return { kind: 'unknown', verb }
     case 'cancel':
       return args.length === 0 ? { kind: 'cancel' } : { kind: 'unknown', verb }
     case 'status':
@@ -95,7 +101,9 @@ export function parseLine(line: string): Command | undefined {
       return verb === 'approve' ? { kind: 'approve', ask } : { kind: 'reject', ask }
     }
     default:
-      return { kind: 'unknown', verb }
+      // A registered host command: only the bridge's command service can say
+      // whether this name exists, so the whole line travels with it.
+      return { kind: 'command', name: verb, text }
   }
 }
 

@@ -352,9 +352,10 @@ export function catalogOf(frame: unknown): Catalog | undefined {
 /**
  * The slash menu for one catalog: a `skill:<name>` entry per skill (typed as
  * `/skill:`, which the provider fuzzy-matches against the bare names), then the
- * forwarder's own exit commands. A wire `commands` row is deliberately not
- * rendered: the bridge cannot execute one, so listing it would advertise a slash
- * command that does nothing. Argument completions filter the skills again, so a
+ * registered host commands the bridge can execute, then the forwarder's own
+ * exit commands. A host row named like a local exit is dropped, so the exit
+ * keeps its row and its meaning; the same priority applies to every other local
+ * verb on the line. Argument completions filter the skills again, so a
  * half-typed name narrows instead of guessing.
  * @param catalog - the host's advertised vocabulary; an empty one still offers
  *   the forwarder-local exits.
@@ -364,7 +365,7 @@ export function autocompleteCatalog(catalog: Catalog): SlashCommand[] {
   // verbatim: a control byte there is an escape sequence or a split into the
   // editor's inserted text. Unsafe rows are dropped, never silently rewritten.
   const safeSkills = catalog.skills.filter(
-    (skill) => SKILL_ROW_NAME.test(skill.name) && isPlainText(skill.name) && isPlainText(skill.description),
+    (skill) => MENU_ROW_NAME.test(skill.name) && isPlainText(skill.name) && isPlainText(skill.description),
   );
   const items = (prefix: string): AutocompleteItem[] =>
     safeSkills
@@ -376,8 +377,21 @@ export function autocompleteCatalog(catalog: Catalog): SlashCommand[] {
     description: skill.description,
     getArgumentCompletions: (prefix: string) => items(prefix),
   }));
+  const safeCommands = catalog.commands.filter(
+    (command) =>
+      MENU_ROW_NAME.test(command.name) &&
+      !(LOCAL_EXITS as readonly string[]).includes(command.name) &&
+      isPlainText(command.name) &&
+      isPlainText(command.description) &&
+      (command.argumentHint === undefined || isPlainText(command.argumentHint)),
+  );
+  const commands: SlashCommand[] = safeCommands.map((command) => ({
+    name: command.name,
+    description: command.description,
+    ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+  }));
   const local: SlashCommand[] = LOCAL_EXITS.map((name) => ({ name, description: 'leave dsh-sup (local)' }));
-  return [...skills, ...local];
+  return [...skills, ...commands, ...local];
 }
 
 /**
@@ -410,9 +424,9 @@ export function providerFor(catalog: Catalog, basePath: string): CombinedAutocom
   return new CombinedAutocompleteProvider(autocompleteCatalog(catalog), basePath, fdBinary() ?? null);
 }
 
-// The plugin's skill-name shape: a catalog row outside it could never be typed
+// The plugin's menu-name shape: a catalog row outside it could never be typed
 // as a slash command, so the menu would advertise a dead row.
-const SKILL_ROW_NAME = /^[a-z0-9][a-z0-9-]*$/;
+const MENU_ROW_NAME = /^[a-z0-9][a-z0-9-]*$/;
 
 /** True when a catalog field carries no control bytes a terminal would obey. */
 function isPlainText(value: string): boolean {

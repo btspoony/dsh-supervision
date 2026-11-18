@@ -706,6 +706,32 @@ test('the catalog becomes one skill entry per skill plus the local exits', () =>
   );
 });
 
+
+test('host command rows join the menu after skills and before the local exits', () => {
+  const catalog: Catalog = {
+    skills: [{ name: 'use-dsh-sup', description: 'run the forwarder' }],
+    commands: [
+      { name: 'compact', description: 'shrink the context', argumentHint: 'focus' },
+      { name: 'goal', description: 'set a goal' },
+      { name: 'q', description: 'a host row the local exit owns' },
+      { name: 'bad name', description: 'not a command name' },
+      { name: 'evil\u001b]0;pwned\u0007', description: 'control bytes in the name' },
+      { name: 'bad-hint', description: 'control bytes in the hint', argumentHint: 'x\u001b]52;c;aGk=\u0007' },
+    ],
+  };
+  const entries = autocompleteCatalog(catalog);
+  assert.deepEqual(
+    entries.map((entry) => entry.name),
+    ['skill:use-dsh-sup', 'compact', 'goal', ...LOCAL_EXITS],
+  );
+  assert.equal(entries[1]?.description, 'shrink the context');
+  assert.equal(entries[1]?.argumentHint, 'focus');
+  assert.equal(entries[2]?.argumentHint, undefined);
+  // The local exit keeps its own row and meaning; the host row is dropped.
+  assert.equal(entries.at(-1)?.name, 'bye');
+  assert.equal(entries.at(-1)?.description, 'leave dsh-sup (local)');
+})
+
 test('a skill name outside the plugin grammar never reaches the menu', () => {
   const catalog: Catalog = {
     skills: [

@@ -125,20 +125,27 @@ lost backend), the terminal reports a keyboard protocol the surface understands
 pane has a `/dev/tty` the bridge can open; without one only the socket surface
 mounts, and the reason lands on stderr.
 
-**Suggestions.** The plugin sends a `catalog` frame with the session's skills once
-the attach is up, and the editor turns it into a menu: typing `/` lists every
-entry, typing `/skill:` narrows to the session's skills as `/skill:<name>`
-(fuzzy-matching the bare name works too); Tab inserts the highlighted completion,
-while Enter accepts and sends it immediately. The menu offers skills and the
-forwarder's own exits, nothing else: a host slash command such as `/compact` is
-unreachable from here — the bridge cannot execute one, so it would answer
-`unknown command /<verb>` — and those commands stay in the web input box. The
-catalog frame is surface input only — it never reaches stdout or `/dev/tty`, and
-line mode ignores it. `@file` completion resolves against the session's directory
-when the `fd` binary is installed. `/skill:<name>` is forwarded like any other
-line, so the plugin turns it into the skill's body. A skill line may carry extra
-text after the name (`/skill:use-dsh-sup focus on the retry`); those words reach
-the model as an `## Operator note` after the body.
+**Suggestions.** The plugin sends a `catalog` frame with the session's skills and
+registered host commands once the attach is up, and the editor turns it into a
+menu: typing `/` lists every entry, typing `/skill:` narrows to the session's
+skills as `/skill:<name>` (fuzzy-matching the bare name works too); Tab inserts
+the highlighted completion, while Enter accepts and sends it immediately. Skills
+come first, then the host commands the bridge can execute, then the forwarder's
+own exits. Local verbs win: an exit's host row is never offered, and a host
+command whose name collides with `/cancel`, `/status`, `/new`, `/attach`,
+`/approve`, `/reject` or `/skill:` still runs the local meaning when typed. A
+host command such as `/compact` executes in-process against the attached session
+and answers as one
+echo line — its own result text, or `/<name>: ok` when it reports none — without
+sending a model message or adding a transcript item. The catalog frame is surface
+input only — it never reaches stdout or `/dev/tty`, and line mode ignores it.
+`@file` completion resolves against the session's directory when the `fd` binary
+is installed. `/skill:<name>` is rewritten to `/<name>` (plus any words after
+it) and steered as one user message; the host then injects the rendered skill
+body exactly as it does for the web composer. An unknown or non-user-invocable
+name answers `skill not found: <name>`. Known limits: the bridge carries no
+attachments, and the command lifecycle (`command/run`/`command/done`) is not
+mirrored into the terminal — the echo line is the whole report.
 
 **Leaving.** `/q`, `/quit`, `/exit` and `/bye` — on a line of their own,
 lowercase, nothing after them — leave the attach from either surface (TUI or
@@ -246,7 +253,7 @@ A clear is `state=clear` for the root, `state=clear:id=<id>` for one child recor
 | `GET /dsh-supervision/state` | `{"proto":1,"sessions":{"<session id>":{"bridged":true,"terminal":"…","pid":<n>,"since":<ms>,"asks":["<ask id>"]}}}`; `405` for another method |
 | `POST /dsh-supervision/reclaim` | `content-type: application/json`, body `{"session":"<id>"}` under 4 KiB → `200 {"reclaimed":true}`; `409 {"reclaimed":false}` when no bridge held it; `415` for another content type, `400` for a bad body |
 
-**Echo lines** the supervisor reads, in the order they are written: `[turn <n>] <state>` on a state change, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer above, `refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`, `unknown command /<verb>`. When subagent/job activity outlives its window, its `activity stale: …` line is written immediately before that publish's `[turn <n>] <state>` line.
+**Echo lines** the supervisor reads, in the order they are written: `[turn <n>] <state>` on a state change, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer above, `refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`, a host command's result (its own text, `/<name>: ok`, or `command failed: …`), `unknown command /<verb>`. When subagent/job activity outlives its window, its `activity stale: …` line is written immediately before that publish's `[turn <n>] <state>` line.
 
 **Exit codes of `dsh-sup`:** `0` clean `bye`, `1` backend lost, `2` usage or no live backend, `3` `busy`, `4` `locked`, `5` `create-failed`, `6` `protocol` (a frame this process refused, so the backend is alive).
 

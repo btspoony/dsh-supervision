@@ -10,7 +10,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
-import { MAX_FRAME, PROTO, clearProgramStatus, encodeFrame, programStatus } from 'dsh-supervision-protocol'
+import { MAX_FRAME, PROTO, clearProgramStatus, encodeFrame, isRecord, programStatus } from 'dsh-supervision-protocol'
 import type {
   ErrorCode,
   HelloFrame,
@@ -291,6 +291,8 @@ interface BridgeState {
   readonly children: Map<string, RootState>
   /** Started tool calls awaiting their result, so a result can report its `ms`. */
   readonly calls: Map<string, CallRecord>
+  /** Aborted when this binding is released, so no stale command result echoes. */
+  readonly commandAbort: AbortController
   /** Set only while an attach is replaying its session's persisted log. */
   replay?: ReplayWindow
   /** The non-turn families still running for this root. */
@@ -433,27 +435,56 @@ function presetsOf(value: unknown): AgentPresetsLike | undefined {
   return value as AgentPresetsLike
 }
 
-/** One skill as `ctx.skills.get` returns it: the body `/skill:` injects. */
-interface SkillDefinitionLike {
-  readonly name: string
-  readonly description: string
-  readonly content: string
+/**
+ * The `ctx.skills` half a `/skill:` line needs: the catalog that says whether
+ * a name is user-invocable. The host injects the body from the `/name` gesture,
+ * so the bridge only forwards the gesture.
+ */
+interface SkillCatalogLike {
+  list(options?: unknown): Promise<readonly unknown[]>
+}
+
+/** @returns the host's skill catalog, when the mounted service can list it. */
+function skillCatalogOf(value: unknown): SkillCatalogLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const list = (value as { list?: unknown }).list
+  return typeof list === 'function' ? value as SkillCatalogLike : undefined
+}
+
+/** Whether one host skill summary permits a direct user gesture. */
+function isUserInvocable(row: unknown): boolean {
+  if (!isRecord(row) || !isRecord(row['invocation'])) return false
+  return row['invocation']['userInvocable'] === true
+}
+
+/** One settled host command, as `ctx.commands.execute` returns it. */
+interface CommandExecutionLike {
+  readonly result:
+    | { readonly kind: 'success'; readonly text?: string }
+    | { readonly kind: 'error'; readonly text: string }
 }
 
 /**
- * The `ctx.skills` half a `/skill:` line needs: one body by name. The menu is
- * the other half (`list`, read by `catalogOf`), and each degrades on its own —
- * a host that mounts only one of them keeps that surface.
+ * The `ctx.commands` registry, reduced to the calls the bridge makes. All three
+ * are one service: a host that cannot execute a row must not advertise it.
  */
-interface SkillLookupLike {
-  get(name: string, options?: unknown): Promise<SkillDefinitionLike | undefined>
+interface CommandServiceLike {
+  list(agent: AgentLike): readonly unknown[]
+  find(agent: AgentLike, name: string): unknown
+  execute(
+    agent: AgentLike,
+    line: string,
+    attachments: readonly unknown[],
+    signal: AbortSignal,
+  ): Promise<CommandExecutionLike | undefined>
 }
 
-/** @returns the host's skill lookup, when the mounted service can answer a body. */
-function skillLookupOf(value: unknown): SkillLookupLike | undefined {
+/** @returns the host's command registry, when a usable one is mounted. */
+function commandsOf(value: unknown): CommandServiceLike | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const get = (value as { get?: unknown }).get
-  return typeof get === 'function' ? value as SkillLookupLike : undefined
+  const { list, find, execute } = value as { list?: unknown; find?: unknown; execute?: unknown }
+  if (typeof list !== 'function' || typeof find !== 'function' || typeof execute !== 'function') return undefined
+  return value as CommandServiceLike
 }
 
 /** @returns the host's workspace registry, when a usable one is mounted. */
@@ -558,26 +589,37 @@ function sessionLogOf(value: unknown): SessionLogLike | undefined {
 /** A session's persisted log, or the reason the attach goes without one. */
 type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure: string }
 
+/** The command descriptors one agent can run: none when the service is absent or throws. */
+async function commandRowsOf(ctx: PluginContext, agent: AgentLike): Promise<readonly unknown[]> {
+  const commands = commandsOf(ctx.get?.('commands'))
+  if (commands === undefined) return []
+  try {
+    return await commands.list(agent)
+  } catch {
+    return []
+  }
+}
+
 /**
  * Build one bridge's catalog payload, bounded. A service that never answers
  * degrades to an empty menu: the menu is worth a short wait, never a bogged
  * attach.
- * @param ctx - the plugin context; the skill service is optional.
- * @returns the capped menu, or an empty one when the service hangs.
+ * @param ctx - the plugin context; both services are optional.
+ * @param agent - the session whose commands are advertised.
+ * @returns the capped menu, or an empty one when a service hangs.
  */
-async function catalogWithin(ctx: PluginContext): Promise<Catalog> {
+async function catalogWithin(ctx: PluginContext, agent: AgentLike): Promise<Catalog> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<Catalog>(resolve => {
     timer = setTimeout(() => { resolve({ skills: [], commands: [] }) }, CATALOG_PREFETCH_MS)
     if (typeof timer === 'object' && 'unref' in timer) timer.unref()
   })
   try {
-    return await Promise.race([
-      // The raw service: `catalogOf` reads only `list`, so a host that mounts
-      // the menu without a body lookup still contributes its rows.
-      catalogOf({ skills: ctx.get?.('skills') }),
-      deadline,
-    ])
+    const read = (async (): Promise<Catalog> =>
+      // The raw skill service: `catalogOf` reads only `list`, so a host that
+      // mounts no command registry still contributes its skill rows.
+      catalogOf({ skills: ctx.get?.('skills'), commands: await commandRowsOf(ctx, agent) }))()
+    return await Promise.race([read, deadline])
   } finally {
     if (timer !== undefined) clearTimeout(timer)
   }
@@ -1415,10 +1457,10 @@ function handlersFor(
     // The codec refuses an oversized frame by closing the bridge, so the one
     // frame that must never fail is proven here; a menu that still cannot fit
     // is replaced by the empty one rather than costing the operator the attach.
-    // The bridge can list host commands but never run one, so advertising them
-    // offered menu rows whose submission answers `unknown command`. The field
-    // stays on the wire for the forwarder's parser; it just never carries a row.
-    let frame: OutFrame = { t: 'catalog', skills: catalog.skills, commands: [] }
+    // Host command rows are runnable now, so the menu carries them beside the
+    // skills; the empty frame remains the fallback when the whole payload cannot
+    // be encoded.
+    let frame: OutFrame = { t: 'catalog', skills: catalog.skills, commands: catalog.commands }
     try {
       encodeFrame(frame)
     } catch {
@@ -1543,6 +1585,8 @@ function handlersFor(
     // raised it, and its asker must not hang on a question nobody will answer.
     cancelAsks(session)
     if (state === undefined) return
+    // A command still running for this binding has no surface left to answer.
+    state.commandAbort.abort()
     // The poll and the job subscription belong to this bridge alone; a released
     // bridge must not keep the process (or the host) busy for nothing.
     if (state.activityTimer !== undefined) {
@@ -1604,7 +1648,7 @@ function handlersFor(
     const ticket = ++bindCount
     bindSeq.set(bridge, ticket)
     // The menu is read after the claim — a refused hello never pays for it.
-    const catalog = await catalogWithin(ctx)
+    const catalog = await catalogWithin(ctx, agent)
     // A later bind on this same connection replaced this one: it publishes its
     // own state and sends its own root word, so nothing here may answer for it.
     // Superseded is not a lost claim: the newer bind on this same bridge holds
@@ -1642,6 +1686,7 @@ function handlersFor(
       agent,
       pid: pids.get(bridge) ?? 0,
       since: Date.now(),
+      commandAbort: new AbortController(),
       root,
       shown: { state: root.current.state, msg: '', title: root.current.title, kind: undefined, turn: root.turn },
       children: new Map(),
@@ -1714,6 +1759,55 @@ function handlersFor(
     if (parked.length === 0) return false
     state.bridge.send({ t: 'echo', text: `refused: ${String(parked.length)} approval(s) parked` })
     return true
+  }
+
+  /**
+   * Run one registered host command against the bridged agent and echo its
+   * outcome. The execution outlives the line handler, so the binding's own
+   * controller aborts it when this bridge is replaced, and its stale result
+   * must never reach the next session.
+   * @param state - the bridge that received the line.
+   * @param bridge - the connection to echo on.
+   * @param name - the slash verb, without its slash.
+   * @param text - the line as the operator typed it.
+   */
+  const runCommand = (state: BridgeState, bridge: Bridge, name: string, text: string): void => {
+    const commands = commandsOf(ctx.get?.('commands'))
+    if (commands === undefined) {
+      bridge.send({ t: 'echo', text: `unknown command /${name}` })
+      return
+    }
+    let known: unknown
+    try {
+      known = commands.find(state.agent, name)
+    } catch (error) {
+      bridge.send({ t: 'echo', text: `command failed: ${reasonOf(error)}` })
+      return
+    }
+    if (known === undefined) {
+      bridge.send({ t: 'echo', text: `unknown command /${name}` })
+      return
+    }
+    const session = state.agent.session.id
+    void (async (): Promise<void> => {
+      try {
+        const execution = await commands.execute(state.agent, text, [], state.commandAbort.signal)
+        if (bridged.get(session) !== state) return
+        // The name can leave the registry between `find` and `execute`.
+        if (execution === undefined) {
+          bridge.send({ t: 'echo', text: `unknown command /${name}` })
+          return
+        }
+        const { result } = execution
+        bridge.send({
+          t: 'echo',
+          text: result.kind === 'success' ? result.text ?? `/${name}: ok` : result.text,
+        })
+      } catch (error) {
+        if (bridged.get(session) !== state) return
+        bridge.send({ t: 'echo', text: `command failed: ${reasonOf(error)}` })
+      }
+    })()
   }
 
   const handlers: TransportHandlers = {
@@ -1830,7 +1924,7 @@ function handlersFor(
           )
           return
         case 'skill': {
-          const skills = skillLookupOf(ctx.get?.('skills'))
+          const skills = skillCatalogOf(ctx.get?.('skills'))
           if (skills === undefined) {
             bridge.send({ t: 'echo', text: 'skill service unavailable' })
             return
@@ -1840,24 +1934,18 @@ function handlersFor(
           // a /new or /attach switch meanwhile must win over the stale steer.
           void (async (): Promise<void> => {
             try {
-              const skill = await skills.get(command.name)
+              const rows = await skills.list()
               if (bridged.get(session) !== state) return
-              if (skill === undefined) {
+              // The host injects the body from a user-sourced `/name` gesture, so
+              // the catalog decides whether this name may take that path.
+              const found = rows.some(row => isRecord(row) && row['name'] === command.name && isUserInvocable(row))
+              if (!found) {
                 bridge.send({ t: 'echo', text: `skill not found: ${command.name}` })
                 return
               }
-              if (skill.content.trim() === '') {
-                bridge.send({ t: 'echo', text: `skill ${command.name} has no content` })
-                return
-              }
-              // The body is the point: the operator named the skill, so the model
-              // receives it as their own message rather than a command to parse.
-              const body = `# Skill: ${skill.name}\n\n${skill.description}\n\n${skill.content}`
-              // Words typed after the name belong to the same request; they trail
-              // the body as a note, so naming a skill and saying what for is one line.
               const text = command.args.length === 0
-                ? body
-                : `${body.trimEnd()}\n\n## Operator note\n\n${command.args.join(' ')}`
+                ? `/${command.name}`
+                : `/${command.name} ${command.args.join(' ')}`
               state.agent.steer(userMessage(text))
             } catch (error) {
               bridge.send({ t: 'echo', text: `skill failed: ${reasonOf(error)}` })
@@ -1865,6 +1953,9 @@ function handlersFor(
           })()
           return
         }
+        case 'command':
+          runCommand(state, bridge, command.name, command.text)
+          return
         case 'approve':
         case 'reject': {
           const outcome: ApprovalOutcome = command.kind === 'approve' ? 'allowed-once' : 'rejected'

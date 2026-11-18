@@ -83,16 +83,21 @@ the editor is framed in the accent colour. `NO_COLOR`, a non-terminal stdout or
 
 Typing `/` opens the suggestion menu the plugin's `catalog` frame feeds: the
 session's skills appear as `/skill:<name>` (fuzzy-matching the bare name works),
-and the forwarder's own exits close the list. That is the whole menu — a host
-slash command such as `/compact` is not offered and would answer
-`unknown command /<verb>` if typed, because the bridge cannot execute one; host
-commands belong to the web input box. Tab inserts the highlighted completion,
-while Enter accepts and sends it immediately. Accepting `/skill:<name>` or typing
-it by hand is forwarded like any other line, and the plugin injects that skill's
-body. Words after the name travel with it: `/skill:use-dsh-sup focus on the
-retry` reaches the model as the body followed by an `## Operator note`. The
-catalog frame never reaches stdout or `/dev/tty`; `--no-tui` ignores it. `@file`
-completion resolves against the session's directory when `fd` is installed.
+then the registered host commands the bridge can execute, and the forwarder's
+own exits close the list. Local verbs win: an exit's host row is never offered,
+and a host command whose name collides with `/cancel`, `/status`, `/new`,
+`/attach`, `/approve`, `/reject` or `/skill:` still runs the local meaning when
+typed. Tab inserts the highlighted completion, while Enter accepts and sends it
+immediately. A host command such as `/compact` runs in-process over the bridge
+and answers as one
+echo line (its own text, or `/<name>: ok` when it reports none); it sends no
+model message and adds no transcript entry. Accepting `/skill:<name>` or typing
+it by hand is rewritten to `/<name>` plus any trailing words and steered as one
+user message; the host injects the rendered skill body, exactly as in the web
+composer. An unknown or non-user-invocable name answers `skill not found:
+<name>`. The catalog frame never reaches stdout or `/dev/tty`; `--no-tui`
+ignores it. `@file` completion resolves against the session's directory when
+`fd` is installed.
 
 `/q`, `/quit`, `/exit` and `/bye` leave the attach from either surface: the
 forwarder sends `bye`, restores the screen and exits 0, and the line never reaches
@@ -118,11 +123,12 @@ time after Enter — and the plugin's in-process tty transport (`DSH_SUP_TERMINA
 or `HC_TERMINAL_ID`) always stays on it, because the full-screen surface belongs
 to `dsh-sup` alone.
 
-The machine records are unchanged: OSC 7501 still goes to `/dev/tty`, and the
-`echo` lines — `[turn <n>] <state>`, `[ask <id>] <tool> parked (<session>)`,
+The machine records are otherwise unchanged: OSC 7501 still goes to `/dev/tty`,
+and the `echo` lines — `[turn <n>] <state>`, `[ask <id>] <tool> parked (<session>)`,
 `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer
 `session=<id> state=<state> turn=<n> asks=<ids>` (`-` when nothing is parked),
-`refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`,
+`refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`, a host
+command's result (its own text, `/<name>: ok`, or `command failed: …`),
 `unknown command /<verb>` — reach exactly one place each: stdout in line mode when
 you have a TTY, the transcript viewport in a full-screen attach, `/dev/tty`
 otherwise.
