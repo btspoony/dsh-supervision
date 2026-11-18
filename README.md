@@ -134,9 +134,11 @@ come first, then the host commands the bridge can execute, then the forwarder's
 own exits. Local verbs win: a host row whose name the plugin resolves locally
 — `/cancel`, `/status`, `/new`, `/attach`, `/approve`, `/reject`, `/answer`,
 bare `/skill`, `/y`, `/n` and the exits — is not offered, and typing that name
-runs the local meaning. A host command such as `/compact` executes in-process against
-the attached session and answers as one echo — its own result text, or
-`/<name>: ok` when it reports none. A multi-line result keeps its line breaks:
+runs the local meaning. The one exception is a bare `/skill`: it is reserved for
+the skill menu and answered with `unknown command /skill`. A host command such as
+`/compact` executes in-process against the attached session and answers as one
+echo — its own result text, or `/<name>: ok` when it reports none. A multi-line
+result keeps its line breaks:
 each line the command writes arrives as its own terminal line. It sends no model
 message; the session log still records `command/run` and `command/done`, which
 the web view can show.
@@ -256,12 +258,12 @@ This half is reference material for implementers and coding agents; if you only 
 
 The facts a supervisor needs, all of them on this repository's wire:
 
-**Socket and registry.** One Unix socket per `dsh web` process, mode `0600`, at `$DSH_HOME/supervision/<pid>-<8hex>.sock`, next to a `<pid>-<8hex>.json` entry `{proto, pid, socket, startedAt, dshVersion}` written atomically and mode `0600`. A session has exactly one bridge: a second connection claiming it is refused with `error` code `busy` and closed. Frames are NDJSON, `PROTO` is `2`, one frame is at most 64 KiB; the forwarder splits its own stdin on `\r`, `\n` or `\r\n` and sends one `line` frame per input line.
+**Socket and registry.** One Unix socket per `dsh web` process, mode `0600`, at `$DSH_HOME/supervision/<pid>-<8hex>.sock`, next to a `<pid>-<8hex>.json` entry `{proto, pid, socket, startedAt, dshVersion}` written atomically and mode `0600`. A session has exactly one bridge: a second connection claiming it is refused with `error` code `busy` and closed. Frames are NDJSON, `PROTO` is `4`, one frame is at most 64 KiB; the forwarder splits its own stdin on `\r`, `\n` or `\r\n` and sends one `line` frame per input line.
 
 | Direction | Frames |
 |---|---|
 | forwarder → plugin | `hello` (`attach` a session, `new {cwd}`, or bare), `line {text}`, `list {cwd?}`, `bye` |
-| plugin → forwarder | `welcome`, `osc {data}`, `echo {text}`, `mirror {item}` (`item.k` is `user`, `assistant` or `tool`), `sessions {items}`, `error {code, message}`, `bye {reason}` |
+| plugin → forwarder | `welcome`, `osc {data}`, `echo {text}`, `mirror {item}` (`item.k` is `user`, `assistant` or `tool`), `sessions {items}`, `catalog {skills, commands}` (the menu, claimed by the surface), `ask {id, questions}` (a pending agent question card, or `ask {id, closed}` when it retires), `error {code, message}`, `bye {reason}` |
 
 `error.code` is one of `busy`, `unknown-session`, `create-failed`, `locked`, `protocol`, `internal`.
 
@@ -280,7 +282,7 @@ A clear is `state=clear` for the root, `state=clear:id=<id>` for one child recor
 | `GET /dsh-supervision/state` | `{"proto":1,"sessions":{"<session id>":{"bridged":true,"terminal":"…","pid":<n>,"since":<ms>,"asks":["<ask id>"]}}}`; `405` for another method |
 | `POST /dsh-supervision/reclaim` | `content-type: application/json`, body `{"session":"<id>"}` under 4 KiB → `200 {"reclaimed":true}`; `409 {"reclaimed":false}` when no bridge held it; `415` for another content type, `400` for a bad body |
 
-**Echo lines** the supervisor reads, in the order they are written: `[turn <n>] <state>` on a state change, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, `[ask <id>] question -> answered|skipped (source=supervisor|attached)`, the `/status` answer above, `refused: <n> ask(s) parked`, `new failed: …`, `attach failed: …`, a host command's result (its own text, `/<name>: ok`, or `command failed: …`), `unknown command /<verb>`. An `ask` frame carries the question card itself; a closed one retires it. When subagent/job activity outlives its window, its `activity stale: …` line is written immediately before that publish's `[turn <n>] <state>` line.
+**Echo lines** the supervisor reads, each written when its fact happens: `[turn <n>] <state>` on a state change, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, `[ask <id>] question -> answered|skipped (source=supervisor|attached)`, the `/status` answer above, `refused: <n> ask(s) parked`, `new failed: …`, `attach failed: …`, a host command's result (its own text, `/<name>: ok`, or `command failed: …`; an answer over the frame cap is cut and ends with ` … (truncated)`), `unknown command /<verb>`. One-off diagnostics take the same sink: `history unavailable: …`, `history: showing last <n> items`, `new superseded: …`, `no approval pending`, `<n> asks pending; name one`, `no ask <id>`, `skill not found: <name>`, `skill service unavailable`, `skill failed: …`, `activity unavailable: …` and `activity recovered`. An `ask` frame carries the question card itself; a closed one retires it. When subagent/job activity outlives its window, its `activity stale: …` line is written immediately before that publish's `[turn <n>] <state>` line.
 
 **Exit codes of `dsh-sup`:** `0` clean `bye`, `1` backend lost, `2` usage or no live backend, `3` `busy`, `4` `locked`, `5` `create-failed`, `6` `protocol` (a frame this process refused, so the backend is alive).
 

@@ -87,11 +87,13 @@ then the registered host commands the bridge can execute, and the forwarder's
 own exits close the list. Local verbs win: a host row whose name the plugin
 resolves locally — `/cancel`, `/status`, `/new`, `/attach`, `/approve`,
 `/reject`, `/answer`, bare `/skill`, `/y`, `/n` and the exits — is not offered,
-and typing that name runs the local meaning. Tab inserts the highlighted completion, while
-Enter accepts and sends it immediately. A host command such as `/compact` runs
-in-process over the bridge and answers as one echo (its own text, or
-`/<name>: ok` when it reports none). A multi-line result keeps its line breaks:
-each line the command writes arrives as its own terminal line. It sends no model
+and typing that name runs the local meaning. The one exception is a bare `/skill`:
+it is reserved for the skill menu and answered with `unknown command /skill`.
+Tab inserts the highlighted completion, while Enter accepts and sends it
+immediately. A host command such as `/compact` runs in-process over the bridge
+and answers as one echo (its own text, or `/<name>: ok` when it reports none). A
+multi-line result keeps its line breaks: each line the command writes arrives as
+its own terminal line. It sends no model
 message, though the session log still records `command/run` and `command/done`,
 which the web view can show. Accepting `/skill:<name>` or typing it by hand is
 rewritten to `/<name>` plus any trailing words and steered as one user message;
@@ -124,15 +126,21 @@ time after Enter — and the plugin's in-process tty transport (`DSH_SUP_TERMINA
 or `HC_TERMINAL_ID`) always stays on it, because the full-screen surface belongs
 to `dsh-sup` alone.
 
-The machine records are otherwise unchanged: OSC 7501 still goes to `/dev/tty`,
-and the `echo` lines — `[turn <n>] <state>`, `[ask <id>] <tool> parked (<session>)`,
-`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer
-`session=<id> state=<state> turn=<n> asks=<ids>` (`-` when nothing is parked),
-`refused: <n> ask(s) parked`, `new failed: …`, `attach failed: …`, a host
-command's result (its own text, `/<name>: ok`, or `command failed: …`),
-`unknown command /<verb>` — reach exactly one place each: stdout in line mode when
-you have a TTY, the transcript viewport in a full-screen attach, `/dev/tty`
-otherwise.
+OSC 7501 still goes to `/dev/tty`, and each `echo` line reaches exactly one
+place: stdout in line mode when you have a TTY, the transcript viewport in a
+full-screen attach, `/dev/tty` otherwise. The per-turn flow:
+
+- `[turn <n>] <state>` on a state change
+- `[ask <id>] <tool> parked (<session>)`
+- `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`
+- `[ask <id>] question -> answered|skipped (source=supervisor|attached)`
+- the `/status` answer `session=<id> state=<state> turn=<n> asks=<ids>` (`-` when nothing is parked)
+- `refused: <n> ask(s) parked`
+- `new failed: …`, `attach failed: …`
+- a host command's result: its own text, `/<name>: ok`, or `command failed: …`; an answer over the frame cap is cut and ends with ` … (truncated)`
+- `unknown command /<verb>`
+
+One-off diagnostics take the same sink: `history unavailable: …`, `history: showing last <n> items`, `new superseded: …`, `no approval pending`, `<n> asks pending; name one`, `no ask <id>`, `skill not found: <name>`, `skill service unavailable`, `skill failed: …`, `activity unavailable: …` and `activity recovered`.
 
 An agent question (`ask_user_question`) is an ask too: an `ask` frame prints
 the card with its numbered options, the root reports `blocked:kind=question`, and

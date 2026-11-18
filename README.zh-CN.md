@@ -95,7 +95,7 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 
 **未验证的平台。** Windows 终端（ConPTY）与 tmux 尚未验证：全屏交互面还没有在那里跑过。真去跑时先查三件事——每条退出路径（`Ctrl+D`、`/q`、后端断开）都能恢复备用屏；终端会上报交互面认识的键盘协议（modifyOtherKeys 或 Kitty 协议，决定 `Shift+Enter` 的行为）；pane 里有桥接能打开的 `/dev/tty`，没有的话只有套接口面挂载，原因写到 stderr。
 
-**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与已注册的宿主命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。菜单先列 skills，再列桥接能够执行的宿主命令，最后是 forwarder 自己的退出命令。本地动词优先：宿主命令若与 `/cancel`、`/status`、`/new`、`/attach`、`/approve`、`/reject`、`/answer`、裸 `/skill`、`/y`、`/n` 或退出命令同名，就不会出现在菜单里；输入该名字执行的是本地含义。像 `/compact` 这样的宿主命令会在进程内对当前会话执行，结果以一条 echo 回到终端——命令自己的结果文本，或它没有文本时的 `/<name>: ok`。多行结果会保留换行：命令写了几行，终端就按原样显示几行。它不会给模型发消息；会话日志仍会记录 `command/run` 和 `command/done`，web 视图可以看到。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。`/skill:<name>` 会被改写为 `/<name>`（并带上名字之后的词）作为一条用户消息 steer 出去，由宿主注入渲染好的 skill 正文，行为与 web 输入框一致。未知或不允许用户调用的名字会得到 `skill not found: <name>`。已知限制：桥接不传附件；命令生命周期（`command/run`/`command/done`）不会镜像到终端，echo 行就是全部报告。
+**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与已注册的宿主命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。菜单先列 skills，再列桥接能够执行的宿主命令，最后是 forwarder 自己的退出命令。本地动词优先：宿主命令若与 `/cancel`、`/status`、`/new`、`/attach`、`/approve`、`/reject`、`/answer`、裸 `/skill`、`/y`、`/n` 或退出命令同名，就不会出现在菜单里；输入该名字执行的是本地含义。唯一的例外是裸 `/skill`：它保留给 skill 菜单，输入会得到 `unknown command /skill`。像 `/compact` 这样的宿主命令会在进程内对当前会话执行，结果以一条 echo 回到终端——命令自己的结果文本，或它没有文本时的 `/<name>: ok`。多行结果会保留换行：命令写了几行，终端就按原样显示几行。它不会给模型发消息；会话日志仍会记录 `command/run` 和 `command/done`，web 视图可以看到。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。`/skill:<name>` 会被改写为 `/<name>`（并带上名字之后的词）作为一条用户消息 steer 出去，由宿主注入渲染好的 skill 正文，行为与 web 输入框一致。未知或不允许用户调用的名字会得到 `skill not found: <name>`。已知限制：桥接不传附件；命令生命周期（`command/run`/`command/done`）不会镜像到终端，echo 行就是全部报告。
 
 **退出。** `/q`、`/quit`、`/exit`、`/bye`——单独一行、全小写、后面不带参数——在两种界面（TUI 与 `--no-tui`）都能退出 attach：转发器发出 `bye`、恢复终端并以 0 退出，且它们不会被转发给会话，不会留下挂起的模型请求。转发器还会把它们追加到 `/`
 菜单末尾并标注 `leave dsh-sup (local)`，因此退出方式不依赖宿主 catalog 提供了
@@ -183,12 +183,12 @@ mirror 打印的是写好的整块，一次一行。
 
 监督方需要的全部事实，都在这套线上：
 
-**套接口与注册表。**每个 `dsh web` 进程一个 Unix 套接口，权限 `0600`，位于 `$DSH_HOME/supervision/<pid>-<8hex>.sock`，旁边是原子写入、同样 `0600` 的 `<pid>-<8hex>.json` 条目 `{proto, pid, socket, startedAt, dshVersion}`。一个会话只有一条桥接：第二个连接来认领时会被以 `error` 码 `busy` 拒绝并关闭。帧是 NDJSON，`PROTO` 为 `2`，单帧最大 64 KiB。
+**套接口与注册表。**每个 `dsh web` 进程一个 Unix 套接口，权限 `0600`，位于 `$DSH_HOME/supervision/<pid>-<8hex>.sock`，旁边是原子写入、同样 `0600` 的 `<pid>-<8hex>.json` 条目 `{proto, pid, socket, startedAt, dshVersion}`。一个会话只有一条桥接：第二个连接来认领时会被以 `error` 码 `busy` 拒绝并关闭。帧是 NDJSON，`PROTO` 为 `4`，单帧最大 64 KiB。
 
 | 方向 | 帧 |
 |---|---|
 | 转发器 → 插件 | `hello`（`attach` 某会话、`new {cwd}`，或不带目标）、`line {text}`（按 stdin 的 `\r`、`\n` 或 `\r\n` 切行）、`list {cwd?}`、`bye` |
-| 插件 → 转发器 | `welcome`、`osc {data}`、`echo {text}`、`mirror {item}`（`item.k` 为 `user`、`assistant` 或 `tool`）、`sessions {items}`、`error {code, message}`、`bye {reason}` |
+| 插件 → 转发器 | `welcome`、`osc {data}`、`echo {text}`、`mirror {item}`（`item.k` 为 `user`、`assistant` 或 `tool`）、`sessions {items}`、`catalog {skills, commands}`（菜单，由交互面认领）、`ask {id, questions}`（挂起的 agent 提问卡片；卡片退场时为 `ask {id, closed}`）、`error {code, message}`、`bye {reason}` |
 
 `error.code` 取 `busy`、`unknown-session`、`create-failed`、`locked`、`protocol`、`internal` 之一。
 
@@ -207,7 +207,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 | `GET /dsh-supervision/state` | `{"proto":1,"sessions":{"<session id>":{"bridged":true,"terminal":"…","pid":<n>,"since":<ms>,"asks":["<ask id>"]}}}`；其他方法 `405` |
 | `POST /dsh-supervision/reclaim` | `content-type: application/json`，请求体 `{"session":"<id>"}` 且小于 4 KiB → `200 {"reclaimed":true}`；没有桥接持有该会话时 `409 {"reclaimed":false}`；其他 content type `415`，请求体不合法 `400` |
 
-**监督方读到的 echo 行**，按写入顺序：状态变化时 `[turn <n>] <state>`，`[ask <id>] <tool> parked (<session>)`，`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`，`[ask <id>] question -> answered|skipped (source=supervisor|attached)`，上面那条 `/status` 应答，`refused: <n> ask(s) parked`，`new failed: …`，`attach failed: …`，host 命令的结果（命令自己的文本、`/<name>: ok` 或 `command failed: …`），`unknown command /<verb>`；`ask` 帧承载提问卡片本身，关闭帧让它退场；subagent/job 活动超出窗口时，那一行 `activity stale: …` 写在同一轮 publish 的 `[turn <n>] <state>` 行之前。
+**监督方读到的 echo 行**，每条在其事实发生时写入：状态变化时 `[turn <n>] <state>`，`[ask <id>] <tool> parked (<session>)`，`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`，`[ask <id>] question -> answered|skipped (source=supervisor|attached)`，上面那条 `/status` 应答，`refused: <n> ask(s) parked`，`new failed: …`，`attach failed: …`，host 命令的结果（命令自己的文本、`/<name>: ok` 或 `command failed: …`；超过帧上限的答案会被截断并以 ` … (truncated)` 结尾），`unknown command /<verb>`。一次性诊断也走同一个出口：`history unavailable: …`、`history: showing last <n> items`、`new superseded: …`、`no approval pending`、`<n> asks pending; name one`、`no ask <id>`、`skill not found: <name>`、`skill service unavailable`、`skill failed: …`、`activity unavailable: …` 与 `activity recovered`。`ask` 帧承载提问卡片本身，关闭帧让它退场；subagent/job 活动超出窗口时，那一行 `activity stale: …` 写在同一轮 publish 的 `[turn <n>] <state>` 行之前。
 
 **`dsh-sup` 退出码：**`0` 正常 `bye`，`1` 后端丢失，`2` 用法错误或没有存活后端，`3` `busy`，`4` `locked`，`5` `create-failed`，`6` `protocol`（本进程拒发某帧，说明后端还活着）。
 
