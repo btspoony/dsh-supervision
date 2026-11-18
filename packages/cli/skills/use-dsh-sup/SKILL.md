@@ -89,15 +89,16 @@ resolves locally — `/cancel`, `/status`, `/new`, `/attach`, `/approve`,
 `/reject`, bare `/skill`, `/y`, `/n` and the exits — is not offered, and typing
 that name runs the local meaning. Tab inserts the highlighted completion, while
 Enter accepts and sends it immediately. A host command such as `/compact` runs
-in-process over the bridge and answers as one echo line (its own text, or
-`/<name>: ok` when it reports none); it sends no model message, though the
-session log still records `command/run` and `command/done`, which the web view
-can show. Accepting `/skill:<name>` or typing it by hand is rewritten to
-`/<name>` plus any trailing words and steered as one user message; the host
-injects the rendered skill body, exactly as in the web composer. An unknown or non-user-invocable name answers `skill not found:
-<name>`. The catalog frame never reaches stdout or `/dev/tty`; `--no-tui`
-ignores it. `@file` completion resolves against the session's directory when
-`fd` is installed.
+in-process over the bridge and answers as one echo (its own text, or
+`/<name>: ok` when it reports none). A multi-line result keeps its line breaks:
+each line the command writes arrives as its own terminal line. It sends no model
+message, though the session log still records `command/run` and `command/done`,
+which the web view can show. Accepting `/skill:<name>` or typing it by hand is
+rewritten to `/<name>` plus any trailing words and steered as one user message;
+the host injects the rendered skill body, exactly as in the web composer. An
+unknown or non-user-invocable name answers `skill not found: <name>`. The
+catalog frame never reaches stdout or `/dev/tty`; `--no-tui` ignores it. `@file`
+completion resolves against the session's directory when `fd` is installed.
 
 `/q`, `/quit`, `/exit` and `/bye` leave the attach from either surface: the
 forwarder sends `bye`, restores the screen and exits 0, and the line never reaches

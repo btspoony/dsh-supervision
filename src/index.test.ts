@@ -2461,14 +2461,19 @@ test('a command result cannot forge a terminal sequence through the echo', async
   host.commandRows = [{ name: 'compact', description: 'shrink the context' }]
   // A result is host-supplied text: an OSC 7501 record here would forge the
   // machine channel herdr-core parses, and OSC 52 would write the clipboard.
-  host.commandResult = { kind: 'success', text: 'before\u001b]7501;state=done\u0007after' }
+  // Its own line breaks are legitimate output and must survive the strip.
+  host.commandResult = { kind: 'success', text: 'before\u001b]7501;state=done\u0007after\n\tindented' }
   apply(host.ctx, config({ socketDir: dir }))
   const client = await attached(host, dir, 'session-1')
 
   try {
     client.write({ t: 'line', text: '/compact' })
     await until(() => echoesOf(client).length === 1, 'the success echo')
-    assert.deepEqual(echoesOf(client), ['before ]7501;state=done after'])
+    assert.deepEqual(
+      echoesOf(client),
+      ['before ]7501;state=done after\n\tindented'],
+      'ESC and BEL are neutralised; a newline and a tab are output of the command itself',
+    )
     host.commandResult = { kind: 'error', text: 'bad\u001b]52;c;aGk=\u0007' }
     client.write({ t: 'line', text: '/compact' })
     await until(() => echoesOf(client).length === 2, 'the error echo')
@@ -2478,6 +2483,57 @@ test('a command result cannot forge a terminal sequence through the echo', async
     await until(() => echoesOf(client).length === 3, 'the failure echo')
     assert.deepEqual(echoesOf(client)[2], 'command failed: boom [31m')
     for (const line of echoesOf(client)) assert.equal(line.includes('\u001b'), false, 'no ESC reaches the sink')
+  } finally {
+    host.dispose()
+  }
+})
+
+
+test('a multi-line command result keeps its line breaks and its tab', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.commandRows = [{ name: 'goal', description: 'show the goal' }]
+  // dsh-command-goal answers with a summary line plus usage, and a column layout
+  // rides on tabs; both must survive the strip that removes ESC.
+  host.commandResult = { kind: 'success', text: 'No goal is currently set.\n\t/goal <text>' }
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/goal' })
+    await until(() => echoesOf(client).length === 1, 'the multi-line echo')
+    assert.deepEqual(echoesOf(client), ['No goal is currently set.\n\t/goal <text>'])
+    // One echo frame carries the whole answer; each surface splits it into lines.
+    assert.equal(client.frames.filter(frame => frame.t === 'echo').length, 1, 'one echo frame per result')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('the truncation marker is measured inside the frame budget', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.commandRows = [{ name: 'compact', description: 'shrink the context' }]
+  const marker = ' … (truncated)'
+  const overhead = Buffer.byteLength(JSON.stringify({ t: 'echo', text: '' }), 'utf8') + 1
+  // One byte past the cap: the whole answer does not fit, and neither does the
+  // cap-sized prefix plus the marker, so the marker must come out of the budget.
+  host.commandResult = { kind: 'success', text: 'x'.repeat(MAX_FRAME - overhead + 1) }
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/compact' })
+    await until(() => echoesOf(client).length === 1, 'the truncated echo')
+    const [line = ''] = echoesOf(client)
+    const budget = MAX_FRAME - overhead - Buffer.byteLength(marker, 'utf8')
+    assert.equal(line, `${'x'.repeat(budget)}${marker}`, 'the longest prefix that still leaves room for the marker')
+    assert.ok(
+      Buffer.byteLength(`${JSON.stringify({ t: 'echo', text: line })}\n`, 'utf8') <= MAX_FRAME,
+      'the marked line still fits one frame',
+    )
   } finally {
     host.dispose()
   }

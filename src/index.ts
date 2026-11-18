@@ -1806,11 +1806,12 @@ function handlersFor(
    * @param text - the line as the operator typed it.
    */
   const runCommand = (state: BridgeState, bridge: Bridge, name: string, text: string): void => {
-    // The command's own result is host-supplied text, so it is made safe here
-    // rather than in the forwarder: every other echo line is composed by this
-    // plugin and must keep the bytes it wrote.
+    // The command's own output is host-supplied, so this path neutralises it:
+    // control bytes out, and the frame bounded. Newlines and tabs stay because
+    // shipped commands answer in several lines, and a person reads them as
+    // written; prose sinks keep the same pair.
     const echo = (line: string): void => {
-      bridge.send({ t: 'echo', text: boundEcho(stripControls(line)) })
+      bridge.send({ t: 'echo', text: boundEcho(stripControls(line, '\n\t')) })
     }
     const commands = commandsOf(ctx.get?.('commands'))
     if (commands === undefined) {

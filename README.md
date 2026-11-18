@@ -135,9 +135,11 @@ own exits. Local verbs win: a host row whose name the plugin resolves locally
 — `/cancel`, `/status`, `/new`, `/attach`, `/approve`, `/reject`, bare
 `/skill`, `/y`, `/n` and the exits — is not offered, and typing that name runs
 the local meaning. A host command such as `/compact` executes in-process against
-the attached session and answers as one echo line — its own result text, or
-`/<name>: ok` when it reports none — without sending a model message; the session
-log still records `command/run` and `command/done`, which the web view can show.
+the attached session and answers as one echo — its own result text, or
+`/<name>: ok` when it reports none. A multi-line result keeps its line breaks:
+each line the command writes arrives as its own terminal line. It sends no model
+message; the session log still records `command/run` and `command/done`, which
+the web view can show.
 The catalog frame is surface input only — it never reaches stdout or `/dev/tty`,
 and line mode ignores it.
 `@file` completion resolves against the session's directory when the `fd` binary
