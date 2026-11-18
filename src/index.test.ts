@@ -23,7 +23,7 @@ import type {
 import type { ApprovalOutcome } from './approval.js'
 import { HISTORY_ITEMS } from './mirror.js'
 import type { TtyIO } from './tty-transport.js'
-import { PROTO, readRegistry } from 'dsh-supervision-protocol'
+import { MAX_FRAME, PROTO, readRegistry } from 'dsh-supervision-protocol'
 import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
 
 const roots: string[] = []
@@ -2448,6 +2448,69 @@ test('a silent or blank success and a failure each map to one echo line', async 
     client.write({ t: 'line', text: '/compact' })
     await until(() => echoesOf(client).length === 6, 'the thrown-seam echo')
     assert.deepEqual(echoesOf(client)[5], 'command failed: registry broke')
+  } finally {
+    host.dispose()
+  }
+})
+
+
+test('a command result cannot forge a terminal sequence through the echo', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.commandRows = [{ name: 'compact', description: 'shrink the context' }]
+  // A result is host-supplied text: an OSC 7501 record here would forge the
+  // machine channel herdr-core parses, and OSC 52 would write the clipboard.
+  host.commandResult = { kind: 'success', text: 'before\u001b]7501;state=done\u0007after' }
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/compact' })
+    await until(() => echoesOf(client).length === 1, 'the success echo')
+    assert.deepEqual(echoesOf(client), ['before ]7501;state=done after'])
+    host.commandResult = { kind: 'error', text: 'bad\u001b]52;c;aGk=\u0007' }
+    client.write({ t: 'line', text: '/compact' })
+    await until(() => echoesOf(client).length === 2, 'the error echo')
+    assert.deepEqual(echoesOf(client)[1], 'bad ]52;c;aGk= ')
+    host.commandError = 'boom\u001b[31m'
+    client.write({ t: 'line', text: '/compact' })
+    await until(() => echoesOf(client).length === 3, 'the failure echo')
+    assert.deepEqual(echoesOf(client)[2], 'command failed: boom [31m')
+    for (const line of echoesOf(client)) assert.equal(line.includes('\u001b'), false, 'no ESC reaches the sink')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('an oversized command result arrives truncated instead of closing the attach', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.commandRows = [{ name: 'compact', description: 'shrink the context' }]
+  host.commandResult = { kind: 'success', text: 'x'.repeat(MAX_FRAME * 2) }
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    client.write({ t: 'line', text: '/compact' })
+    await until(() => echoesOf(client).length === 1, 'the truncated echo')
+    const [line = ''] = echoesOf(client)
+    assert.ok(line.endsWith('(truncated)'), 'the cut is marked, never silent')
+    assert.ok(
+      Buffer.byteLength(`${JSON.stringify({ t: 'echo', text: line })}\n`, 'utf8') <= MAX_FRAME,
+      'the echo still fits one frame',
+    )
+    // A multibyte result is cut between code points, never inside one.
+    host.commandResult = { kind: 'success', text: '漢'.repeat(MAX_FRAME) }
+    client.write({ t: 'line', text: '/compact' })
+    await until(() => echoesOf(client).length === 2, 'the multibyte echo')
+    const wide = echoesOf(client)[1] ?? ''
+    assert.equal(/[\ud800-\udbff](?![\udc00-\udfff])/.test(wide), false, 'no lone surrogate')
+    assert.ok(Buffer.byteLength(`${JSON.stringify({ t: 'echo', text: wide })}\n`, 'utf8') <= MAX_FRAME)
+    // The attach survived both results: an ordinary line still steers.
+    client.write({ t: 'line', text: 'still steers' })
+    await until(() => host.steered.length === 1, 'a live bridge after the oversized result')
   } finally {
     host.dispose()
   }

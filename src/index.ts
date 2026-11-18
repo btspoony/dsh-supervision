@@ -10,7 +10,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
-import { MAX_FRAME, PROTO, clearProgramStatus, encodeFrame, isRecord, programStatus } from 'dsh-supervision-protocol'
+import { MAX_FRAME, PROTO, clearProgramStatus, encodeFrame, isRecord, programStatus, stripControls } from 'dsh-supervision-protocol'
 import type {
   ErrorCode,
   HelloFrame,
@@ -588,6 +588,36 @@ function sessionLogOf(value: unknown): SessionLogLike | undefined {
 
 /** A session's persisted log, or the reason the attach goes without one. */
 type LogRead = { readonly events: readonly SessionEvent[] } | { readonly failure: string }
+
+/** What a truncated echo ends with: a partial answer must not read as the whole one. */
+const TRUNCATED = ' … (truncated)'
+
+/** Whether one echo payload still encodes inside the wire cap, newline included. */
+function echoFits(text: string): boolean {
+  return Buffer.byteLength(`${JSON.stringify({ t: 'echo', text })}\n`, 'utf8') <= MAX_FRAME
+}
+
+/**
+ * Bound one host command's echo text so its frame cannot close the attach. The
+ * result is the operator's answer, so the tail is marked rather than dropped,
+ * and the cut falls between code points so no surrogate is split.
+ * @param text - the echo line, already stripped of control bytes.
+ * @returns the text, or its longest marked prefix that still fits one frame.
+ */
+function boundEcho(text: string): string {
+  if (echoFits(text)) return text
+  // Measure the encoded frame rather than assume one byte per character: JSON
+  // escaping and multibyte text both grow on the wire.
+  const chars = Array.from(text)
+  let low = 0
+  let high = chars.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (echoFits(`${chars.slice(0, middle).join('')}${TRUNCATED}`)) low = middle
+    else high = middle - 1
+  }
+  return `${chars.slice(0, low).join('')}${TRUNCATED}`
+}
 
 /** The command descriptors one agent can run: none when the service is absent or throws. */
 async function commandRowsOf(ctx: PluginContext, agent: AgentLike): Promise<readonly unknown[]> {
@@ -1776,20 +1806,26 @@ function handlersFor(
    * @param text - the line as the operator typed it.
    */
   const runCommand = (state: BridgeState, bridge: Bridge, name: string, text: string): void => {
+    // The command's own result is host-supplied text, so it is made safe here
+    // rather than in the forwarder: every other echo line is composed by this
+    // plugin and must keep the bytes it wrote.
+    const echo = (line: string): void => {
+      bridge.send({ t: 'echo', text: boundEcho(stripControls(line)) })
+    }
     const commands = commandsOf(ctx.get?.('commands'))
     if (commands === undefined) {
-      bridge.send({ t: 'echo', text: `unknown command /${name}` })
+      echo(`unknown command /${name}`)
       return
     }
     let known: unknown
     try {
       known = commands.find(state.agent, name)
     } catch (error) {
-      bridge.send({ t: 'echo', text: `command failed: ${reasonOf(error)}` })
+      echo(`command failed: ${reasonOf(error)}`)
       return
     }
     if (known === undefined) {
-      bridge.send({ t: 'echo', text: `unknown command /${name}` })
+      echo(`unknown command /${name}`)
       return
     }
     const session = state.agent.session.id
@@ -1799,21 +1835,20 @@ function handlersFor(
         if (bridged.get(session) !== state) return
         // The name can leave the registry between `find` and `execute`.
         if (execution === undefined) {
-          bridge.send({ t: 'echo', text: `unknown command /${name}` })
+          echo(`unknown command /${name}`)
           return
         }
         const { result } = execution
         // A command that succeeds without words says nothing; a blank result
         // would otherwise echo an empty line and look like a failure.
-        bridge.send({
-          t: 'echo',
-          text: result.kind === 'success'
+        echo(
+          result.kind === 'success'
             ? result.text === undefined || result.text.trim() === '' ? `/${name}: ok` : result.text
             : result.text,
-        })
+        )
       } catch (error) {
         if (bridged.get(session) !== state) return
-        bridge.send({ t: 'echo', text: `command failed: ${reasonOf(error)}` })
+        echo(`command failed: ${reasonOf(error)}`)
       }
     })()
   }
