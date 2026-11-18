@@ -7,6 +7,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  MAX_ASK_DESCRIPTION,
+  MAX_ASK_ID,
+  MAX_ASK_LABEL,
+  MAX_ASK_OPTIONS,
+  MAX_ASK_QUESTIONS,
+  MAX_ASK_TEXT,
   MAX_CATALOG_ARGUMENT_HINT,
   MAX_CATALOG_COMMANDS,
   MAX_CATALOG_DESCRIPTION,
@@ -92,7 +98,7 @@ test('a rejected frame excerpt still stops at 60 characters plus the ellipsis', 
 test('a welcome must name a known state and a whole turn count', () => {
   const good = { t: 'welcome', proto: PROTO, session: 'session-1', title: 'repo', state: 'working', turn: 3 };
   assert.deepEqual(frames(decodeChunk('', `${JSON.stringify(good)}\n`)), [good]);
-  assert.equal(PROTO, 3, 'the catalog frame is a breaking cut');
+  assert.equal(PROTO, 4, 'the ask frame is a breaking cut');
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, proto: 1 })}\n`).ok, false, 'proto 1 is stale');
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, state: 'busy' })}\n`).ok, false);
   assert.equal(decodeChunk('', `${JSON.stringify({ ...good, turn: 1.5 })}\n`).ok, false);
@@ -207,6 +213,96 @@ test('a malformed catalog frame is rejected whole', () => {
   assert.equal(decodeChunk('', `${JSON.stringify({ ...base, commands: [{ name: 'c', description: 'd', argumentHint: 2 }] })}\n`).ok, false);
   assert.equal(decodeChunk('', `${JSON.stringify({ t: 'catalog', skills: [] })}\n`).ok, false);
 });
+test('an ask frame carries its questions, options and close across the wire', () => {
+  const frame: OutFrame = {
+    t: 'ask',
+    id: '3f9ac1',
+    questions: [
+      {
+        id: 'db',
+        question: 'Which database?',
+        header: 'Storage',
+        multiSelect: true,
+        options: [{ label: 'SQLite', description: 'embedded' }, { label: 'Postgres' }],
+      },
+      { id: 'why', question: 'Why that one?' },
+    ],
+  }
+  assert.deepEqual(frames(decodeChunk('', encodeFrame(frame))), [frame]);
+  assert.deepEqual(frames(decodeChunk('', encodeFrame({ t: 'ask', id: '3f9ac1', closed: true }))), [
+    { t: 'ask', id: '3f9ac1', closed: true },
+  ]);
+});
+
+test('ask questions, options and texts are capped by trimming, not rejection', () => {
+  // One long question carries every text cap; the rest only exercise the count
+  // cap, because a frame over MAX_FRAME is refused before any field is read.
+  const [firstQuestion, ...rest] = Array.from({ length: MAX_ASK_QUESTIONS + 2 }, (_, index) => ({
+    id: `q${String(index)}`,
+    question: index === 0 ? 'q'.repeat(MAX_ASK_TEXT + 5) : 'short',
+    ...(index === 0
+      ? {
+          header: 'h'.repeat(MAX_ASK_LABEL + 5),
+          options: Array.from({ length: MAX_ASK_OPTIONS + 2 }, () => ({
+            label: 'l'.repeat(MAX_ASK_LABEL + 5),
+            description: 'd'.repeat(MAX_ASK_DESCRIPTION + 5),
+          })),
+        }
+      : {}),
+  }));
+  const questions = [firstQuestion, ...rest];
+  const [decoded] = frames(decodeChunk('', `${JSON.stringify({ t: 'ask', id: 'a1b2c3', questions })}\n`));
+  if (decoded === undefined || decoded.t !== 'ask' || 'closed' in decoded) {
+    assert.fail('the ask frame did not survive the codec');
+  }
+  assert.equal(decoded.questions.length, MAX_ASK_QUESTIONS);
+  const [first] = decoded.questions;
+  assert.equal(first?.question.length, MAX_ASK_TEXT);
+  assert.equal(first?.header?.length, MAX_ASK_LABEL);
+  assert.equal(first?.options?.length, MAX_ASK_OPTIONS);
+  assert.equal(first?.options?.[0]?.label.length, MAX_ASK_LABEL);
+  assert.equal(first?.options?.[0]?.description?.length, MAX_ASK_DESCRIPTION);
+  // The ask id is a key an answer names, so it is capped rather than repaired.
+  const overId = `${JSON.stringify({ t: 'ask', id: 'x'.repeat(MAX_ASK_ID + 1), questions: [] })}\n`;
+  assert.equal(decodeChunk('', overId).ok, false);
+});
+
+test('a malformed ask frame is rejected whole', () => {
+  const question = { id: 'q1', question: 'Which?' };
+  const ask = (value: unknown): string => `${JSON.stringify(value)}\n`;
+  assert.equal(decodeChunk('', ask({ t: 'ask', questions: [question] })).ok, false, 'no ask id');
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: '', questions: [question] })).ok, false, 'blank ask id');
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [] })).ok, false, 'zero questions');
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: {} })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [{ question: 'x' }] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [{ id: '', question: 'x' }] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [{ id: 'q', question: '  ' }] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [{ id: 'q', question: 'x', header: 1 }] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [{ id: 'q', question: 'x', multiSelect: 'yes' }] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [{ id: 'q', question: 'x', options: {} }] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [{ id: 'q', question: 'x', options: [{}] }] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [{ id: 'q', question: 'x', options: [{ label: 1 }] }] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', questions: [null] })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', closed: false })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', closed: 'yes' })).ok, false);
+  assert.equal(decodeChunk('', ask({ t: 'ask', id: 'a1', closed: true, questions: [question] })).ok, false);
+});
+
+test('ask text cannot carry control bytes into a terminal', () => {
+  const question = {
+    id: 'q\u001b]0;owned\u0007',
+    question: 'x\u001b]7501;state=done\u001b\\\nsecond',
+    options: [{ label: 'a\u001b[31m', description: 'b\u009b2J' }],
+  };
+  const [decoded] = frames(decodeChunk('', `${JSON.stringify({ t: 'ask', id: 'a1b2c3', questions: [question] })}\n`));
+  if (decoded === undefined || decoded.t !== 'ask' || 'closed' in decoded) {
+    assert.fail('the ask frame did not survive the codec');
+  }
+  assert.doesNotMatch(JSON.stringify(decoded), /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+  assert.equal(decoded.questions[0]?.options?.[0]?.label, 'a [31m');
+  assert.equal(decoded.questions[0]?.question, 'x ]7501;state=done \\ second');
+});
+
 test('the mirror caps are the ones the plugin must respect', () => {
   assert.deepEqual(
     [MAX_ITEM_TEXT, MAX_ITEM_REASONING, MAX_ITEM_ARGS, MAX_ITEM_DETAIL, MAX_ITEM_NAME, MAX_ITEM_CALL_ID],

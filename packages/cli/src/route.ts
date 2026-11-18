@@ -5,7 +5,7 @@
  * same screen, so writing a line to both would print it twice.
  */
 
-import { renderFrame, renderMirror, type OutFrame } from 'dsh-supervision-protocol';
+import { renderAsk, renderFrame, renderMirror, type OutFrame } from 'dsh-supervision-protocol';
 
 /**
  * Routes one frame to the sink that may write it.
@@ -22,6 +22,10 @@ export function routeFrame(frame: OutFrame, human: boolean): { tty?: string; out
       // State, turns and asks: a person wants them, and a redirected stdout
       // still needs the supervisor to see them, so the line picks one sink.
       return human ? { out: `${frame.text}\n` } : { tty: `${frame.text}\n` };
+    case 'ask':
+      // Same sink rule as `echo`: the question is for the person, but a
+      // redirected stdout still has a supervisor that must see it.
+      return human ? { out: `${renderAsk(frame)}\n` } : { tty: `${renderAsk(frame)}\n` };
     case 'mirror': {
       // `renderMirror` never terminates a block; the sink that writes lines adds
       // the newline. A pty can report 0 columns, which would wrap at width 1, so

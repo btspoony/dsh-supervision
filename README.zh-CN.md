@@ -116,6 +116,17 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 `/y` 与 `/n` 应答唯一挂起的提问；挂起不止一个时它们会拒绝，并要求你指名。有提问挂起期间，`/new` 与 `/attach` 会被拒绝；提问方撤回时，提问以 `cancelled` 结掉。
 
+### 应答 agent 提问
+
+`ask_user_question` 的提问也会到达监督方：卡片带着编号选项进入 transcript，根记录变成 `blocked:kind=question`，`msg=question: … [ask <id> /answer <id> N]`。按提问 id 逐题作答：
+
+```text
+/answer 3f9ac1 db=2 why=because
+[ask 3f9ac1] question -> answered (source=supervisor)
+```
+
+每个问题一个 token：`q1=2` 选第 2 项，`q1=1,3` 选两项，`q1=-` 跳过，其他值作为自由文本——首个 token 之后的词会并入该值，所以 `q1=two words` 是一个自定义答案。只有一个问题时可以省略问题 id，整行剩余内容都是该值（`/answer 3f9ac1 我的 想法`）。全屏交互面会打印同一张卡片，并在恰好只有一个提问打开时，把裸 `2`（或 `-`、`1,3`）改写为 `/answer <id> 2`；多问题提问会收到插件答案语法的错误行，而不是把输入变成发给 agent 的消息；其他输入仍是普通 steer。从 herdr-core HUD 作答不需要 attach：`hc send <terminal> "/answer <id> 2"`。提问方撤回或桥接断开时，所有问题按跳过结掉并关闭卡片。
+
 ### 把会话拿回来
 
 只要会话处于桥接状态，GUI 会在侧边栏和输入区两处标明。侧边栏里该会话的条目带上贴合自身圆角的 3px 蓝色描边和浅蓝色半透明填充（rgba(127, 174, 255, 0.30)），右缘是一枚更宽、贯穿行高、内含鲸尾动画的蓝色胶囊，不会被误当成可以随手输入的会话。点进去后整个输入区（编辑器和工具栏）会被蓝边、浅蓝半透明（rgba(127, 174, 255, 0.30)）的面板盖住：编辑器被置为 `inert`，鼠标点不进去、已经聚焦的光标也打不了字。框顶边沿上方挂着一枚蓝色文案 tab，引用发货的英文文案——"This chat is supervised from elsewhere — the input box is locked"（「此会话已被接管，输入框已锁定」，经宿主语言服务提供中英双语）；左下角融着一枚带白色鲸尾的「已接管」徽标；唯一的「Unlock（解锁）」按钮发起回收，只有确认释放成功才会撤掉遮罩，被拒绝的解锁会保留遮罩。宿主输入区没有 `[data-composer-card]` 包裹时，只有编辑器会被置为 `inert`；工具栏保持可用，以免冻结整个页面容器。桥接被丢弃，监督方收到清除记录，`dsh-sup` 转发器以 `0` 退出。
@@ -187,7 +198,7 @@ mirror 打印的是写好的整块，一次一行。
 ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<permission|question|auth>][ :app=<word>][ :title=<base64>][ :msg=<base64>] ST
 ```
 
-清除是根记录用 `state=clear`、单条子记录用 `state=clear:id=<id>`。`kind` 只在 `blocked` 上合法。上限：整条序列小于 4096 字节，title 192 字节，`msg` 2048 字节，id 128 字节且按 `/` 分段、每段至多 32 字节（最多 8 段）。根词优先级为 `blocked` > `working` > `done` / `error` / `idle`。只要后代 subagent（`origin = subagent` 且谱系能追到被桥接会话）处于 `running`，或该会话拥有的后台 job 处于 `running` 或 `stopping`，根记录也保持 `working`——不只是它自己那轮还活着时——此时 `msg` 携带数量（`2 subagents · 1 job`）。当这类活动的身份（某个 family 的状态、label 或成员）5 分钟没有变化时，根记录回退到轮次得到的词，`msg` 变成 `activity stale: …`，并写一行同样的 echo；回退在该活动的身份改变时解除，而不是只要有事件到达就解除。这个回退是防子任务或 job 卡死的，所以运行超过 5 分钟且状态没有变化的 job 会被报成 `done`，直到它的身份发生变化。挂起的审批把根记录写成 `state=blocked:kind=permission`，`msg=<tool> <reason> [ask <id>]`。
+清除是根记录用 `state=clear`、单条子记录用 `state=clear:id=<id>`。`kind` 只在 `blocked` 上合法。上限：整条序列小于 4096 字节，title 192 字节，`msg` 2048 字节，id 128 字节且按 `/` 分段、每段至多 32 字节（最多 8 段）。根词优先级为 `blocked` > `working` > `done` / `error` / `idle`。只要后代 subagent（`origin = subagent` 且谱系能追到被桥接会话）处于 `running`，或该会话拥有的后台 job 处于 `running` 或 `stopping`，根记录也保持 `working`——不只是它自己那轮还活着时——此时 `msg` 携带数量（`2 subagents · 1 job`）。当这类活动的身份（某个 family 的状态、label 或成员）5 分钟没有变化时，根记录回退到轮次得到的词，`msg` 变成 `activity stale: …`，并写一行同样的 echo；回退在该活动的身份改变时解除，而不是只要有事件到达就解除。这个回退是防子任务或 job 卡死的，所以运行超过 5 分钟且状态没有变化的 job 会被报成 `done`，直到它的身份发生变化。挂起的审批把根记录写成 `state=blocked:kind=permission`，`msg=<tool> <reason> [ask <id>]`；挂起的 agent 提问则是 `state=blocked:kind=question`，`msg=question: <question> [ask <id> /answer <id> N]`，两者同时挂起时审批优先。
 
 **路由**，只在宿主挂载了 webserver 时提供：
 
@@ -196,7 +207,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 | `GET /dsh-supervision/state` | `{"proto":1,"sessions":{"<session id>":{"bridged":true,"terminal":"…","pid":<n>,"since":<ms>,"asks":["<ask id>"]}}}`；其他方法 `405` |
 | `POST /dsh-supervision/reclaim` | `content-type: application/json`，请求体 `{"session":"<id>"}` 且小于 4 KiB → `200 {"reclaimed":true}`；没有桥接持有该会话时 `409 {"reclaimed":false}`；其他 content type `415`，请求体不合法 `400` |
 
-**监督方读到的 echo 行**，按写入顺序：状态变化时 `[turn <n>] <state>`，`[ask <id>] <tool> parked (<session>)`，`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`，上面那条 `/status` 应答，`refused: <n> approval(s) parked`，`new failed: …`，`attach failed: …`，`unknown command /<verb>`；subagent/job 活动超出窗口时，那一行 `activity stale: …` 写在同一轮 publish 的 `[turn <n>] <state>` 行之前。
+**监督方读到的 echo 行**，按写入顺序：状态变化时 `[turn <n>] <state>`，`[ask <id>] <tool> parked (<session>)`，`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`，`[ask <id>] question -> answered|skipped (source=supervisor|attached)`，上面那条 `/status` 应答，`refused: <n> ask(s) parked`，`new failed: …`，`attach failed: …`，`unknown command /<verb>`；`ask` 帧承载提问卡片本身，关闭帧让它退场；subagent/job 活动超出窗口时，那一行 `activity stale: …` 写在同一轮 publish 的 `[turn <n>] <state>` 行之前。
 
 **`dsh-sup` 退出码：**`0` 正常 `bye`，`1` 后端丢失，`2` 用法错误或没有存活后端，`3` `busy`，`4` `locked`，`5` `create-failed`，`6` `protocol`（本进程拒发某帧，说明后端还活着）。
 

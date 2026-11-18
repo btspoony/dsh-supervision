@@ -166,6 +166,30 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 
 `/y` and `/n` answer the only parked ask; with more than one parked they refuse and ask you to name it.
 
+### Answer an agent question
+
+An `ask_user_question` call reaches the supervisor too: its card arrives in the
+transcript with every option numbered, and the root reports
+`blocked:kind=question` with `msg=question: … [ask <id> /answer <id> N]`. Answer
+every question of the ask by its id:
+
+```text
+/answer 3f9ac1 db=2 why=because
+[ask 3f9ac1] question -> answered (source=supervisor)
+```
+
+One token per question: `q1=2` picks option 2, `q1=1,3` selects both, `q1=-`
+skips it, and any other value is free text — the words after the first token join
+it, so `q1=two words` is one custom answer. With a single question the id may be
+omitted and the rest of the line is the value (`/answer 3f9ac1 我的 想法`). The
+full-screen surface prints the same card and, while exactly one ask is open,
+rewrites a bare `2` (or `-`, or `1,3`) to `/answer <id> 2`; a multi-question ask
+then answers with the plugin's answer-grammar error line instead of steering the
+agent, and anything else is still an ordinary steer. From a
+herdr-core HUD the same line needs no attach:
+`hc send <terminal> "/answer <id> 2"`. An asker that withdraws, or a bridge that
+goes away, skips every question and closes the card.
+
 ### Take back control
 
 While a session is bridged the GUI marks it in the sidebar and over the input area. The session's sidebar row wears a 3px blue ring on its own rounding, a light-blue translucent fill (`rgba(127, 174, 255, 0.30)`), and a wider blue capsule that fills the row height with an animated whale tail at its right edge, so a supervised session cannot be mistaken for one that is yours to type into. Opening it covers the whole input area — editor and toolbar — with a blue-bordered, light-blue translucent panel (`rgba(127, 174, 255, 0.30)`): the editor is made `inert`, so neither the pointer nor an already-focused caret can type into it. A blue caption tab sits on the panel's top edge, above the frame, quoting the shipped English string — "This chat is supervised from elsewhere — the input box is locked" (localized English/Chinese via the host locale service); a **Bridged** badge with a small white whale tail is fused into the overlay's bottom-left corner; and the panel's single **Unlock** button posts the reclaim — only a confirmed release removes the guard, so a refused unlock leaves it in place. On a host whose composer has no `[data-composer-card]` wrapper, only the editor is made `inert`; the toolbar stays operable rather than freezing the surrounding page container. The bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.
@@ -237,7 +261,7 @@ The facts a supervisor needs, all of them on this repository's wire:
 ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<permission|question|auth>][ :app=<word>][ :title=<base64>][ :msg=<base64>] ST
 ```
 
-A clear is `state=clear` for the root, `state=clear:id=<id>` for one child record. `kind` is legal only on `blocked`; a parked approval is the root `blocked:kind=permission` record carrying `msg=<tool> <reason> [ask <id>]`. Caps: sequence under 4096 bytes, title 192 bytes, `msg` 2048 bytes, id 128 bytes as `/`-joined segments of at most 32 bytes each (8 segments). The root word is `blocked` > `working` > `done` / `error` / `idle`, and a parked approval outranks a live turn. The root also stays `working` while a descendant subagent (`origin = subagent`, lineage reaching the bridged session) is `running`, or a background job the session owns is `running` or `stopping` — not only while its own turn is live — and `msg` then carries the count (`2 subagents · 1 job`). If that activity's identity (a family's status, label or membership) has not changed for 5 minutes, the root falls back to the turn word and `msg` reads `activity stale: …`, with one matching echo line; the fallback clears when the identity changes, not merely when an event arrives. It guards against a stalled child or job, so a job that runs longer than 5 minutes without a status change reads `done` until its identity changes. The reporting surface is `/dev/tty` on both paths (stdout when it is a TTY); that is what the supervisor reads, not the plugin's or the forwarder's stdout.
+A clear is `state=clear` for the root, `state=clear:id=<id>` for one child record. `kind` is legal only on `blocked`; a parked approval is the root `blocked:kind=permission` record carrying `msg=<tool> <reason> [ask <id>]`, and a parked agent question is `blocked:kind=question` carrying `msg=question: <question> [ask <id> /answer <id> N]`. The approval wins when both are parked for one session. Caps: sequence under 4096 bytes, title 192 bytes, `msg` 2048 bytes, id 128 bytes as `/`-joined segments of at most 32 bytes each (8 segments). The root word is `blocked` > `working` > `done` / `error` / `idle`, and a parked approval outranks a live turn. The root also stays `working` while a descendant subagent (`origin = subagent`, lineage reaching the bridged session) is `running`, or a background job the session owns is `running` or `stopping` — not only while its own turn is live — and `msg` then carries the count (`2 subagents · 1 job`). If that activity's identity (a family's status, label or membership) has not changed for 5 minutes, the root falls back to the turn word and `msg` reads `activity stale: …`, with one matching echo line; the fallback clears when the identity changes, not merely when an event arrives. It guards against a stalled child or job, so a job that runs longer than 5 minutes without a status change reads `done` until its identity changes. The reporting surface is `/dev/tty` on both paths (stdout when it is a TTY); that is what the supervisor reads, not the plugin's or the forwarder's stdout.
 
 **Routes**, served only when the host mounts a webserver:
 
@@ -246,7 +270,7 @@ A clear is `state=clear` for the root, `state=clear:id=<id>` for one child recor
 | `GET /dsh-supervision/state` | `{"proto":1,"sessions":{"<session id>":{"bridged":true,"terminal":"…","pid":<n>,"since":<ms>,"asks":["<ask id>"]}}}`; `405` for another method |
 | `POST /dsh-supervision/reclaim` | `content-type: application/json`, body `{"session":"<id>"}` under 4 KiB → `200 {"reclaimed":true}`; `409 {"reclaimed":false}` when no bridge held it; `415` for another content type, `400` for a bad body |
 
-**Echo lines** the supervisor reads, in the order they are written: `[turn <n>] <state>` on a state change, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer above, `refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`, `unknown command /<verb>`. When subagent/job activity outlives its window, its `activity stale: …` line is written immediately before that publish's `[turn <n>] <state>` line.
+**Echo lines** the supervisor reads, in the order they are written: `[turn <n>] <state>` on a state change, `[ask <id>] <tool> parked (<session>)`, `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, `[ask <id>] question -> answered|skipped (source=supervisor|attached)`, the `/status` answer above, `refused: <n> ask(s) parked`, `new failed: …`, `attach failed: …`, `unknown command /<verb>`. An `ask` frame carries the question card itself; a closed one retires it. When subagent/job activity outlives its window, its `activity stale: …` line is written immediately before that publish's `[turn <n>] <state>` line.
 
 **Exit codes of `dsh-sup`:** `0` clean `bye`, `1` backend lost, `2` usage or no live backend, `3` `busy`, `4` `locked`, `5` `create-failed`, `6` `protocol` (a frame this process refused, so the backend is alive).
 

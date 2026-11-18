@@ -122,10 +122,20 @@ The machine records are unchanged: OSC 7501 still goes to `/dev/tty`, and the
 `echo` lines — `[turn <n>] <state>`, `[ask <id>] <tool> parked (<session>)`,
 `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer
 `session=<id> state=<state> turn=<n> asks=<ids>` (`-` when nothing is parked),
-`refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`,
+`refused: <n> ask(s) parked`, `new failed: …`, `attach failed: …`,
 `unknown command /<verb>` — reach exactly one place each: stdout in line mode when
 you have a TTY, the transcript viewport in a full-screen attach, `/dev/tty`
 otherwise.
+
+An agent question (`ask_user_question`) is an ask too: an `ask` frame prints
+the card with its numbered options, the root reports `blocked:kind=question`, and
+`/answer <ask-id> <question-id>=<option[,option]|text|->` answers every question
+(one token each; words after a token join its value, and with a single question
+the id may be omitted so the rest of the line is the value). The full-screen
+surface prints the card and, while exactly one ask is open, rewrites a bare
+`2`, `1,3` or `-` to that command — a multi-question ask then reports the
+plugin's answer-grammar error line rather than steering the agent. A herdr-core HUD answers without an attach:
+`hc send <terminal> "/answer <id> 2"`.
 
 The root word covers more than the session's own turn: while a descendant
 subagent is `running`, or a background job owned by the session is `running` or
