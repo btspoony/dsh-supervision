@@ -615,10 +615,14 @@ async function catalogWithin(ctx: PluginContext, agent: AgentLike): Promise<Cata
     if (typeof timer === 'object' && 'unref' in timer) timer.unref()
   })
   try {
+    // The menu is read for the agent and its workspace, so project-level and
+    // agent-scoped skills appear exactly as they do in the web composer.
+    const cwd = agent.session.header?.cwd
+    const view = { ...(cwd === undefined ? {} : { cwd }), scope: agent }
     const read = (async (): Promise<Catalog> =>
       // The raw skill service: `catalogOf` reads only `list`, so a host that
       // mounts no command registry still contributes its skill rows.
-      catalogOf({ skills: ctx.get?.('skills'), commands: await commandRowsOf(ctx, agent) }))()
+      catalogOf({ skills: ctx.get?.('skills'), commands: await commandRowsOf(ctx, agent) }, view))()
     return await Promise.race([read, deadline])
   } finally {
     if (timer !== undefined) clearTimeout(timer)

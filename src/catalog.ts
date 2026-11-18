@@ -34,14 +34,24 @@ export interface CatalogSources {
 }
 
 /**
+ * The view one catalog is read for: the same workspace and agent scope the web
+ * composer passes. Supplied by the caller so the builder stays pure.
+ */
+export interface CatalogView {
+  readonly cwd?: string
+  readonly scope?: unknown
+}
+
+/**
  * Build one catalog payload from the host's services.
  * A service that is absent, mistyped or throwing contributes an empty menu:
  * a missing menu must never fail the attach that asked for it.
  * @param sources - the services and rows, read reflectively.
+ * @param view - the workspace and agent scope to read skills under.
  * @returns the capped skills and commands, in the order the host listed them.
  */
-export async function catalogOf(sources: CatalogSources): Promise<Catalog> {
-  return fitCatalog(await skillsOf(sources.skills), commandsOf(sources.commands))
+export async function catalogOf(sources: CatalogSources, view: CatalogView = {}): Promise<Catalog> {
+  return fitCatalog(await skillsOf(sources.skills, view), commandsOf(sources.commands))
 }
 
 /**
@@ -65,12 +75,13 @@ function frameBytes(skills: readonly CatalogSkill[], commands: readonly CatalogC
   return Buffer.byteLength(JSON.stringify({ t: 'catalog', skills, commands }), 'utf8') + 1
 }
 
-async function skillsOf(value: unknown): Promise<CatalogSkill[]> {
+async function skillsOf(value: unknown, view: CatalogView): Promise<CatalogSkill[]> {
   const list = listOf(value)
   if (list === undefined) return []
   let rows: unknown
   try {
-    rows = await list.call(value)
+    // Project-level and agent-scoped skills are visible only under this view.
+    rows = await list.call(value, view)
   } catch {
     return []
   }

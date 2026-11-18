@@ -35,6 +35,27 @@ test('the skill service and the command rows become the menu', async () => {
   })
 })
 
+test('the caller view reaches the skill service', async () => {
+  const scope = { id: 'session-1' }
+  const views: unknown[] = []
+  const skills = {
+    list: async (options: { readonly cwd?: string; readonly scope?: unknown } = {}) => {
+      views.push(options)
+      // A project-level row exists only under the session's view; a bare read
+      // sees the global layer alone.
+      return options.scope === scope
+        ? [{ name: 'project-skill', description: 'lives in the workspace' }]
+        : []
+    },
+  }
+  assert.deepEqual(
+    (await catalogOf({ skills, commands: [] }, { cwd: '/repo', scope })).skills,
+    [{ name: 'project-skill', description: 'lives in the workspace' }],
+  )
+  assert.deepEqual((await catalogOf({ skills, commands: [] })).skills, [], 'no view, no scoped rows')
+  assert.deepEqual(views, [{ cwd: '/repo', scope }, {}])
+})
+
 test('an absent source contributes an empty section', async () => {
   assert.deepEqual(await catalogOf({ skills: undefined, commands: undefined }), { skills: [], commands: [] })
   assert.deepEqual(await catalogOf({ skills: { list: async () => [] }, commands: [] }), { skills: [], commands: [] })

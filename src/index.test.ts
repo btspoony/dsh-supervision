@@ -170,6 +170,8 @@ class FakeHost {
         name: string
         description: string
         content?: string
+        /** Present only when the read carries an agent scope, as in a Workspace. */
+        scopeOnly?: boolean
         invocation?: { modelInvocable: boolean; userInvocable: boolean }
       }[]
     | undefined = undefined
@@ -314,10 +316,9 @@ class FakeHost {
                 if (this.catalogWait !== undefined) await this.catalogWait
                 if (this.skillsListError !== undefined) throw new Error(this.skillsListError)
                 // The host resolves an omitted policy to both invocations.
-                return (this.catalogSkills ?? []).map(row => ({
-                  invocation: { modelInvocable: true, userInvocable: true },
-                  ...row,
-                }))
+                return (this.catalogSkills ?? [])
+                  .filter(row => row.scopeOnly !== true || options.scope !== undefined)
+                  .map(row => ({ invocation: { modelInvocable: true, userInvocable: true }, ...row }))
               },
             }),
           }
@@ -1674,6 +1675,27 @@ test('a catalog frame follows welcome once and precedes the replayed history', a
     })
     await new Promise<void>(resolve => { setImmediate(resolve) })
     assert.equal(catalogs(client).length, 1, 'one catalog per bind')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a skill visible only under the session scope still reaches the menu', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  host.catalogSkills = [{ name: 'project-skill', description: 'lives in the workspace', scopeOnly: true }]
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  try {
+    await until(() => catalogs(client).length === 1, 'the catalog')
+    assert.deepEqual(catalogs(client)[0]?.skills, [
+      { name: 'project-skill', description: 'lives in the workspace' },
+    ])
+    // The attach menu reads the same view the web composer does.
+    assert.equal(host.skillListCalls[0]?.cwd, '/repo')
+    assert.equal(host.skillListCalls[0]?.scope, host.agents[0])
   } finally {
     host.dispose()
   }
