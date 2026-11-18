@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
 ### Added
 
 - Agent questions (`ask_user_question`) now reach the supervisor: the bridge projects each question onto the protocol's ask fields, caps it, and sends an `ask` frame carrying every question and its numbered options, so a host-only field such as `detail` can never oversize the frame and close the bridge. The root reports `blocked:kind=question`, and `/answer <ask-id> <question-id>=<option[,option]|text|->` settles it with one token per question; words after a token join a free-text value, and a single-question ask may omit the id and use the rest of the line. The full-screen surface prints the card and rewrites a bare option index while exactly one ask is open — a multi-question ask gets the plugin's answer-grammar error feedback instead of a steer — and a herdr-core HUD answers without an attach via `hc send <terminal> "/answer <id> 2"`. A withdrawn asker or a departed bridge skips every question and closes the card; parked questions also refuse a session switch and join the shared `asks` column. `PROTO` is now `4`.
