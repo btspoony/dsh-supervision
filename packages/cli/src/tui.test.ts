@@ -9,13 +9,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { CombinedAutocompleteProvider, Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
-import { PROTO, renderMirror } from 'dsh-supervision-protocol';
+import { PROTO, renderMirror, type AskFrame } from 'dsh-supervision-protocol';
 import { routeFrame } from './route.js';
 import { PLAIN, createTheme } from './theme.js';
 import {
   CTRL_C_WINDOW_MS,
   LOCAL_EXITS,
   NO_CATALOG,
+  answerLine,
   autocompleteCatalog,
   catalogOf,
   ctrlCAction,
@@ -53,6 +54,50 @@ import {
   scrollToTop,
   welcomeStatus,
 } from './tui.js';
+
+const SINGLE_ASK: AskFrame = {
+  t: 'ask',
+  id: '3f9ac1',
+  questions: [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] }],
+};
+
+test('an open single-question ask absorbs a bare answer line', () => {
+  const open = new Map<string, AskFrame>([[SINGLE_ASK.id, SINGLE_ASK]]);
+  assert.equal(answerLine('2', open), '/answer 3f9ac1 2');
+  assert.equal(answerLine('-', open), '/answer 3f9ac1 -');
+  assert.equal(answerLine('1,3', open), '/answer 3f9ac1 1,3');
+  assert.equal(answerLine('  2  ', open), '/answer 3f9ac1 2');
+});
+
+test('an explicit /answer always passes verbatim', () => {
+  const open = new Map<string, AskFrame>([[SINGLE_ASK.id, SINGLE_ASK]]);
+  assert.equal(answerLine('/answer other 1', open), '/answer other 1');
+  assert.equal(answerLine('  /answer 3f9ac1 db=2  ', open), '  /answer 3f9ac1 db=2  ');
+});
+
+test('an open question never swallows an ordinary steer', () => {
+  const open = new Map<string, AskFrame>([[SINGLE_ASK.id, SINGLE_ASK]]);
+  assert.equal(answerLine('hello', open), 'hello');
+  assert.equal(answerLine('2.5', open), '2.5');
+  assert.equal(answerLine('fix the retry', open), 'fix the retry');
+  assert.equal(answerLine('2', new Map()), '2');
+});
+
+test('a bare answer is rewritten for one multi-question ask, but not for several open asks', () => {
+  const multi: AskFrame = {
+    t: 'ask',
+    id: 'aaaaaa',
+    questions: [{ id: 'a', question: 'A?' }, { id: 'b', question: 'B?' }],
+  };
+  const another: AskFrame = {
+    t: 'ask',
+    id: 'bbbbbb',
+    questions: [{ id: 'c', question: 'C?' }],
+  };
+  assert.equal(answerLine('2', new Map([['aaaaaa', multi]])), '/answer aaaaaa 2');
+  assert.equal(answerLine('-', new Map([['aaaaaa', multi]])), '/answer aaaaaa -');
+  assert.equal(answerLine('2', new Map([['aaaaaa', multi], ['bbbbbb', another]])), '2');
+});
 
 test('maxTop pins the viewport to the last full page', () => {
   assert.equal(maxTop(100, 10), 90);
@@ -708,7 +753,7 @@ test('the catalog becomes one skill entry per skill plus the local exits', () =>
 
 
 test('host command rows join the menu after skills and before the local exits', () => {
-  const localVerbRows = ['cancel', 'status', 'new', 'attach', 'approve', 'reject', 'skill', 'y', 'n'].map(
+  const localVerbRows = ['cancel', 'status', 'new', 'attach', 'approve', 'reject', 'answer', 'skill', 'y', 'n'].map(
     (name) => ({ name, description: `a host row the local /${name} owns` }),
   );
   const catalog: Catalog = {

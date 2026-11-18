@@ -15,6 +15,7 @@ export type Command =
   | { readonly kind: 'command'; readonly name: string; readonly text: string }
   | { readonly kind: 'approve'; readonly ask: string }
   | { readonly kind: 'reject'; readonly ask: string }
+  | { readonly kind: 'answer'; readonly ask: string; readonly spec: string }
   | { readonly kind: 'yes' }
   | { readonly kind: 'no' }
   | { readonly kind: 'unknown'; readonly verb: string }
@@ -99,6 +100,13 @@ export function parseLine(line: string): Command | undefined {
       const [ask, ...rest] = args
       if (rest.length > 0 || ask === undefined || ask === '') return { kind: 'unknown', verb }
       return verb === 'approve' ? { kind: 'approve', ask } : { kind: 'reject', ask }
+    }
+    case 'answer': {
+      // Everything after the ask id is the answer spec, so a custom answer may
+      // contain an `=` inside its value; the plugin's grammar reads the rest.
+      const [ask, ...rest] = args
+      if (ask === undefined || ask === '' || rest.length === 0) return { kind: 'unknown', verb }
+      return { kind: 'answer', ask, spec: rest.join(' ') }
     }
     default:
       // A registered host command: only the bridge's command service can say

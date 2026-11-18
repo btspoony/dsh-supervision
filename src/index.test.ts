@@ -11,19 +11,23 @@ import { join } from 'node:path'
 import { connect } from 'node:net'
 import type { Socket } from 'node:net'
 import { after, mock, test } from 'node:test'
-import { DEFAULTS, apply, validateConfig } from './index.js'
+import { DEFAULTS, apply, questionMsg, validateConfig } from './index.js'
 import type {
   ApprovalListener,
   ApprovalRequest,
   Config,
   PluginContext,
+  QuestionListener,
+  QuestionRequest,
   SessionEvent,
   UserMessage,
 } from './index.js'
 import type { ApprovalOutcome } from './approval.js'
+import { skipAnswers } from './answers.js'
+import type { QuestionAnswers } from './answers.js'
 import { HISTORY_ITEMS } from './mirror.js'
 import type { TtyIO } from './tty-transport.js'
-import { MAX_FRAME, PROTO, readRegistry } from 'dsh-supervision-protocol'
+import { MAX_ASK_DESCRIPTION, MAX_ASK_TEXT, MAX_FRAME, PROTO, readRegistry } from 'dsh-supervision-protocol'
 import type { InFrame, OutFrame } from 'dsh-supervision-protocol'
 
 const roots: string[] = []
@@ -224,6 +228,8 @@ class FakeHost {
   readonly failResume = new Set<string>()
   /** The options each approval listener registered with, for the prepend check. */
   readonly approvalOptions: { readonly prepend?: boolean }[] = []
+  /** The options each question listener registered with, for the prepend check. */
+  readonly questionOptions: { readonly prepend?: boolean }[] = []
   /** The fake webserver; `attachServer: false` mimics a CLI-only host. */
   readonly server = new FakeServer()
   attachServer = true
@@ -232,6 +238,8 @@ class FakeHost {
   readonly #subagentListeners = new Set<() => void>()
   /** DSH's answerer chain for `approval/request`, in dispatch order. */
   readonly #approvalListeners: ApprovalListener[] = []
+  /** DSH's answerer chain for `user-questions/request`, in dispatch order. */
+  readonly #questionListeners: QuestionListener[] = []
   /** The last effect registered; the fake models the host's disposal like the old one. */
   #disposer: (() => void) | undefined
 
@@ -407,6 +415,14 @@ class FakeHost {
             if (index >= 0) this.#approvalListeners.splice(index, 1)
           }
         }
+        if (name === 'user-questions/request') {
+          this.#questionListeners.push(listener)
+          this.questionOptions.push(options ?? {})
+          return () => {
+            const index = this.#questionListeners.indexOf(listener)
+            if (index >= 0) this.#questionListeners.splice(index, 1)
+          }
+        }
         if (name === 'subagent/start' || name === 'subagent/end') {
           this.#subagentListeners.add(listener)
           return () => { this.#subagentListeners.delete(listener) }
@@ -468,6 +484,27 @@ class FakeHost {
   /** @returns how many approval listeners the plugin holds. */
   get approvalCount(): number {
     return this.#approvalListeners.length
+  }
+
+  /**
+   * Dispatch one agent question the way the host's waterfall does. The terminal
+   * answerer is a sentinel, so an unclaimed request stays distinguishable.
+   * @param request - the pending questions.
+   * @returns the first answer, or the sentinel when no answerer claims it.
+   */
+  async askQuestion(request: QuestionRequest): Promise<QuestionAnswers> {
+    const step = async (index: number): Promise<QuestionAnswers> => {
+      const listener = this.#questionListeners[index]
+      return listener === undefined
+        ? { answers: request.questions.map(question => ({ id: question.id, selected: ['next'] })) }
+        : listener(request, () => step(index + 1))
+    }
+    return step(0)
+  }
+
+  /** @returns how many question listeners the plugin holds. */
+  get questionCount(): number {
+    return this.#questionListeners.length
   }
 
   /** @returns how many session and status listeners the plugin holds. */
@@ -3830,7 +3867,7 @@ test('a session switch is refused while an ask is parked', async () => {
   await until(() => client.frames.length === 5, 'the parked ask')
   client.write({ t: 'line', text: '/attach session-2' })
   await until(() => client.frames.length === 6, 'the refusal')
-  assert.deepEqual(client.frames[5], { t: 'echo', text: 'refused: 1 approval(s) parked' })
+  assert.deepEqual(client.frames[5], { t: 'echo', text: 'refused: 1 ask(s) parked' })
 
   client.write({ t: 'line', text: '/status' })
   await until(() => client.frames.length === 7, 'the status line')
@@ -3838,6 +3875,331 @@ test('a session switch is refused while an ask is parked', async () => {
 
   client.write({ t: 'line', text: '/n' })
   assert.equal(await answered, 'rejected')
+  host.dispose()
+})
+
+const ASK_QUESTIONS = [
+  { id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] },
+  { id: 'why', question: 'Why that one?' },
+]
+
+test('a bridged question parks as blocked kind=question and is answered by /answer', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+
+  // No bridge yet: no listener, so the browser's own answerer still answers.
+  assert.equal(host.questionCount, 0)
+  assert.deepEqual(await host.askQuestion({ agent, questions: ASK_QUESTIONS }), {
+    answers: [{ id: 'db', selected: ['next'] }, { id: 'why', selected: ['next'] }],
+  })
+
+  const client = await attached(host, dir, 'session-1')
+  assert.deepEqual(host.questionOptions, [{ prepend: true }])
+
+  const answered = host.askQuestion({ agent, questions: ASK_QUESTIONS })
+  await until(() => client.frames.length === 4, 'the parked question')
+  const parked = client.frames[1]
+  if (parked?.t !== 'ask' || 'closed' in parked) assert.fail('the question never reached the wire')
+  const id = parked.id
+  assert.deepEqual(parked, { t: 'ask', id, questions: ASK_QUESTIONS })
+  assert.match(oscData(client.frames[2]), /^\u001b\]7501;state=blocked:kind=question:/)
+  assert.equal(reportedMsg(oscData(client.frames[2])), `question: Which database? [ask ${id} /answer ${id} N]`)
+  assert.deepEqual(client.frames[3], { t: 'echo', text: '[turn 0] blocked' })
+
+  client.write({ t: 'line', text: `/answer ${id} db=2 why=because` })
+  assert.deepEqual(await answered, {
+    answers: [
+      { id: 'db', selected: ['Postgres'] },
+      { id: 'why', selected: [], custom: 'because' },
+    ],
+  })
+  await until(() => client.frames.length === 8, 'the question decision')
+  // The close precedes the audit line, so the surface retires the card at once.
+  assert.deepEqual(client.frames.slice(4), [
+    { t: 'ask', id, closed: true },
+    { t: 'echo', text: `[ask ${id}] question -> answered (source=supervisor)` },
+    { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' },
+    { t: 'echo', text: '[turn 0] idle' },
+  ])
+  assert.equal(host.questionCount, 1)
+  host.dispose()
+  assert.equal(host.questionCount, 0, 'the last bridge takes its listener with it')
+})
+
+test('a question msg folds newlines into one space and stays in the report budget', () => {
+  const ask = {
+    id: 'a1b2c3',
+    session: 'session-1',
+    questions: [{ id: 'q1', question: 'line one\n\nline two\ttail' }],
+  }
+  assert.equal(
+    questionMsg(ask),
+    'question: line one line two tail [ask a1b2c3 /answer a1b2c3 N]',
+  )
+  const long = questionMsg({ ...ask, questions: [{ id: 'q1', question: 'x'.repeat(500) }] })
+  assert.ok(long.length <= 200, String(long.length))
+  assert.ok(long.length > 190, String(long.length))
+})
+
+test('a hostile question batch is projected to the ask shape and stays within one frame', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  // The host may carry fields the wire does not define; the projection must drop
+  // them before encode, or the oversized frame closes the bridge at the transport.
+  const hostile = [{
+    id: 'q1',
+    question: 'q'.repeat(5000),
+    header: 'Head\nTail',
+    options: [{ label: 'SQLite', description: 'd'.repeat(5000) }, { label: 'Postgres' }],
+    detail: 'd'.repeat(100_000),
+    intent: { kind: 'plan-review', approve: 'SQLite', detail: 'p'.repeat(100_000) },
+  }]
+  const answered = host.askQuestion({ agent, questions: hostile })
+  await until(() => client.frames.length === 4, 'the projected question')
+  const parked = client.frames[1]
+  if (parked?.t !== 'ask' || 'closed' in parked) assert.fail('the question never reached the wire')
+  const wire = JSON.stringify(parked)
+  assert.equal(wire.includes('detail'), false, 'host detail never reaches the wire')
+  assert.equal(wire.includes('intent'), false, 'host intent never reaches the wire')
+  assert.equal(parked.questions[0]?.question.length, MAX_ASK_TEXT)
+  assert.equal(parked.questions[0]?.options?.[0]?.description?.length, MAX_ASK_DESCRIPTION)
+  assert.ok(Buffer.byteLength(wire, 'utf8') < MAX_FRAME)
+
+  // The bridge survived: a later command answers, and the shown option labels
+  // are what an index answer selects.
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 5, 'the status line')
+  assert.match(echoText(client.frames[4]), /^session=session-1 state=blocked/)
+  client.write({ t: 'line', text: `/answer ${parked.id} 2` })
+  assert.deepEqual(await answered, { answers: [{ id: 'q1', selected: ['Postgres'] }] })
+  host.dispose()
+})
+
+test('a bare index for a multi-question ask echoes the grammar error instead of steering', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const answered = host.askQuestion({ agent, questions: ASK_QUESTIONS })
+  await until(() => client.frames.length === 4, 'the parked question')
+  const parked = client.frames[1]
+  if (parked?.t !== 'ask' || 'closed' in parked) assert.fail('the question never reached the wire')
+
+  // The TUI forwards this line for a multi-question ask; the grammar refuses a
+  // bare value, so the operator gets feedback instead of a silent steer.
+  client.write({ t: 'line', text: `/answer ${parked.id} 2` })
+  await until(() => client.frames.length === 5, 'the grammar error')
+  assert.deepEqual(client.frames[4], {
+    t: 'echo',
+    text: `[ask ${parked.id}] a bare answer needs exactly one question`,
+  })
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 6, 'the status line')
+  assert.match(echoText(client.frames[5]), new RegExp(` asks=${parked.id}$`))
+
+  client.write({ t: 'line', text: `/answer ${parked.id} db=1 why=-` })
+  assert.equal((await answered).answers[0]?.selected[0], 'SQLite')
+  host.dispose()
+})
+
+test('/answer reports a malformed spec and leaves the ask parked', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const questions = [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] }]
+  const answered = host.askQuestion({ agent, questions })
+  await until(() => client.frames.length === 4, 'the parked question')
+  const parked = client.frames[1]
+  if (parked?.t !== 'ask' || 'closed' in parked) assert.fail('the question never reached the wire')
+  const id = parked.id
+
+  client.write({ t: 'line', text: `/answer ${id} db=9` })
+  await until(() => client.frames.length === 5, 'the refusal')
+  assert.deepEqual(client.frames[4], {
+    t: 'echo',
+    text: `[ask ${id}] option 9 is out of range for db`,
+  })
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 6, 'the status line')
+  assert.deepEqual(client.frames[5], {
+    t: 'echo',
+    text: `session=session-1 state=blocked turn=0 asks=${id}`,
+  })
+
+  client.write({ t: 'line', text: `/answer ${id} 2` })
+  assert.equal((await answered).answers[0]?.selected[0], 'Postgres')
+  host.dispose()
+})
+
+test('a question the asker withdraws skips every answer and closes the card', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const controller = new AbortController()
+  const questions = [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }] }]
+  const answered = host.askQuestion({ agent, questions, signal: controller.signal })
+  await until(() => client.frames.length === 4, 'the parked question')
+  const parked = client.frames[1]
+  if (parked?.t !== 'ask' || 'closed' in parked) assert.fail('the question never reached the wire')
+  const id = parked.id
+
+  controller.abort()
+  assert.deepEqual(await answered, skipAnswers(questions))
+  await until(() => client.frames.length === 8, 'the withdrawal')
+  assert.deepEqual(client.frames.slice(4), [
+    { t: 'ask', id, closed: true },
+    { t: 'echo', text: `[ask ${id}] question -> skipped (source=attached)` },
+    { t: 'osc', data: '\u001b]7501;state=idle:app=dsh:title=cmVwbw==\u001b\\' },
+    { t: 'echo', text: '[turn 0] idle' },
+  ])
+  host.dispose()
+})
+
+test('a bridge that goes away skips its parked question and closes the card', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const questions = [{ id: 'db', question: 'Which database?' }]
+  const answered = host.askQuestion({ agent, questions })
+  await until(() => client.frames.length === 4, 'the parked question')
+  const parked = client.frames[1]
+  if (parked?.t !== 'ask' || 'closed' in parked) assert.fail('the question never reached the wire')
+  // Reclaim ends the bridge through the same teardown a dropped socket uses,
+  // while the peer still reads: the close must be on the wire before the EOF.
+  const reclaimed = await host.server.call(
+    '/dsh-supervision/reclaim',
+    'POST',
+    { 'content-type': 'application/json' },
+    JSON.stringify({ session: 'session-1' }),
+  )
+  assert.equal(reclaimed.statusCode, 200)
+  assert.deepEqual(await answered, skipAnswers(questions))
+  await until(
+    () => client.frames.some(frame => frame.t === 'ask' && frame.id === parked.id && 'closed' in frame),
+    'the closed card',
+  )
+  host.dispose()
+})
+
+test('disposing the plugin skips a parked question', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  await attached(host, dir, 'session-1')
+
+  const questions = [{ id: 'db', question: 'Which database?' }]
+  const answered = host.askQuestion({ agent, questions })
+  await until(() => host.questionCount === 1, 'the question listener')
+  host.dispose()
+  assert.deepEqual(await answered, skipAnswers(questions))
+})
+
+test('an approval outranks a parked question in the blocked record', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+
+  const approval = host.ask({ agent, toolName: 'bash', reason: 'write' })
+  await until(() => client.frames.length === 4, 'the parked approval')
+  const approvalId = askIdOf(echoText(client.frames[1]))
+
+  const questions = [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }] }]
+  const answered = host.askQuestion({ agent, questions })
+  await until(() => client.frames.length === 5, 'the parked question')
+  const parked = client.frames[4]
+  if (parked?.t !== 'ask' || 'closed' in parked) assert.fail('the question never reached the wire')
+  assert.equal(
+    reportedMsg(oscData(client.frames[2])),
+    `bash write [ask ${approvalId}]`,
+    'the approval keeps the record while both are parked',
+  )
+
+  client.write({ t: 'line', text: `/approve ${approvalId}` })
+  assert.equal(await approval, 'allowed-once')
+  await until(() => client.frames.length === 7, 'the question record after the approval')
+  assert.match(oscData(client.frames[6]), /^\u001b\]7501;state=blocked:kind=question:/)
+  assert.equal(reportedMsg(oscData(client.frames[6])), `question: Which database? [ask ${parked.id} /answer ${parked.id} N]`)
+
+  client.write({ t: 'line', text: `/answer ${parked.id} 1` })
+  assert.equal((await answered).answers[0]?.selected[0], 'SQLite')
+  host.dispose()
+})
+
+test('approvals and questions share one id pool in /status and the state route', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  const agent = host.add('session-1', '/repo')
+  host.add('session-2', '/repo/web')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  const approval = host.ask({ agent, toolName: 'bash' })
+  await until(() => client.frames.length === 5, 'the parked approval')
+  const approvalId = askIdOf(echoText(client.frames[2]))
+
+  const questions = [{ id: 'db', question: 'Which database?' }]
+  const answered = host.askQuestion({ agent, questions })
+  await until(() => client.frames.length === 6, 'the parked question')
+  const parked = client.frames[5]
+  if (parked?.t !== 'ask' || 'closed' in parked) assert.fail('the question never reached the wire')
+
+  client.write({ t: 'line', text: '/status' })
+  await until(() => client.frames.length === 7, 'the status line')
+  assert.deepEqual(client.frames[6], {
+    t: 'echo',
+    text: `session=session-1 state=blocked turn=0 asks=${approvalId},${parked.id}`,
+  })
+
+  const sessions = sessionsOf((await host.server.call('/dsh-supervision/state', 'GET', {})).json)
+  assert.deepEqual(sessions['session-1']?.asks, [approvalId, parked.id])
+
+  client.write({ t: 'line', text: '/attach session-2' })
+  await until(() => client.frames.length === 8, 'the switch refusal')
+  assert.deepEqual(client.frames[7], { t: 'echo', text: 'refused: 2 ask(s) parked' })
+
+  client.write({ t: 'line', text: `/reject ${approvalId}` })
+  assert.equal(await approval, 'rejected')
+  client.write({ t: 'line', text: `/answer ${parked.id} -` })
+  assert.equal((await answered).answers[0]?.selected.length, 0)
+  host.dispose()
+})
+
+test('a question from another tree stays with the browser answerer', async () => {
+  const dir = tempDir()
+  const host = new FakeHost()
+  host.add('session-1', '/repo')
+  const elsewhere = host.add('session-other', '/repo/other')
+  apply(host.ctx, config({ socketDir: dir }))
+  const client = await attached(host, dir, 'session-1')
+  await until(() => client.frames.length === 2, 'the seeded child record')
+
+  const before = client.frames.length
+  assert.deepEqual(await host.askQuestion({ agent: elsewhere, questions: [{ id: 'x', question: 'X?' }] }), {
+    answers: [{ id: 'x', selected: ['next'] }],
+  })
+  assert.equal(client.frames.length, before, 'another tree keeps its own answerer')
   host.dispose()
 })
 

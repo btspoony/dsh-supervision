@@ -178,6 +178,13 @@ function runBridge(socket: string, hello: HelloFrame, useTui: boolean): Promise<
           surface?.setCatalog(catalog);
           return;
         }
+        // A live surface owns the ask card: it renders the question into the
+        // transcript and remembers it for the bare-index rewrite, so the frame
+        // never takes a sink of its own. Line mode routes it below.
+        if (frame.t === 'ask' && surface !== undefined) {
+          surface.setAsk(frame);
+          return;
+        }
         const routed = routeFrame(frame, process.stdout.isTTY === true);
         if (routed.tty !== undefined) tty.write(routed.tty);
         // The human sink is stdout itself, never the tty writer: a redirected

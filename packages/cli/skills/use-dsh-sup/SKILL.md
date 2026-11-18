@@ -86,8 +86,8 @@ session's skills appear as `/skill:<name>` (fuzzy-matching the bare name works),
 then the registered host commands the bridge can execute, and the forwarder's
 own exits close the list. Local verbs win: a host row whose name the plugin
 resolves locally — `/cancel`, `/status`, `/new`, `/attach`, `/approve`,
-`/reject`, bare `/skill`, `/y`, `/n` and the exits — is not offered, and typing
-that name runs the local meaning. Tab inserts the highlighted completion, while
+`/reject`, `/answer`, bare `/skill`, `/y`, `/n` and the exits — is not offered,
+and typing that name runs the local meaning. Tab inserts the highlighted completion, while
 Enter accepts and sends it immediately. A host command such as `/compact` runs
 in-process over the bridge and answers as one echo (its own text, or
 `/<name>: ok` when it reports none). A multi-line result keeps its line breaks:
@@ -128,11 +128,21 @@ The machine records are otherwise unchanged: OSC 7501 still goes to `/dev/tty`,
 and the `echo` lines — `[turn <n>] <state>`, `[ask <id>] <tool> parked (<session>)`,
 `[ask <id>] <tool> → <outcome> (source=supervisor|attached)`, the `/status` answer
 `session=<id> state=<state> turn=<n> asks=<ids>` (`-` when nothing is parked),
-`refused: <n> approval(s) parked`, `new failed: …`, `attach failed: …`, a host
+`refused: <n> ask(s) parked`, `new failed: …`, `attach failed: …`, a host
 command's result (its own text, `/<name>: ok`, or `command failed: …`),
 `unknown command /<verb>` — reach exactly one place each: stdout in line mode when
 you have a TTY, the transcript viewport in a full-screen attach, `/dev/tty`
 otherwise.
+
+An agent question (`ask_user_question`) is an ask too: an `ask` frame prints
+the card with its numbered options, the root reports `blocked:kind=question`, and
+`/answer <ask-id> <question-id>=<option[,option]|text|->` answers every question
+(one token each; words after a token join its value, and with a single question
+the id may be omitted so the rest of the line is the value). The full-screen
+surface prints the card and, while exactly one ask is open, rewrites a bare
+`2`, `1,3` or `-` to that command — a multi-question ask then reports the
+plugin's answer-grammar error line rather than steering the agent. A herdr-core HUD answers without an attach:
+`hc send <terminal> "/answer <id> 2"`.
 
 The root word covers more than the session's own turn: while a descendant
 subagent is `running`, or a background job owned by the session is `running` or

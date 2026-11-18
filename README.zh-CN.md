@@ -95,7 +95,7 @@ stdin 与 stdout 都是终端时，attach 打开全屏交互面而不是逐行�
 
 **未验证的平台。** Windows 终端（ConPTY）与 tmux 尚未验证：全屏交互面还没有在那里跑过。真去跑时先查三件事——每条退出路径（`Ctrl+D`、`/q`、后端断开）都能恢复备用屏；终端会上报交互面认识的键盘协议（modifyOtherKeys 或 Kitty 协议，决定 `Shift+Enter` 的行为）；pane 里有桥接能打开的 `/dev/tty`，没有的话只有套接口面挂载，原因写到 stderr。
 
-**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与已注册的宿主命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。菜单先列 skills，再列桥接能够执行的宿主命令，最后是 forwarder 自己的退出命令。本地动词优先：宿主命令若与 `/cancel`、`/status`、`/new`、`/attach`、`/approve`、`/reject`、裸 `/skill`、`/y`、`/n` 或退出命令同名，就不会出现在菜单里；输入该名字执行的是本地含义。像 `/compact` 这样的宿主命令会在进程内对当前会话执行，结果以一条 echo 回到终端——命令自己的结果文本，或它没有文本时的 `/<name>: ok`。多行结果会保留换行：命令写了几行，终端就按原样显示几行。它不会给模型发消息；会话日志仍会记录 `command/run` 和 `command/done`，web 视图可以看到。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。`/skill:<name>` 会被改写为 `/<name>`（并带上名字之后的词）作为一条用户消息 steer 出去，由宿主注入渲染好的 skill 正文，行为与 web 输入框一致。未知或不允许用户调用的名字会得到 `skill not found: <name>`。已知限制：桥接不传附件；命令生命周期（`command/run`/`command/done`）不会镜像到终端，echo 行就是全部报告。
+**补全。** attach 建立后插件会发来一条 `catalog` 帧，携带该会话的 skills 与已注册的宿主命令；编辑器据此生成菜单：输入 `/` 列出全部条目，输入 `/skill:` 收敛为该会话的 skills（形如 `/skill:<name>`，直接打裸名字也能模糊匹配），按 Tab 把选中项补进编辑器，按回车则接受并立刻发送。菜单先列 skills，再列桥接能够执行的宿主命令，最后是 forwarder 自己的退出命令。本地动词优先：宿主命令若与 `/cancel`、`/status`、`/new`、`/attach`、`/approve`、`/reject`、`/answer`、裸 `/skill`、`/y`、`/n` 或退出命令同名，就不会出现在菜单里；输入该名字执行的是本地含义。像 `/compact` 这样的宿主命令会在进程内对当前会话执行，结果以一条 echo 回到终端——命令自己的结果文本，或它没有文本时的 `/<name>: ok`。多行结果会保留换行：命令写了几行，终端就按原样显示几行。它不会给模型发消息；会话日志仍会记录 `command/run` 和 `command/done`，web 视图可以看到。catalog 帧只作为界面输入——不会写到 stdout 或 `/dev/tty`，行模式直接忽略它。装了 `fd` 时，`@file` 补全以会话目录为基准。`/skill:<name>` 会被改写为 `/<name>`（并带上名字之后的词）作为一条用户消息 steer 出去，由宿主注入渲染好的 skill 正文，行为与 web 输入框一致。未知或不允许用户调用的名字会得到 `skill not found: <name>`。已知限制：桥接不传附件；命令生命周期（`command/run`/`command/done`）不会镜像到终端，echo 行就是全部报告。
 
 **退出。** `/q`、`/quit`、`/exit`、`/bye`——单独一行、全小写、后面不带参数——在两种界面（TUI 与 `--no-tui`）都能退出 attach：转发器发出 `bye`、恢复终端并以 0 退出，且它们不会被转发给会话，不会留下挂起的模型请求。转发器还会把它们追加到 `/`
 菜单末尾并标注 `leave dsh-sup (local)`，因此退出方式不依赖宿主 catalog 提供了
@@ -115,6 +115,17 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 ```
 
 `/y` 与 `/n` 应答唯一挂起的提问；挂起不止一个时它们会拒绝，并要求你指名。有提问挂起期间，`/new` 与 `/attach` 会被拒绝；提问方撤回时，提问以 `cancelled` 结掉。
+
+### 应答 agent 提问
+
+`ask_user_question` 的提问也会到达监督方：卡片带着编号选项进入 transcript，根记录变成 `blocked:kind=question`，`msg=question: … [ask <id> /answer <id> N]`。按提问 id 逐题作答：
+
+```text
+/answer 3f9ac1 db=2 why=because
+[ask 3f9ac1] question -> answered (source=supervisor)
+```
+
+每个问题一个 token：`q1=2` 选第 2 项，`q1=1,3` 选两项，`q1=-` 跳过，其他值作为自由文本——首个 token 之后的词会并入该值，所以 `q1=two words` 是一个自定义答案。只有一个问题时可以省略问题 id，整行剩余内容都是该值（`/answer 3f9ac1 我的 想法`）。全屏交互面会打印同一张卡片，并在恰好只有一个提问打开时，把裸 `2`（或 `-`、`1,3`）改写为 `/answer <id> 2`；多问题提问会收到插件答案语法的错误行，而不是把输入变成发给 agent 的消息；其他输入仍是普通 steer。从 herdr-core HUD 作答不需要 attach：`hc send <terminal> "/answer <id> 2"`。提问方撤回或桥接断开时，所有问题按跳过结掉并关闭卡片。
 
 ### 把会话拿回来
 
@@ -187,7 +198,7 @@ mirror 打印的是写好的整块，一次一行。
 ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<permission|question|auth>][ :app=<word>][ :title=<base64>][ :msg=<base64>] ST
 ```
 
-清除是根记录用 `state=clear`、单条子记录用 `state=clear:id=<id>`。`kind` 只在 `blocked` 上合法。上限：整条序列小于 4096 字节，title 192 字节，`msg` 2048 字节，id 128 字节且按 `/` 分段、每段至多 32 字节（最多 8 段）。根词优先级为 `blocked` > `working` > `done` / `error` / `idle`。只要后代 subagent（`origin = subagent` 且谱系能追到被桥接会话）处于 `running`，或该会话拥有的后台 job 处于 `running` 或 `stopping`，根记录也保持 `working`——不只是它自己那轮还活着时——此时 `msg` 携带数量（`2 subagents · 1 job`）。当这类活动的身份（某个 family 的状态、label 或成员）5 分钟没有变化时，根记录回退到轮次得到的词，`msg` 变成 `activity stale: …`，并写一行同样的 echo；回退在该活动的身份改变时解除，而不是只要有事件到达就解除。这个回退是防子任务或 job 卡死的，所以运行超过 5 分钟且状态没有变化的 job 会被报成 `done`，直到它的身份发生变化。挂起的审批把根记录写成 `state=blocked:kind=permission`，`msg=<tool> <reason> [ask <id>]`。
+清除是根记录用 `state=clear`、单条子记录用 `state=clear:id=<id>`。`kind` 只在 `blocked` 上合法。上限：整条序列小于 4096 字节，title 192 字节，`msg` 2048 字节，id 128 字节且按 `/` 分段、每段至多 32 字节（最多 8 段）。根词优先级为 `blocked` > `working` > `done` / `error` / `idle`。只要后代 subagent（`origin = subagent` 且谱系能追到被桥接会话）处于 `running`，或该会话拥有的后台 job 处于 `running` 或 `stopping`，根记录也保持 `working`——不只是它自己那轮还活着时——此时 `msg` 携带数量（`2 subagents · 1 job`）。当这类活动的身份（某个 family 的状态、label 或成员）5 分钟没有变化时，根记录回退到轮次得到的词，`msg` 变成 `activity stale: …`，并写一行同样的 echo；回退在该活动的身份改变时解除，而不是只要有事件到达就解除。这个回退是防子任务或 job 卡死的，所以运行超过 5 分钟且状态没有变化的 job 会被报成 `done`，直到它的身份发生变化。挂起的审批把根记录写成 `state=blocked:kind=permission`，`msg=<tool> <reason> [ask <id>]`；挂起的 agent 提问则是 `state=blocked:kind=question`，`msg=question: <question> [ask <id> /answer <id> N]`，两者同时挂起时审批优先。
 
 **路由**，只在宿主挂载了 webserver 时提供：
 
@@ -196,7 +207,7 @@ ESC ] 7501 ; state=<idle|working|done|blocked|error>[ :id=<child id>][ :kind=<pe
 | `GET /dsh-supervision/state` | `{"proto":1,"sessions":{"<session id>":{"bridged":true,"terminal":"…","pid":<n>,"since":<ms>,"asks":["<ask id>"]}}}`；其他方法 `405` |
 | `POST /dsh-supervision/reclaim` | `content-type: application/json`，请求体 `{"session":"<id>"}` 且小于 4 KiB → `200 {"reclaimed":true}`；没有桥接持有该会话时 `409 {"reclaimed":false}`；其他 content type `415`，请求体不合法 `400` |
 
-**监督方读到的 echo 行**，按写入顺序：状态变化时 `[turn <n>] <state>`，`[ask <id>] <tool> parked (<session>)`，`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`，上面那条 `/status` 应答，`refused: <n> approval(s) parked`，`new failed: …`，`attach failed: …`，host 命令的结果（命令自己的文本、`/<name>: ok` 或 `command failed: …`），`unknown command /<verb>`；subagent/job 活动超出窗口时，那一行 `activity stale: …` 写在同一轮 publish 的 `[turn <n>] <state>` 行之前。
+**监督方读到的 echo 行**，按写入顺序：状态变化时 `[turn <n>] <state>`，`[ask <id>] <tool> parked (<session>)`，`[ask <id>] <tool> → <outcome> (source=supervisor|attached)`，`[ask <id>] question -> answered|skipped (source=supervisor|attached)`，上面那条 `/status` 应答，`refused: <n> ask(s) parked`，`new failed: …`，`attach failed: …`，host 命令的结果（命令自己的文本、`/<name>: ok` 或 `command failed: …`），`unknown command /<verb>`；`ask` 帧承载提问卡片本身，关闭帧让它退场；subagent/job 活动超出窗口时，那一行 `activity stale: …` 写在同一轮 publish 的 `[turn <n>] <state>` 行之前。
 
 **`dsh-sup` 退出码：**`0` 正常 `bye`，`1` 后端丢失，`2` 用法错误或没有存活后端，`3` `busy`，`4` `locked`，`5` `create-failed`，`6` `protocol`（本进程拒发某帧，说明后端还活着）。
 

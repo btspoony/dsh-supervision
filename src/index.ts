@@ -1,7 +1,7 @@
 /**
  * The Cordis plugin: it owns the control socket, one root report per bridged
- * session, the parked approval asks that force that report to `blocked`, and
- * the activation gate that keeps a GUI-only `dsh web` untouched.
+ * session, the parked approvals and agent questions that force that report to
+ * `blocked`, and the activation gate that keeps a GUI-only `dsh web` untouched.
  *
  * The DSH host is not a dependency of this package (the host loads the plugin,
  * not the reverse), so the few services it touches are declared structurally
@@ -10,8 +10,24 @@
 
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
-import { MAX_FRAME, PROTO, clearProgramStatus, encodeFrame, isRecord, programStatus, stripControls } from 'dsh-supervision-protocol'
+import {
+  MAX_ASK_DESCRIPTION,
+  MAX_ASK_ID,
+  MAX_ASK_LABEL,
+  MAX_ASK_OPTIONS,
+  MAX_ASK_QUESTIONS,
+  MAX_ASK_TEXT,
+  MAX_FRAME,
+  PROTO,
+  clearProgramStatus,
+  encodeFrame,
+  isRecord,
+  programStatus,
+  stripControls,
+} from 'dsh-supervision-protocol'
 import type {
+  AskFrame,
+  AskQuestion,
   ErrorCode,
   HelloFrame,
   MirrorItem,
@@ -25,6 +41,8 @@ import { activityOf, activitySummary, staleActivity } from './activity.js'
 import type { Activity, AgentActivityView, JobActivityView } from './activity.js'
 import { ApprovalQueue } from './approval.js'
 import type { ApprovalOutcome, ParkedAsk } from './approval.js'
+import { parseAnswers, skipAnswers } from './answers.js'
+import type { QuestionAnswers } from './answers.js'
 import { catalogOf } from './catalog.js'
 import type { Catalog } from './catalog.js'
 import { reasonOf } from './reason.js'
@@ -32,6 +50,8 @@ import { createRootState, reduceRootState, rootWord } from './state.js'
 import type { RootState, StateEvent } from './state.js'
 import { HISTORY_ITEMS, historyItems, mirrorFrame, mirrorOf } from './mirror.js'
 import type { CallRecord, SessionEvent } from './mirror.js'
+import { QuestionQueue } from './question.js'
+import type { ParkedQuestion } from './question.js'
 import { parseLine } from './stdin.js'
 import { registerSupervisionRoutes, supervisionState } from './routes.js'
 import { isSkillsLike, registerSkill } from './skill.js'
@@ -141,6 +161,24 @@ type ApprovalNext = () => Promise<ApprovalOutcome>
 /** The listener shape of DSH's `approval/request` waterfall. */
 export type ApprovalListener = (request: ApprovalRequest, next: ApprovalNext) => Promise<ApprovalOutcome>
 
+/**
+ * The slice of DSH's `AskUserQuestionRequestEvent` this plugin reads
+ * (`packages/interaction/user-questions/src/types/types.ts:147-162`). The event
+ * carries no ask id, which is why the plugin assigns its own.
+ */
+export interface QuestionRequest {
+  readonly questions: readonly AskQuestion[]
+  readonly agent?: AgentLike
+  /** Aborts when the asker withdraws the question. */
+  readonly signal?: AbortSignal
+}
+
+/** The waterfall's `next`: hand the questions to the answerers behind this listener. */
+type QuestionNext = () => Promise<QuestionAnswers>
+
+/** The listener shape of DSH's `user-questions/request` waterfall. */
+export type QuestionListener = (request: QuestionRequest, next: QuestionNext) => Promise<QuestionAnswers>
+
 /** `ctx.agents`, reduced to the calls this plugin makes. */
 export interface AgentsService {
   get(id: string): AgentLike | undefined
@@ -170,6 +208,11 @@ export interface PluginContext {
   on(
     name: 'approval/request',
     listener: ApprovalListener,
+    options: { readonly prepend?: boolean },
+  ): () => void
+  on(
+    name: 'user-questions/request',
+    listener: QuestionListener,
     options: { readonly prepend?: boolean },
   ): () => void
   effect(setup: () => () => void): unknown
@@ -836,6 +879,94 @@ function askMsg(ask: ParkedAsk): string {
   return `${ask.toolName}${reason === '' ? '' : ` ${reason}`} [ask ${ask.id}]`
 }
 
+/**
+ * The root `msg` one parked question forces: what is asked, and which ids
+ * answer it. Newlines collapse first, because an OSC field is one line. The
+ * whole line stays inside the same 200-char budget the approval msg uses,
+ * because the encoder drops an over-long record whole.
+ * @param ask - the parked question.
+ * @returns the message the blocked root reports.
+ */
+export function questionMsg(ask: ParkedQuestion): string {
+  const head = 'question: '
+  const tail = ` [ask ${ask.id} /answer ${ask.id} N]`
+  const room = Math.max(0, 200 - head.length - tail.length)
+  const first = (ask.questions[0]?.question ?? '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return `${head}${first.length > room ? first.slice(0, room) : first}${tail}`
+}
+
+/** One projected ask text field, capped by slice like the codec's own trim. */
+function askCap(text: string, limit: number): string {
+  return text.length > limit ? text.slice(0, limit) : text
+}
+
+/**
+ * Project one host question batch onto the protocol's ask fields: every field
+ * the wire does not define (`detail`, `intent`, ...) is dropped, and what is
+ * kept is capped. Both happen before encode, so a hostile request cannot close
+ * the bridge with an oversized frame.
+ * @param questions - the host's questions, as the asker wrote them.
+ * @param variant - which caps and fields this projection keeps.
+ * @returns a fresh list carrying only the ask fields.
+ */
+function projectAskQuestions(
+  questions: readonly AskQuestion[],
+  variant: { readonly descriptions: boolean; readonly text: number; readonly firstOnly: boolean },
+): readonly AskQuestion[] {
+  const kept = variant.firstOnly ? questions.slice(0, 1) : questions.slice(0, MAX_ASK_QUESTIONS)
+  const projected: AskQuestion[] = []
+  for (const question of kept) {
+    if (typeof question !== 'object' || question === null) continue
+    const options = Array.isArray(question.options)
+      ? question.options.slice(0, MAX_ASK_OPTIONS).flatMap(option =>
+          typeof option === 'object' && option !== null && typeof option.label === 'string'
+            ? [{
+                label: askCap(option.label, MAX_ASK_LABEL),
+                ...(variant.descriptions && typeof option.description === 'string'
+                  ? { description: askCap(option.description, MAX_ASK_DESCRIPTION) }
+                  : {}),
+              }]
+            : [])
+      : undefined
+    projected.push({
+      id: askCap(typeof question.id === 'string' ? question.id : '', MAX_ASK_ID),
+      question: askCap(typeof question.question === 'string' ? question.question : '', variant.text),
+      ...(typeof question.header === 'string' ? { header: askCap(question.header, MAX_ASK_LABEL) } : {}),
+      ...(question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect === true }),
+      ...(options === undefined ? {} : { options }),
+    })
+  }
+  return projected
+}
+
+/**
+ * The largest projection of one request that still fits one frame, degrading in
+ * steps: keep everything, drop option descriptions, cap question text, then keep
+ * the first question. Decode caps already bound a normal card; these steps are
+ * what keep a hostile one from closing the bridge.
+ * @param questions - the host's questions.
+ * @returns the questions to park and send, identical to what the operator sees.
+ */
+function askQuestionsWithin(questions: readonly AskQuestion[]): readonly AskQuestion[] {
+  const variants = [
+    projectAskQuestions(questions, { descriptions: true, text: MAX_ASK_TEXT, firstOnly: false }),
+    projectAskQuestions(questions, { descriptions: false, text: MAX_ASK_TEXT, firstOnly: false }),
+    projectAskQuestions(questions, { descriptions: false, text: 512, firstOnly: false }),
+    projectAskQuestions(questions, { descriptions: false, text: 512, firstOnly: true }),
+  ]
+  for (const shown of variants) {
+    const frame: AskFrame = { t: 'ask', id: '000000', questions: shown }
+    try {
+      encodeFrame(frame)
+      return shown
+    } catch {
+      continue
+    }
+  }
+  // The last step is a few kilobytes, so this is the card that always goes out.
+  return variants[variants.length - 1] ?? []
+}
+
 /** DSH's refusal while the profile boots without an agent factory yet. */
 const NO_FACTORY = 'no agent factory registered'
 /**
@@ -1111,9 +1242,42 @@ function handlersFor(
     publish(state)
   })
 
+  /** The parked agent questions of this whole process, one queue for every bridge. */
+  const questions = new QuestionQueue(decision => {
+    const state = bridged.get(decision.ask.session)
+    // A departed bridge has nobody left to audit to: that ask was cancelled by
+    // teardown, not decided, and the closed frame went out with the bridge.
+    if (state === undefined) return
+    // The close is what lets a surface retire the card, so it precedes every
+    // other line this decision writes, whatever ended the ask.
+    state.bridge.send({ t: 'ask', id: decision.ask.id, closed: true })
+    if (config.echo) {
+      const answered = decision.answers.answers.some(answer =>
+        answer.selected.length > 0 || answer.custom !== undefined)
+      state.bridge.send({
+        t: 'echo',
+        text: `[ask ${decision.ask.id}] question -> ${answered ? 'answered' : 'skipped'} (source=${decision.source})`,
+      })
+    }
+    publish(state)
+  })
+
   /** The asks parked for one bridge, oldest first. */
   const pendingFor = (session: string): readonly ParkedAsk[] =>
     asks.list().filter(ask => ask.session === session)
+
+  /** The questions parked for one bridge, oldest first. */
+  const pendingQuestionsFor = (session: string): readonly ParkedQuestion[] =>
+    questions.list().filter(ask => ask.session === session)
+
+  /**
+   * Every parked ask id for one bridge. Approvals and questions share one id
+   * pool, so `/status`, the browser's asks column and the TUI never disagree.
+   */
+  const parkedIds = (session: string): readonly string[] => [
+    ...pendingFor(session).map(ask => ask.id),
+    ...pendingQuestionsFor(session).map(ask => ask.id),
+  ]
 
   /**
    * The stale note, when a family has gone unchanged past its window. A child
@@ -1131,7 +1295,11 @@ function handlersFor(
     return note === undefined ? activitySummary(state.activity) : { working: false, msg: note }
   }
 
-  /** The root record to report: a parked ask outranks every fact the session reports. */
+  /**
+   * The root record to report: a parked ask outranks every fact the session
+   * reports, and an approval outranks a question when both are parked for one
+   * session — the approval is the older contract and keeps its `kind`.
+   */
   const reportOf = (state: BridgeState): ProgramStatus => {
     const [ask] = pendingFor(state.agent.session.id)
     if (ask !== undefined) {
@@ -1139,6 +1307,16 @@ function handlersFor(
         state: 'blocked',
         kind: 'permission',
         msg: askMsg(ask),
+        app: state.root.app,
+        title: state.root.title,
+      }
+    }
+    const [question] = pendingQuestionsFor(state.agent.session.id)
+    if (question !== undefined) {
+      return {
+        state: 'blocked',
+        kind: 'question',
+        msg: questionMsg(question),
         app: state.root.app,
         title: state.root.title,
       }
@@ -1468,6 +1646,51 @@ function handlersFor(
   }
 
   /**
+   * Answer one agent question from a bridged tree, or delegate it.
+   * @param request - the pending questions.
+   * @param next - the answerers behind this listener.
+   * @returns the supervisor's answers, or whatever the next answerer decides.
+   */
+  const answerQuestion: QuestionListener = async (request, next) => {
+    const agent = request.agent
+    const session = agent === undefined ? undefined : claimedSession(agent)
+    const state = session === undefined ? undefined : bridged.get(session)
+    // No live bridge means nobody saw the card: the browser's own answerer and
+    // every later listener keep the request untouched.
+    if (session === undefined || state === undefined) return next()
+    // The host checks this before dispatch, so a trip here is that race window.
+    if (request.signal?.aborted === true) return skipAnswers(request.questions)
+
+    // The parked questions and the sent card are the same projection, so the
+    // ids and labels an operator answers are exactly the ones that were shown.
+    const shown = askQuestionsWithin(request.questions)
+    if (shown.length === 0) return next()
+    const id = questions.park({ questions: shown, session })
+    const outcome = questions.outcome(id)
+    // `park` always leaves a promise; without one there is nothing to wait on,
+    // so the questions stay with the answerers behind this listener.
+    if (outcome === undefined) return next()
+
+    // The card goes out before the root word: the supervisor reads the options
+    // in the same publish that marks the root `blocked`.
+    state.bridge.send({ t: 'ask', id, questions: shown })
+    publish(state)
+
+    // The asker may withdraw its own question. Settling is enough: the queue's
+    // decision callback closes the card on the bridge and reports the skip.
+    const withdraw = (): void => {
+      questions.settle(id, skipAnswers(shown), 'attached')
+    }
+    request.signal?.addEventListener('abort', withdraw)
+    try {
+      const answers: QuestionAnswers | undefined = await outcome
+      return answers ?? skipAnswers(shown)
+    } finally {
+      request.signal?.removeEventListener('abort', withdraw)
+    }
+  }
+
+  /**
    * Send one transcript item, dropping a frame over the wire limit: an
    * oversized frame would close the socket, and once is enough to say so.
    */
@@ -1596,9 +1819,10 @@ function handlersFor(
     const offSubagentStart = ctx.on('subagent/start', offSubagent)
     const offSubagentEnd = ctx.on('subagent/end', offSubagent)
     // Prepended, and only alive while a bridge is: without one the browser's
-    // own answerer runs untouched, and a claimed ask never reaches it.
+    // own answerers run untouched, and a claimed ask never reaches them.
     const offApproval = ctx.on('approval/request', answer, { prepend: true })
-    subscriptions = [offSession, offStatus, offSubagentStart, offSubagentEnd, offApproval]
+    const offQuestion = ctx.on('user-questions/request', answerQuestion, { prepend: true })
+    subscriptions = [offSession, offStatus, offSubagentStart, offSubagentEnd, offApproval, offQuestion]
   }
 
   /** Resolve the asks parked for one bridge; with the last bridge, every ask. */
@@ -1611,6 +1835,26 @@ function handlersFor(
     for (const ask of pendingFor(session)) asks.settle(ask.id, 'cancelled', 'attached')
   }
 
+  /**
+   * Close the questions parked for one bridge and answer them with a skip. The
+   * card goes out before the bridge is gone: once the socket closes no surface
+   * can be told the question is over, and a stale TUI would keep rewriting input.
+   * @param session - the session being released.
+   * @param state - that session's bridge, captured before the table dropped it.
+   */
+  const cancelQuestions = (session: string, state: BridgeState | undefined): void => {
+    if (bridged.size === 0) {
+      // Nothing is left to answer anything, so nothing may stay parked.
+      for (const ask of questions.list()) state?.bridge.send({ t: 'ask', id: ask.id, closed: true })
+      questions.clearAll(ask => skipAnswers(ask.questions))
+      return
+    }
+    for (const ask of pendingQuestionsFor(session)) {
+      state?.bridge.send({ t: 'ask', id: ask.id, closed: true })
+      questions.settle(ask.id, skipAnswers(ask.questions), 'attached')
+    }
+  }
+
   /** Drop one session's records and, with the last bridge, its listeners. */
   const release = (session: string): void => {
     const state = bridged.get(session)
@@ -1618,6 +1862,7 @@ function handlersFor(
     // Fail closed before the records go: an ask belongs to the bridge that
     // raised it, and its asker must not hang on a question nobody will answer.
     cancelAsks(session)
+    cancelQuestions(session, state)
     if (state === undefined) return
     // A command still running for this binding has no surface left to answer.
     state.commandAbort.abort()
@@ -1784,14 +2029,15 @@ function handlersFor(
 
   /**
    * Refuse a session switch while an ask is parked: the ask belongs to the tree
-   * the supervisor is watching, and a switch would orphan it.
+   * the supervisor is watching, and a switch would orphan it. A parked question
+   * counts for the same reason: its asker would hang on a card nobody sees.
    * @param state - the bridge that asked to switch.
    * @returns true when the caller must stop.
    */
   const refuseWhileParked = (state: BridgeState): boolean => {
-    const parked = pendingFor(state.agent.session.id)
+    const parked = parkedIds(state.agent.session.id)
     if (parked.length === 0) return false
-    state.bridge.send({ t: 'echo', text: `refused: ${String(parked.length)} approval(s) parked` })
+    state.bridge.send({ t: 'echo', text: `refused: ${String(parked.length)} ask(s) parked` })
     return true
   }
 
@@ -1926,7 +2172,7 @@ function handlersFor(
           state.agent.cancel({ kind: 'user' })
           return
         case 'status': {
-          const ids = pendingFor(state.agent.session.id).map(ask => ask.id)
+          const ids = parkedIds(state.agent.session.id)
           bridge.send({
             t: 'echo',
             text: `session=${state.agent.session.id} state=${reportOf(state).state}`
@@ -2013,6 +2259,27 @@ function handlersFor(
           }
           return
         }
+        case 'answer': {
+          // A named ask may belong to another bridge in this process; its own
+          // supervisor still receives the audit line. An unknown id is answered
+          // like `/approve` answers one, so a stale id has a visible cause.
+          const parked = questions.list().find(ask => ask.id === command.ask)
+          if (parked === undefined) {
+            bridge.send({ t: 'echo', text: `no ask ${command.ask}` })
+            return
+          }
+          const answers = parseAnswers(parked.questions, command.spec)
+          if ('error' in answers) {
+            // A malformed line leaves the ask parked: only the audit echo names
+            // the fault, and with echo off the operator sees it in `/status`.
+            if (config.echo) bridge.send({ t: 'echo', text: `[ask ${command.ask}] ${answers.error}` })
+            return
+          }
+          if (!questions.settle(parked.id, answers, 'supervisor')) {
+            bridge.send({ t: 'echo', text: `no ask ${command.ask}` })
+          }
+          return
+        }
         case 'yes':
         case 'no': {
           const parked = pendingFor(state.agent.session.id)
@@ -2069,12 +2336,12 @@ function handlersFor(
   const snapshot = (): SupervisionState => {
     const facts = new Map<string, SupervisionFacts>()
     for (const [session, state] of bridged) {
-      // The approval queue owns the parked ids; deriving them here keeps the
+      // Both queues feed one id pool; deriving the column here keeps the
       // browser's asks column and `/status` from ever disagreeing.
       facts.set(session, {
         pid: state.pid,
         since: state.since,
-        asks: pendingFor(state.agent.session.id).map(ask => ask.id),
+        asks: parkedIds(state.agent.session.id),
       })
     }
     return supervisionState(facts, terminal)

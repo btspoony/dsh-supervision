@@ -5,7 +5,15 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PROTO, renderFrame, renderMirror, type MirrorItem, type OutFrame } from 'dsh-supervision-protocol';
+import {
+  PROTO,
+  renderAsk,
+  renderFrame,
+  renderMirror,
+  type AskFrame,
+  type MirrorItem,
+  type OutFrame,
+} from 'dsh-supervision-protocol';
 import { routeFrame } from './route.js';
 
 const ESC = '\x1b';
@@ -61,6 +69,25 @@ test('a pty reporting zero columns falls back to the default width, not width on
 
 test('mirror is dropped when stdout is not a terminal', () => {
   assert.deepEqual(routeFrame({ t: 'mirror', item: LONG }, false), {});
+});
+
+const ASK: AskFrame = {
+  t: 'ask',
+  id: '3f9ac1',
+  questions: [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] }],
+};
+
+test('ask picks the human sink on a terminal, with the one newline the renderer omits', () => {
+  assert.deepEqual(routeFrame(ASK, true), { out: `${renderAsk(ASK)}\n` });
+});
+
+test('ask keeps the machine sink when stdout is redirected', () => {
+  assert.deepEqual(routeFrame(ASK, false), { tty: `${renderAsk(ASK)}\n` });
+});
+
+test('a closed ask routes the single line that retires the card', () => {
+  const closed: AskFrame = { t: 'ask', id: '3f9ac1', closed: true };
+  assert.deepEqual(routeFrame(closed, true), { out: '(question 3f9ac1 closed)\n' });
 });
 
 const PASS_THROUGH: readonly OutFrame[] = [

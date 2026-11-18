@@ -32,7 +32,9 @@ import {
 } from '@earendil-works/pi-tui';
 import {
   isProgramState,
+  renderAsk,
   stripControls,
+  type AskFrame,
   type CatalogCommand,
   type CatalogSkill,
   type MirrorItem,
@@ -186,7 +188,7 @@ export const LOCAL_EXITS = ['q', 'quit', 'exit', 'bye'] as const;
  * terminal: `parseLine` answers the line with the local meaning, so the menu
  * must not offer it.
  */
-const LOCAL_VERBS = ['cancel', 'status', 'new', 'attach', 'approve', 'reject', 'skill', 'y', 'n', ...LOCAL_EXITS] as const;
+const LOCAL_VERBS = ['cancel', 'status', 'new', 'attach', 'approve', 'reject', 'answer', 'skill', 'y', 'n', ...LOCAL_EXITS] as const;
 
 /**
  * Whether one submitted line is a forwarder-local exit. Anything longer or
@@ -259,6 +261,33 @@ export function routeLine(text: string, sink: LineSink): void {
     return;
   }
   sink.send(action.text);
+}
+
+/** The one open ask that can absorb a bare answer, when there is exactly one. */
+function bareAnswerAsk(open: ReadonlyMap<string, AskFrame>): { readonly id: string } | undefined {
+  if (open.size !== 1) return undefined
+  const [ask] = open.values()
+  if (ask === undefined || 'closed' in ask) return undefined
+  return ask
+}
+
+/**
+ * Rewrites one submitted line for the ask surface. A typed `/answer` is already
+ * the grammar and passes verbatim; while exactly one ask is open, a bare `-`,
+ * `2` or `1,3` is the operator answering it, so the ask id is added. A
+ * multi-question ask then answers with the plugin's own "missing answer" line
+ * instead of silently steering the agent. Everything else stays an ordinary
+ * steer: an open question must not swallow one.
+ * @param text - the editor's text.
+ * @param open - the asks the surface has not seen closed.
+ * @returns the line to send to the plugin.
+ */
+export function answerLine(text: string, open: ReadonlyMap<string, AskFrame>): string {
+  if (/^\/answer\b/.test(text.trim())) return text
+  const ask = bareAnswerAsk(open)
+  if (ask === undefined) return text
+  const value = text.trim()
+  return /^(-|[0-9]+(,[0-9]+)*)$/.test(value) ? `/answer ${ask.id} ${value}` : text
 }
 
 /** Side effects the surface's key handling needs; tests pass fakes. */
@@ -1014,6 +1043,8 @@ export function restoreOnExit(stop: () => void): void {
 export interface Surface {
   /** A mirror item, or an echo line (a string) from the plugin. */
   push(entry: MirrorItem | string): void;
+  /** An agent question card, or its close; the surface answers it by id. */
+  setAsk(frame: AskFrame): void;
   setStatus(status: Status): void;
   /** Replaces the slash menu; the plugin re-sends this after a session switch. */
   setCatalog(catalog: Catalog): void;
@@ -1056,9 +1087,12 @@ export function startTui(options: StartTuiOptions): Surface {
   };
   useCatalog(NO_CATALOG);
 
+  /** The ask cards this surface has not yet been told are closed. */
+  const openAsks = new Map<string, AskFrame>();
+
   editor.onSubmit = (text: string): void => {
     if (text.trim() === '') return;
-    options.sendLine(text);
+    options.sendLine(answerLine(text, openAsks));
   };
 
   /** One restore: `TuiAltScreen.stop` is not itself guarded, so guard it here. */
@@ -1160,6 +1194,14 @@ export function startTui(options: StartTuiOptions): Surface {
   return {
     push: (entry: MirrorItem | string): void => {
       transcript.push(entry);
+      tui.requestRender();
+    },
+    setAsk: (frame: AskFrame): void => {
+      // The closed frame carries no questions: a card that is over can only be
+      // retired, and keeping it would let a stale id absorb a later bare answer.
+      if ('closed' in frame) openAsks.delete(frame.id);
+      else openAsks.set(frame.id, frame);
+      transcript.push(renderAsk(frame));
       tui.requestRender();
     },
     setStatus: (next: Status): void => {
