@@ -51,11 +51,21 @@ test('/attach needs a session id', () => {
   assert.deepEqual(parseLine('/attach session-a session-b'), { kind: 'unknown', verb: 'attach' })
 })
 
-test('a malformed or unknown verb is unknown, named by its first word', () => {
-  assert.deepEqual(parseLine('/help'), { kind: 'unknown', verb: 'help' })
+test('a malformed local verb is unknown, named by its first word', () => {
   assert.deepEqual(parseLine('/approve'), { kind: 'unknown', verb: 'approve' })
   assert.deepEqual(parseLine('/cancel now'), { kind: 'unknown', verb: 'cancel' })
   assert.deepEqual(parseLine('/'), { kind: 'unknown', verb: '' })
+})
+
+test('any other slash verb is a host command candidate, carrying its whole line', () => {
+  assert.deepEqual(parseLine('/help'), { kind: 'command', name: 'help', text: '/help' })
+  assert.deepEqual(parseLine('/compact focus the retry'), {
+    kind: 'command',
+    name: 'compact',
+    text: '/compact focus the retry',
+  })
+  // Only the wire framing goes: the command receives the line as typed.
+  assert.deepEqual(parseLine('/goal  two  spaces\r\n'), { kind: 'command', name: 'goal', text: '/goal  two  spaces' })
 })
 
 
