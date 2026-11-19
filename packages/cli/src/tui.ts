@@ -1054,6 +1054,9 @@ export function panelKey(
   state: AskPickerState,
   data: string,
 ): { readonly state: AskPickerState } | { readonly line: string } {
+  // A Kitty terminal reports press, repeat and release for the same key; a
+  // release must never act, or one Enter would pick twice.
+  if (isKeyRelease(data)) return { state };
   const action = keyAction(data, true);
   if (action?.kind === 'escape') return { line: answerSpec(skipAll(state))! };
   if (action?.kind === 'line') return { state: moveCursor(state, action.delta) };

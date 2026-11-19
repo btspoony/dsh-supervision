@@ -5,6 +5,7 @@ import {
   answerSpec,
   commitTyping,
   complete,
+  containsAssignment,
   moveCursor,
   pickerFor,
   pickRow,
@@ -187,4 +188,11 @@ test('the Skip row answers - even with picks pending; only Done commits them', (
   doneState = pickRow(doneState, 0); // toggle option 1
   doneState = pickRow(doneState, 5); // Done row
   assert.equal(doneState.answers['feat'], '1');
+});
+
+test('skipAll abandons already-answered questions too', () => {
+  let state = multiState();
+  state = pickRow(state, 1); // db=2 was a real pick
+  state = skipAll(state);
+  assert.equal(answerSpec(state), '/answer 84e11a db=- feat=- note=-');
 });

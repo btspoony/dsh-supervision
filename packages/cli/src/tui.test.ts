@@ -1399,3 +1399,12 @@ test('an assignment token typed as free text is refused and emits nothing', () =
   assert.deepEqual(sent, ['/answer ff77ff note=set A 1']);
   surface.stop();
 });
+
+test('panelKey ignores Kitty key-release sequences entirely', () => {
+  const state = pickerFor(TWO_Q_ASK);
+  for (const release of ['\x1b[13;1:3u', '\x1b[27;1:3u', '\x1b[1;1:3A']) {
+    const result = panelKey(state, release);
+    assert.equal(typeOf(result), 'state');
+    assert.equal((result as { state: typeof state }).state, state, `release ${release} is a no-op`);
+  }
+});

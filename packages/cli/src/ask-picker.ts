@@ -153,12 +153,13 @@ export function skip(state: AskPickerState): AskPickerState {
   return commit(state, question, '-');
 }
 
-/** Skips every question still unanswered; the whole ask answers `-`. */
+/**
+ * Abandons the whole ask: every question becomes `-`, including ones already
+ * answered — Esc means "withdraw my picks", not "fill in the rest".
+ */
 export function skipAll(state: AskPickerState): AskPickerState {
   let next = state;
-  for (const question of state.questions) {
-    if (next.answers[question.id] === undefined) next = commit(next, question, '-');
-  }
+  for (const question of state.questions) next = commit(next, question, '-');
   return next;
 }
 
