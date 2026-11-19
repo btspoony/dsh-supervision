@@ -1336,3 +1336,24 @@ test('Shell shows the editor under the panel header while typing, panel alone ot
   assert.equal(rowsOut.some((line) => line.includes('type your answer')), false);
   shell.panel = undefined;
 });
+
+test('after a typed answer a next question with rows goes back to the picker', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'ee55ee',
+    questions: [
+      { id: 'q1', question: 'Why?' },
+      { id: 'q2', question: 'Which DB?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] },
+    ],
+  };
+  surface.setAsk(ask); // text-only first question opens straight into typing
+  term.feed('because');
+  term.feed('\r'); // commits q1; q2 has rows, so the picker must come back
+  term.feed('j'); // panel key: moves the cursor (down)
+  term.feed('\r'); // picks Postgres
+  assert.deepEqual(sent, ['/answer ee55ee q1=because q2=2']);
+  surface.stop();
+});

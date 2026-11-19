@@ -1265,8 +1265,12 @@ export function startTui(options: StartTuiOptions): Surface {
     const panel = new AskPanel(state, theme);
     shell.panel = panel;
     typingQid = state.typing ? state.questions[state.index]?.id : undefined;
-    if (typingQid !== undefined) editor.setText(typingDrafts.get(frame.id) ?? '');
-    else tui.setFocus(panel);
+    if (typingQid !== undefined) {
+      editor.setText(typingDrafts.get(frame.id) ?? '');
+      tui.setFocus(editor);
+    } else {
+      tui.setFocus(panel);
+    }
   };
 
   /** Saves the visible ask's progress and any half-typed custom text. */
@@ -1275,6 +1279,23 @@ export function startTui(options: StartTuiOptions): Surface {
     if (panel === undefined) return;
     panelStates.set(panel.state.askId, panel.state);
     if (typingQid !== undefined) typingDrafts.set(panel.state.askId, editor.getText());
+  };
+
+  /**
+   * The one transition onto a new picker state: typing questions take the
+   * editor, everything else goes back to the panel's rows. Both key results
+   * and editor submits land here, so focus can never disagree with typingQid.
+   */
+  const adoptNextState = (panel: AskPanel, next: AskPickerState): void => {
+    panel.set(next);
+    if (next.typing) {
+      typingQid = next.questions[next.index]?.id;
+      editor.setText('');
+      tui.setFocus(editor);
+    } else {
+      typingQid = undefined;
+      tui.setFocus(panel);
+    }
   };
 
   /** Applies one panelKey result: send the line when the ask is finished. */
@@ -1286,14 +1307,7 @@ export function startTui(options: StartTuiOptions): Surface {
     }
     const panel = shell.panel;
     if (panel === undefined) return;
-    panel.set(result.state);
-    if (result.state.typing) {
-      typingQid = result.state.questions[result.state.index]?.id;
-      editor.setText('');
-      tui.setFocus(editor);
-    } else if (typingQid === undefined) {
-      tui.setFocus(panel);
-    }
+    adoptNextState(panel, result.state);
   };
 
   editor.onSubmit = (text: string): void => {
@@ -1324,10 +1338,8 @@ export function startTui(options: StartTuiOptions): Surface {
         options.sendLine(line);
         closePanel();
       } else {
-        // The next question also needs typed input: stay in typing mode for it.
-        panel.set(next);
-        typingQid = next.questions[next.index]?.id;
-        tui.setFocus(editor);
+        // The next question may need typed input or may offer rows again.
+        adoptNextState(panel, next);
       }
       tui.requestRender();
       return;
