@@ -997,6 +997,12 @@ export class AskPanel implements Component {
     lines.push(...wrapPlain(this.theme.bold(head), w));
     const multi = question.multiSelect === true ? this.theme.dim(' (multi-select: space toggles)') : '';
     lines.push(...wrapPlain(`[${question.id}] ${question.question}${multi}`, w));
+    // Typing mode: the editor owns input below, so the panel shrinks to the
+    // question header — no rows, nothing that still looks navigable.
+    if (this.state.typing) {
+      const hint = this.theme.dim('type your answer, Enter submits, Esc goes back');
+      return [...lines, ...wrapPlain(hint, w).map((piece) => clipStyled(piece, w))];
+    }
     const rows = rowsOf(this.state);
     for (const [rowIndex, row] of rows.entries()) {
       const cursor = rowIndex === this.state.cursor;
@@ -1106,8 +1112,15 @@ export class Shell implements Component {
     // than the viewport on screen. Every component truncates to what it gets.
     const w = Math.max(1, Math.floor(width) || this.fallbackWidth || 80);
     const rows = Math.max(3, this.terminal.rows || 24);
-    const editorLines =
-      this.panel !== undefined ? this.panel.render(w, Math.max(4, rows - 2)) : this.editor.render(w);
+    let editorLines: string[];
+    if (this.panel === undefined) {
+      editorLines = this.editor.render(w);
+    } else if (this.panel.state.typing) {
+      // Typing mode: the question header above, the real editor below it.
+      editorLines = [...this.panel.render(w), ...this.editor.render(w)];
+    } else {
+      editorLines = this.panel.render(w, Math.max(4, rows - 2));
+    }
     this.transcript.height = Math.max(0, rows - editorLines.length - 1);
     return [...this.transcript.render(w), ...editorLines, this.status.render(w)];
   }

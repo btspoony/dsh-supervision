@@ -1307,3 +1307,32 @@ test('a closed ask forgets its progress even while another ask shows', () => {
   assert.deepEqual(sent, ['/answer aa11aa x=2 y=1']);
   surface.stop();
 });
+
+test('the ask panel in typing mode renders only the question header and hint', () => {
+  const state = { ...pickerFor(TWO_Q_ASK), typing: true };
+  const lines = new AskPanel(state).render(80).join('\n');
+  assert.match(lines, /question 1\/2/);
+  assert.match(lines, /type your answer, Enter submits, Esc goes back/);
+  assert.equal(lines.includes('\u25cb'), false, 'no option rows while typing');
+  assert.equal(lines.includes('Done'), false);
+});
+
+test('Shell shows the editor under the panel header while typing, panel alone otherwise', () => {
+  const terminal = { columns: 80, rows: 24, write: () => {} } as unknown as Terminal;
+  const tui = new TuiAltScreen(terminal);
+  const shell = new Shell(terminal, new TranscriptView(), new Editor(tui, THEME), new StatusLine(), 80);
+  const typingPanel = new AskPanel({ ...pickerFor(TWO_Q_ASK), typing: true });
+  shell.panel = typingPanel;
+  const typingRows = shell.render(80);
+  const hintAt = typingRows.findIndex((line) => line.includes('type your answer'));
+  assert.notEqual(hintAt, -1, 'the typing hint renders');
+  const below = typingRows.slice(hintAt + 1);
+  assert.ok(below.length > 0, 'editor lines render under the header');
+  assert.equal(typingRows.some((line) => line.includes('\u25cb')), false, 'no navigable rows while typing');
+  const rowsPanel = new AskPanel(pickerFor(TWO_Q_ASK));
+  shell.panel = rowsPanel;
+  const rowsOut = shell.render(80);
+  assert.ok(rowsOut.some((line) => line.includes('\u25cb')), 'rows render when not typing');
+  assert.equal(rowsOut.some((line) => line.includes('type your answer')), false);
+  shell.panel = undefined;
+});
