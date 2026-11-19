@@ -159,3 +159,17 @@ test('custom text that the grammar would read as a pick never commits', () => {
   const done = commitTyping(state, 'two words');
   assert.equal(done.answers['why'], 'two words');
 });
+
+test('custom text carrying an assignment token is refused before it reaches the wire', () => {
+  const state = pickerFor({
+    t: 'ask',
+    id: 'ff66ff',
+    questions: [{ id: 'note', question: 'Notes?' }],
+  });
+  assert.equal(containsAssignment('note=set A=1'), true);
+  assert.equal(containsAssignment('set A 1'), false);
+  assert.equal(containsAssignment('a=b'), true);
+  assert.equal(commitTyping(state, 'note=set A=1'), state, 'the text is not committed');
+  const done = commitTyping(state, 'set A 1');
+  assert.equal(done.answers['note'], 'set A 1');
+});

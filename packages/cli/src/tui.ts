@@ -40,6 +40,7 @@ import {
   skipAll,
   toggleMulti,
   readsAsPick,
+  containsAssignment,
   type AskPickerState,
 } from './ask-picker.js';
 import {
@@ -1333,6 +1334,13 @@ export function startTui(options: StartTuiOptions): Surface {
       // keep the editor text and tell the operator why nothing happened.
       if (readsAsPick(text.trim())) {
         status.setHint(PICK_TEXT_HINT);
+        tui.requestRender();
+        return;
+      }
+      // A "token=" part would make the plugin parse the line as an unknown
+      // question id and refuse it wholesale: refuse it here instead.
+      if (containsAssignment(text.trim())) {
+        status.setHint('answers cannot contain "token=" parts; type the value only');
         tui.requestRender();
         return;
       }

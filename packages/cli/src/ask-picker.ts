@@ -126,13 +126,23 @@ export function readsAsPick(text: string): boolean {
 }
 
 /**
- * Records a custom ("Other") answer typed in the editor. Empty text, or text
- * that {@link readsAsPick} would misread as a pick, leaves the state untouched.
+ * True when custom text carries a `token=` part: on the wire the answer grammar
+ * would parse that token as `question-id=value` for an unknown question and
+ * refuse the whole `/answer` line.
+ */
+export function containsAssignment(text: string): boolean {
+  return text.trim().split(/\s+/).some((token) => token.includes('='));
+}
+
+/**
+ * Records a custom ("Other") answer typed in the editor. Empty text, text that
+ * {@link readsAsPick} would misread as a pick, or text carrying an assignment
+ * token ({@link containsAssignment}) leaves the state untouched.
  */
 export function commitTyping(state: AskPickerState, text: string): AskPickerState {
   const question = current(state);
   const value = text.trim();
-  if (question === undefined || value === '' || readsAsPick(value)) return state;
+  if (question === undefined || value === '' || readsAsPick(value) || containsAssignment(value)) return state;
   return commit({ ...state, typing: false }, question, value);
 }
 

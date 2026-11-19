@@ -1385,3 +1385,17 @@ test('closing the visible ask while another is open never stashes the closed pro
   assert.deepEqual(sent, ['/answer aa11aa x=2 y=1']);
   surface.stop();
 });
+
+test('an assignment token typed as free text is refused and emits nothing', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  surface.setAsk({ t: 'ask', id: 'ff77ff', questions: [{ id: 'note', question: 'Notes?' }] });
+  term.feed('note=set A=1');
+  term.feed('\r'); // refused: nothing is sent, the editor keeps the text
+  assert.deepEqual(sent, []);
+  term.feed('set A 1');
+  term.feed('\r'); // the literal value goes out as one custom answer
+  assert.deepEqual(sent, ['/answer ff77ff note=set A 1']);
+  surface.stop();
+});
