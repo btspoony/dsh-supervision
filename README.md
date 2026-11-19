@@ -202,6 +202,16 @@ herdr-core HUD the same line needs no attach:
 `hc send <terminal> "/answer <id> 2"`. An asker that withdraws, or a bridge that
 goes away, skips every question and closes the card.
 
+In the full-screen surface an open ask replaces the editor with a picker: one
+question at a time, `↑`/`↓` (or `j`/`k`) move, `Enter` picks,
+`1`–`9` pick directly, `Space` toggles a multi-select option and `Enter`
+on its `Done` row advances it. `Other (type your own)` hands the editor back
+prefilled for free text, `Skip` answers that question `-`, and `Esc` skips
+the whole ask. Answering the last question emits exactly one
+`/answer <ask> <qid>=<value> ...` line over the socket — the typed grammar
+above stays valid everywhere and remains the only path in line mode
+(`--no-tui`).
+
 ### Take back control
 
 While a session is bridged the GUI marks it in the sidebar and over the input area. The session's sidebar row wears a 3px blue ring on its own rounding, a light-blue translucent fill (`rgba(127, 174, 255, 0.30)`), and a wider blue capsule that fills the row height with an animated whale tail at its right edge, so a supervised session cannot be mistaken for one that is yours to type into. Opening it covers the whole input area — editor and toolbar — with a blue-bordered, light-blue translucent panel (`rgba(127, 174, 255, 0.30)`): the editor is made `inert`, so neither the pointer nor an already-focused caret can type into it. A blue caption tab sits on the panel's top edge, above the frame, quoting the shipped English string — "This chat is supervised from elsewhere — the input box is locked" (localized English/Chinese via the host locale service); a **Bridged** badge with a small white whale tail is fused into the overlay's bottom-left corner; and the panel's single **Unlock** button posts the reclaim — only a confirmed release removes the guard, so a refused unlock leaves it in place. On a host whose composer has no `[data-composer-card]` wrapper, only the editor is made `inert`; the toolbar stays operable rather than freezing the surrounding page container. The bridge is dropped, the supervisor reports the clear record, and a `dsh-sup` forwarder exits `0`.

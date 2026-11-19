@@ -152,6 +152,24 @@ surface prints the card and, while exactly one ask is open, rewrites a bare
 plugin's answer-grammar error line rather than steering the agent. A herdr-core HUD answers without an attach:
 `hc send <terminal> "/answer <id> 2"`.
 
+In the full-screen surface the open ask is picked with the keyboard instead:
+`↑`/`↓` (or `j`/`k`) move, `Enter` picks, `1`–`9` pick by
+number, `Space` toggles multi-select options (`Enter` on `Done`
+submits), `Other (type your own)` edits free text, `Skip` answers `-`,
+and `Esc` skips the whole ask. The picker emits the same one
+`/answer <ask> <qid>=<value> ...` line; `/answer` stays valid typed, and in
+line mode (`--no-tui`) it is the only path.
+
+| Key | Effect |
+| --- | --- |
+| `↑` / `↓` or `k` / `j` | move the cursor (wraps) |
+| `1`–`9` | pick that option directly |
+| `Enter` | pick the cursor row / submit `Done` |
+| `Space` | toggle a multi-select option |
+| `Other` row + `Enter` | type a custom answer in the editor |
+| `Skip` row + `Enter` | answer this question `-` |
+| `Esc` | skip the whole ask (`qid=-` for every question) |
+
 The root word covers more than the session's own turn: while a descendant
 subagent is `running`, or a background job owned by the session is `running` or
 `stopping`, the root reports `working` and its `msg` carries the count
