@@ -1,0 +1,143 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import type { AskFrame } from 'dsh-supervision-protocol';
+import {
+  answerSpec,
+  commitTyping,
+  complete,
+  moveCursor,
+  pickerFor,
+  pickRow,
+  rowsOf,
+  skip,
+  skipAll,
+  toggleMulti,
+} from './ask-picker.js';
+
+const MULTI_ASK: Extract<AskFrame, { readonly questions: readonly unknown[] }> = {
+  t: 'ask',
+  id: '84e11a',
+  questions: [
+    { id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] },
+    { id: 'feat', question: 'Which features?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }, { label: 'c' }] },
+    { id: 'note', question: 'Anything else?' },
+  ],
+};
+
+function multiState(): ReturnType<typeof pickerFor> {
+  return pickerFor(MULTI_ASK);
+}
+
+test('a single select emits the picked option number', () => {
+  const state = pickerFor({
+    t: 'ask',
+    id: '3f9ac1',
+    questions: [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] }],
+  });
+  const done = pickRow(state, 1);
+  assert.equal(answerSpec(done), '/answer 3f9ac1 db=2');
+});
+
+test('a multi select emits the toggled indices sorted, comma-joined', () => {
+  let state = multiState();
+  // Question 1 (db) answered first with option 1.
+  state = pickRow(state, 0);
+  assert.equal(state.index, 1);
+  // Question 2 (feat): rows are 3 options + skip + done; toggle 1 and 3, then done.
+  state = pickRow(state, 0);
+  state = pickRow(state, 2);
+  assert.deepEqual(state.picks, [0, 2]);
+  state = pickRow(state, 5); // done
+  assert.equal(state.answers['feat'], '1,3');
+});
+
+test('toggling the same option twice untoggles it', () => {
+  let state = multiState();
+  state = pickRow(state, 0); // db=1
+  state = pickRow(state, 0);
+  state = pickRow(state, 0);
+  assert.deepEqual(state.picks, []);
+});
+
+test('done with no picks answers the multi question with -', () => {
+  let state = multiState();
+  state = pickRow(state, 0); // db=1
+  state = pickRow(state, 4); // done, nothing toggled
+  assert.equal(state.answers['feat'], '-');
+});
+
+test('skip answers the current question with -', () => {
+  let state = multiState();
+  state = skip(state);
+  assert.equal(state.answers['db'], '-');
+  assert.equal(state.index, 1);
+});
+
+test('skipAll answers every question with - and produces one line', () => {
+  const line = answerSpec(skipAll(multiState()));
+  assert.equal(line, '/answer 84e11a db=- feat=- note=-');
+});
+
+test('custom text answers with the raw typed text', () => {
+  let state = multiState();
+  state = pickRow(state, 2); // Other row
+  assert.equal(state.typing, true);
+  state = commitTyping(state, '  something custom  ');
+  assert.equal(state.answers['db'], 'something custom');
+  assert.equal(state.typing, false);
+});
+
+test('an empty custom submit returns to the rows instead of answering', () => {
+  let state = multiState();
+  state = pickRow(state, 2);
+  state = commitTyping(state, '   ');
+  assert.equal(state.typing, true);
+  assert.equal(state.answers['db'], undefined);
+});
+
+test('a question with no options goes straight to typing', () => {
+  let state = multiState();
+  state = pickRow(state, 0); // db=1
+  state = pickRow(state, 4); // feat=- via done
+  assert.equal(state.index, 2);
+  assert.equal(state.typing, true); // note has no options
+  state = commitTyping(state, 'call me');
+  assert.equal(answerSpec(state), '/answer 84e11a db=1 feat=- note=call me');
+});
+
+test('answerSpec is undefined until every question is answered', () => {
+  const state = multiState();
+  assert.equal(complete(state), false);
+  assert.equal(answerSpec(state), undefined);
+});
+
+test("a second question's answer never leaks into the first", () => {
+  let state = multiState();
+  state = pickRow(state, 1); // db=2
+  state = pickRow(state, 0); // toggle feat option 1
+  state = pickRow(state, 5); // done row commits feat=1
+  state = commitTyping(state, 'done here'); // note=done here
+  assert.equal(state.answers['db'], '2');
+  assert.equal(state.answers['feat'], '1');
+  assert.equal(state.answers['note'], 'done here');
+});
+
+test('rows expose option marks order and wrap the cursor', () => {
+  const state = multiState();
+  assert.deepEqual(
+    rowsOf(state).map((row) => row.kind),
+    ['option', 'option', 'other', 'skip'],
+  );
+  const multiQuestion = { ...state, index: 1 };
+  assert.deepEqual(
+    rowsOf(multiQuestion).map((row) => row.kind),
+    ['option', 'option', 'option', 'other', 'skip', 'done'],
+  );
+  const wrapped = moveCursor(state, -1);
+  assert.equal(wrapped.cursor, rowsOf(state).length - 1);
+});
+
+test('toggleMulti on a non-option row is a no-op', () => {
+  const state = moveCursor(multiState(), 2); // Other row
+  assert.deepEqual(toggleMulti(state).picks, []);
+});
