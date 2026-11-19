@@ -63,7 +63,7 @@ test('toggling the same option twice untoggles it', () => {
 test('done with no picks answers the multi question with -', () => {
   let state = multiState();
   state = pickRow(state, 0); // db=1
-  state = pickRow(state, 4); // done, nothing toggled
+  state = pickRow(state, 5); // done, nothing toggled
   assert.equal(state.answers['feat'], '-');
 });
 
@@ -99,7 +99,7 @@ test('an empty custom submit returns to the rows instead of answering', () => {
 test('a question with no options goes straight to typing', () => {
   let state = multiState();
   state = pickRow(state, 0); // db=1
-  state = pickRow(state, 4); // feat=- via done
+  state = pickRow(state, 5); // feat=- via done
   assert.equal(state.index, 2);
   assert.equal(state.typing, true); // note has no options
   state = commitTyping(state, 'call me');
@@ -172,4 +172,19 @@ test('custom text carrying an assignment token is refused before it reaches the 
   assert.equal(commitTyping(state, 'note=set A=1'), state, 'the text is not committed');
   const done = commitTyping(state, 'set A 1');
   assert.equal(done.answers['note'], 'set A 1');
+});
+
+test('the Skip row answers - even with picks pending; only Done commits them', () => {
+  let state = multiState();
+  state = pickRow(state, 0); // db=1, now on the feat question
+  state = pickRow(state, 0); // toggle option 1
+  state = pickRow(state, 4); // Skip row: discards the pending picks
+  assert.equal(state.answers['feat'], '-');
+  assert.deepEqual(state.picks, []);
+  // Contrast: the Done row is the only row that commits toggled picks.
+  let doneState = multiState();
+  doneState = pickRow(doneState, 0); // db=1
+  doneState = pickRow(doneState, 0); // toggle option 1
+  doneState = pickRow(doneState, 5); // Done row
+  assert.equal(doneState.answers['feat'], '1');
 });
