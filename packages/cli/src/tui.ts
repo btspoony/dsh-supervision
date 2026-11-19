@@ -39,6 +39,7 @@ import {
   rowsOf,
   skipAll,
   toggleMulti,
+  readsAsPick,
   type AskPickerState,
 } from './ask-picker.js';
 import {
@@ -1225,6 +1226,9 @@ export function startTui(options: StartTuiOptions): Surface {
   /** Per-ask half-typed "Other" text, kept while the ask is open. */
   const typingDrafts = new Map<string, string>();
 
+  /** Shown when typed text would be parsed as a pick instead of a value. */
+  const PICK_TEXT_HINT = 'that text would be read as a pick; add a word to keep it literal';
+
   /** Drops the panel and hands the editor its rows back, draft restored. */
   const closePanel = (): void => {
     if (shell.panel === undefined && typingQid === undefined) return;
@@ -1289,6 +1293,13 @@ export function startTui(options: StartTuiOptions): Surface {
         panel.set({ ...panel.state, typing: false });
         editor.setText('');
         tui.setFocus(panel);
+        tui.requestRender();
+        return;
+      }
+      // "2" or "-" typed as free text would be parsed as a pick: refuse it,
+      // keep the editor text and tell the operator why nothing happened.
+      if (readsAsPick(text.trim())) {
+        status.setHint(PICK_TEXT_HINT);
         tui.requestRender();
         return;
       }

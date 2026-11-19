@@ -8,6 +8,7 @@ import {
   moveCursor,
   pickerFor,
   pickRow,
+  readsAsPick,
   rowsOf,
   skip,
   skipAll,
@@ -140,4 +141,21 @@ test('rows expose option marks order and wrap the cursor', () => {
 test('toggleMulti on a non-option row is a no-op', () => {
   const state = moveCursor(multiState(), 2); // Other row
   assert.deepEqual(toggleMulti(state).picks, []);
+});
+
+test('custom text that the grammar would read as a pick never commits', () => {
+  const state = pickerFor({
+    t: 'ask',
+    id: 'dd44dd',
+    questions: [{ id: 'why', question: 'Why?' }],
+  });
+  for (const text of ['2', '-', '7', '1,3', '  3  ']) {
+    assert.equal(commitTyping(state, text), state, `"${text}" is refused`);
+    assert.equal(readsAsPick(text.trim()), true, `"${text}" reads as a pick`);
+  }
+  for (const text of ['my answer', 'two words', '2.0', '-ish', '']) {
+    assert.equal(readsAsPick(text.trim()), false, `"${text}" is literal text`);
+  }
+  const done = commitTyping(state, 'two words');
+  assert.equal(done.answers['why'], 'two words');
 });

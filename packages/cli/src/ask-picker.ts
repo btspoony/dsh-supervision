@@ -115,11 +115,24 @@ export function pickRow(state: AskPickerState, rowIndex: number): AskPickerState
   }
 }
 
-/** Records a custom ("Other") answer typed in the editor; empty text stays. */
+/**
+ * True when custom text would be parsed by the answer grammar as a pick or a
+ * skip ("2" = option 2, "1,3" = two options, "-" = skip) rather than a
+ * literal value. The surface refuses to commit such text and keeps the editor,
+ * so a numeric answer can never be typed silently into a free-text question.
+ */
+export function readsAsPick(text: string): boolean {
+  return /^-$|^\d+(,\d+)*$/.test(text);
+}
+
+/**
+ * Records a custom ("Other") answer typed in the editor. Empty text, or text
+ * that {@link readsAsPick} would misread as a pick, leaves the state untouched.
+ */
 export function commitTyping(state: AskPickerState, text: string): AskPickerState {
   const question = current(state);
   const value = text.trim();
-  if (question === undefined || value === '') return state;
+  if (question === undefined || value === '' || readsAsPick(value)) return state;
   return commit({ ...state, typing: false }, question, value);
 }
 
