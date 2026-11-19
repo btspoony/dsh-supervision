@@ -1234,6 +1234,8 @@ export function startTui(options: StartTuiOptions): Surface {
   let typingQid: string | undefined;
   /** The steer draft the editor held before the panel took its rows. */
   let steerDraft = '';
+  /** True while the panel (rows or typing) owns the editor's place. */
+  let panelActive = false;
   /** Per-ask picker state, so a second open ask never discards progress. */
   const panelStates = new Map<string, AskPickerState>();
   /** Per-ask half-typed "Other" text, kept while the ask is open. */
@@ -1252,6 +1254,7 @@ export function startTui(options: StartTuiOptions): Surface {
     }
     shell.panel = undefined;
     typingQid = undefined;
+    panelActive = false;
     editor.setText(steerDraft);
     steerDraft = '';
     tui.setFocus(editor);
@@ -1259,8 +1262,11 @@ export function startTui(options: StartTuiOptions): Surface {
 
   /** Shows the panel for one open ask, entering typing mode when it must. */
   const openPanel = (frame: Extract<AskFrame, { readonly questions: readonly unknown[] }>): void => {
-    if (shell.panel === undefined) steerDraft = editor.getText();
+    // Only the first panel steals the steer draft; a switch between panels
+    // (or a reopen after a closed frame) must leave it alone.
+    if (!panelActive) steerDraft = editor.getText();
     else stashPanelState();
+    panelActive = true;
     const state = panelStates.get(frame.id) ?? pickerFor(frame);
     const panel = new AskPanel(state, theme);
     shell.panel = panel;
@@ -1492,11 +1498,20 @@ export function startTui(options: StartTuiOptions): Surface {
         panelStates.delete(frame.id);
         typingDrafts.delete(frame.id);
         if (shell.panel !== undefined && shell.panel.state.askId === frame.id) {
+          // Detach the closing panel first: openPanel below must not stash the
+          // just-deleted state back, nor touch the editor or the steer draft.
+          shell.panel = undefined;
+          typingQid = undefined;
           // Another still-open ask takes the panel back, progress intact.
           const remaining = [...openAsks.values()].filter((open) => !('closed' in open));
           const next = remaining[remaining.length - 1];
           if (next !== undefined && !('closed' in next)) openPanel(next);
-          else closePanel();
+          else {
+            panelActive = false;
+            editor.setText(steerDraft);
+            steerDraft = '';
+            tui.setFocus(editor);
+          }
         }
       } else {
         openAsks.set(frame.id, frame);
