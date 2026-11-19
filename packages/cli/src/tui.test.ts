@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { CombinedAutocompleteProvider, Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { PROTO, renderMirror, type AskFrame } from 'dsh-supervision-protocol';
+import { pickerFor } from './ask-picker.js';
 import { routeFrame } from './route.js';
 import { PLAIN, createTheme } from './theme.js';
 import {
@@ -47,6 +48,8 @@ import {
   fitLines,
   keyAction,
   maxTop,
+  panelKey,
+  AskPanel,
   restoreOnExit,
   newMarker,
   scrollBy,
@@ -1063,3 +1066,88 @@ test('Ctrl+C clears typed text instead of touching the turn', () => {
   assert.deepEqual(harness.log, ['clear', 'hint:off']);
   assert.equal(outcome.memory.lastCtrlC, undefined, 'clearing does not start the exit window');
 });
+
+// --- ask panel keys (panelKey / AskPanel) ---
+
+const TWO_Q_ASK: AskFrame = {
+  t: 'ask',
+  id: '84e11a',
+  questions: [
+    { id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] },
+    { id: 'scope', question: 'Which scope?', options: [{ label: 'a' }, { label: 'b' }] },
+  ],
+};
+
+const UP = '\x1b[A';
+const DOWN = '\x1b[B';
+const ENTER = '\r';
+
+function typeOf(result: ReturnType<typeof panelKey>): 'state' | 'line' {
+  return 'line' in result ? 'line' : 'state';
+}
+
+test('panelKey moves the cursor and commits a single-select on Enter', () => {
+  let state = pickerFor(TWO_Q_ASK);
+  state = (panelKey(state, DOWN) as { state: typeof state }).state;
+  const picked = panelKey(state, ENTER);
+  assert.equal(typeOf(picked), 'state');
+  const next = (picked as { state: typeof state }).state;
+  assert.equal(next.answers['db'], '2');
+  assert.equal(next.index, 1);
+});
+
+test('panelKey picks directly with 1-9 and emits one line when complete', () => {
+  let state = pickerFor(TWO_Q_ASK);
+  const first = panelKey(state, '2');
+  assert.equal(typeOf(first), 'state');
+  state = (first as { state: typeof state }).state;
+  const second = panelKey(state, '1');
+  assert.equal(typeOf(second), 'line');
+  assert.equal((second as { line: string }).line, '/answer 84e11a db=2 scope=1');
+});
+
+test('panelKey Esc skips the whole ask in one line', () => {
+  const result = panelKey(pickerFor(TWO_Q_ASK), '\x1b');
+  assert.equal(typeOf(result), 'line');
+  assert.equal((result as { line: string }).line, '/answer 84e11a db=- scope=-');
+});
+
+test('panelKey j/k wrap and space toggles only multi-select questions', () => {
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'ab12cd',
+    questions: [{ id: 'feat', question: 'Features?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  let state = pickerFor(ask);
+  state = (panelKey(state, 'j') as { state: typeof state }).state;
+  assert.equal(state.cursor, 1);
+  state = (panelKey(state, 'k') as { state: typeof state }).state;
+  state = (panelKey(state, 'k') as { state: typeof state }).state;
+  assert.equal(state.cursor, 4); // wrapped to the last row (done)
+  state = (panelKey(state, ' ') as { state: typeof state }).state;
+  assert.deepEqual(state.picks, []); // done row: toggle is a no-op
+  state = (panelKey(state, UP) as { state: typeof state }).state;
+  state = (panelKey(state, UP) as { state: typeof state }).state;
+  state = (panelKey(state, UP) as { state: typeof state }).state; // back to option 2
+  state = (panelKey(state, ' ') as { state: typeof state }).state;
+  assert.deepEqual(state.picks, [1]);
+});
+
+test('panelKey ignores unknown digits and out-of-range options', () => {
+  const state = pickerFor(TWO_Q_ASK);
+  const result = panelKey(state, '9');
+  assert.equal(typeOf(result), 'state');
+  assert.equal((result as { state: typeof state }).state, state); // same object: untouched
+});
+
+test('AskPanel renders rows for the current question with a help line', () => {
+  const panel = new AskPanel(pickerFor(TWO_Q_ASK));
+  const lines = panel.render(80).join('\n');
+  assert.match(lines, /● 1\. SQLite/);
+  assert.match(lines, /Other \(type your own\)/);
+  assert.match(lines, /Skip \(answer -\)/);
+  assert.match(lines, /esc skip all/);
+  panel.set({ ...panel.state, cursor: 1 });
+  assert.match(panel.render(80).join('\n'), /❯ ● 2\. Postgres/);
+});
+
