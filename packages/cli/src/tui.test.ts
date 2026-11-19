@@ -50,6 +50,8 @@ import {
   maxTop,
   panelKey,
   AskPanel,
+  startTui,
+  type Surface,
   restoreOnExit,
   newMarker,
   scrollBy,
@@ -1149,5 +1151,115 @@ test('AskPanel renders rows for the current question with a help line', () => {
   assert.match(lines, /esc skip all/);
   panel.set({ ...panel.state, cursor: 1 });
   assert.match(panel.render(80).join('\n'), /❯ ● 2\. Postgres/);
+});
+
+
+// --- panel lifecycle fixes driven through startTui with a feedable terminal ---
+
+interface FeedTerminal {
+  feed(data: string): void;
+  readonly writes: string[];
+}
+
+function makeFeedTerminal(): Terminal & FeedTerminal {
+  let input: ((data: string) => void) | undefined;
+  const writes: string[] = [];
+  const term = {
+    columns: 80,
+    rows: 24,
+    writes,
+    write: (data: string): void => { writes.push(data); },
+    start: (onData: (data: string) => void): void => { input = onData; },
+    stop: (): void => {},
+    hideCursor: (): void => {},
+    showCursor: (): void => {},
+    restoreOnExit: (): void => {},
+    setTitle: (): void => {},
+    feed: (data: string): void => { input?.(data); },
+  };
+  return term as unknown as Terminal & FeedTerminal;
+}
+
+function runSurface(term: Terminal & FeedTerminal, sent: string[]): Surface {
+  return startTui({ title: '', sendLine: (text) => sent.push(text), onExit: () => {}, terminal: term });
+}
+
+test('closing the panel restores the steer draft the editor held before it', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  term.feed('draft steer');
+  surface.setAsk(SINGLE_ASK);
+  surface.setAsk({ t: 'ask', id: SINGLE_ASK.id, closed: true });
+  term.feed('\r'); // submits whatever the editor holds now
+  assert.deepEqual(sent, ['draft steer']);
+  surface.stop();
+});
+
+test('typing mode survives a commit when the next question also needs typed input', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'aa11bb',
+    questions: [
+      { id: 'q1', question: 'Why?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'q2', question: 'Details?' },
+    ],
+  };
+  surface.setAsk(ask);
+  term.feed('\x1b[B'); // down
+  term.feed('\x1b[B'); // down → Other row
+  term.feed('\r'); // enter typing mode
+  term.feed('first answer');
+  term.feed('\r'); // commits q1, q2 needs typing too
+  term.feed('second answer');
+  term.feed('\r'); // commits q2, the whole ask answers in one line
+  assert.deepEqual(sent, ['/answer aa11bb q1=first answer q2=second answer']);
+  surface.stop();
+});
+
+test('a second open ask takes the panel and returns progress intact when it closes', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const askA: AskFrame = {
+    t: 'ask',
+    id: 'aa11aa',
+    questions: [
+      { id: 'x', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'y', question: 'Second?', options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const askB: AskFrame = {
+    t: 'ask',
+    id: 'bb22bb',
+    questions: [{ id: 'z', question: 'Other?', options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  surface.setAsk(askA);
+  term.feed('1'); // answers x=1
+  surface.setAsk(askB); // the panel switches to the newest ask
+  surface.setAsk({ t: 'ask', id: 'bb22bb', closed: true }); // back to askA
+  term.feed('1'); // answers y=1; x must still be answered
+  assert.deepEqual(sent, ['/answer aa11aa x=1 y=1']);
+  surface.stop();
+});
+
+test('AskPanel truncates to the row budget with a … more marker', () => {
+  const many: AskFrame = {
+    t: 'ask',
+    id: 'cc33cc',
+    questions: [
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: `opt${i + 1}` })) },
+    ],
+  };
+  const panel = new AskPanel(pickerFor(many));
+  const clipped = panel.render(80, 8);
+  assert.equal(clipped.length, 8);
+  assert.match(clipped.join('\n'), /… \d+ more/);
+  assert.ok(clipped[clipped.length - 1]!.includes('esc skip all'), 'the help line stays last');
+  const short = panel.render(80, 200);
+  assert.equal(short.length, panel.render(80).length); // no budget, no truncation
 });
 

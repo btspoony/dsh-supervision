@@ -986,11 +986,12 @@ export class AskPanel implements Component {
 
   invalidate(): void {}
 
-  render(width: number): string[] {
+  render(width: number, maxLines?: number): string[] {
     const w = Math.max(1, Math.floor(width));
     const question = this.state.questions[this.state.index];
     if (question === undefined) return [];
     const lines: string[] = [];
+    const budget = maxLines === undefined ? Number.POSITIVE_INFINITY : Math.max(3, Math.floor(maxLines));
     const head = `ask ${this.state.askId} · question ${this.state.index + 1}/${this.state.questions.length}`;
     lines.push(...wrapPlain(this.theme.bold(head), w));
     const multi = question.multiSelect === true ? this.theme.dim(' (multi-select: space toggles)') : '';
@@ -1018,6 +1019,19 @@ export class AskPanel implements Component {
     }
     const help = this.theme.dim('↑/↓ move · enter pick · 1-9 pick · space toggle · esc skip all');
     for (const piece of wrapPlain(help, w)) lines.push(clipStyled(piece, w));
+    // A long option list must fit the shell's row budget: keep the head and as
+    // many rows as fit, then one marker line for what a scroll would reveal.
+    if (lines.length > budget) {
+      const helpLines = wrapPlain(help, w).map((piece) => clipStyled(piece, w));
+      const body = lines.slice(0, lines.length - helpLines.length);
+      const keptBody = Math.max(0, budget - helpLines.length - 1);
+      const dropped = body.length - keptBody;
+      return [
+        ...body.slice(0, keptBody),
+        this.theme.dim(`… ${dropped} more (pick or skip to see the rest)`),
+        ...helpLines,
+      ];
+    }
     return lines;
   }
 }
@@ -1090,8 +1104,9 @@ export class Shell implements Component {
     // A narrow terminal must render narrow: widening here would put lines wider
     // than the viewport on screen. Every component truncates to what it gets.
     const w = Math.max(1, Math.floor(width) || this.fallbackWidth || 80);
-    const editorLines = this.panel !== undefined ? this.panel.render(w) : this.editor.render(w);
     const rows = Math.max(3, this.terminal.rows || 24);
+    const editorLines =
+      this.panel !== undefined ? this.panel.render(w, Math.max(4, rows - 2)) : this.editor.render(w);
     this.transcript.height = Math.max(0, rows - editorLines.length - 1);
     return [...this.transcript.render(w), ...editorLines, this.status.render(w)];
   }
@@ -1166,6 +1181,8 @@ export interface StartTuiOptions {
   readonly width?: number;
   /** Directory `@file` completion resolves against: the session's cwd. */
   readonly basePath?: string;
+  /** Terminal override for tests; defaults to this process's stdin/stdout. */
+  readonly terminal?: Terminal;
 }
 
 /**
@@ -1174,7 +1191,7 @@ export interface StartTuiOptions {
  * @returns the sink to push frames into; `stop()` restores the terminal.
  */
 export function startTui(options: StartTuiOptions): Surface {
-  const terminal = new ProcessTerminal();
+  const terminal = options.terminal ?? new ProcessTerminal();
   // Full-screen (alternate screen): the transcript viewport replaces terminal
   // scrollback while attached. Mouse capture stays off — the plan has no mouse
   // support, and leaving it on would steal the terminal's own selection.
@@ -1201,23 +1218,46 @@ export function startTui(options: StartTuiOptions): Surface {
    * returns to the rows.
    */
   let typingQid: string | undefined;
+  /** The steer draft the editor held before the panel took its rows. */
+  let steerDraft = '';
+  /** Per-ask picker state, so a second open ask never discards progress. */
+  const panelStates = new Map<string, AskPickerState>();
+  /** Per-ask half-typed "Other" text, kept while the ask is open. */
+  const typingDrafts = new Map<string, string>();
 
-  /** Drops the panel and hands the editor its rows back. */
+  /** Drops the panel and hands the editor its rows back, draft restored. */
   const closePanel = (): void => {
     if (shell.panel === undefined && typingQid === undefined) return;
+    const askId = shell.panel?.state.askId;
+    if (askId !== undefined) {
+      panelStates.delete(askId);
+      typingDrafts.delete(askId);
+    }
     shell.panel = undefined;
     typingQid = undefined;
-    editor.setText('');
+    editor.setText(steerDraft);
+    steerDraft = '';
     tui.setFocus(editor);
   };
 
   /** Shows the panel for one open ask, entering typing mode when it must. */
   const openPanel = (frame: Extract<AskFrame, { readonly questions: readonly unknown[] }>): void => {
-    const panel = new AskPanel(pickerFor(frame), theme);
+    if (shell.panel === undefined) steerDraft = editor.getText();
+    else stashPanelState();
+    const state = panelStates.get(frame.id) ?? pickerFor(frame);
+    const panel = new AskPanel(state, theme);
     shell.panel = panel;
-    typingQid = panel.state.typing ? panel.state.questions[panel.state.index]?.id : undefined;
-    if (typingQid !== undefined) editor.setText('');
+    typingQid = state.typing ? state.questions[state.index]?.id : undefined;
+    if (typingQid !== undefined) editor.setText(typingDrafts.get(frame.id) ?? '');
     else tui.setFocus(panel);
+  };
+
+  /** Saves the visible ask's progress and any half-typed custom text. */
+  const stashPanelState = (): void => {
+    const panel = shell.panel;
+    if (panel === undefined) return;
+    panelStates.set(panel.state.askId, panel.state);
+    if (typingQid !== undefined) typingDrafts.set(panel.state.askId, editor.getText());
   };
 
   /** Applies one panelKey result: send the line when the ask is finished. */
@@ -1245,6 +1285,7 @@ export function startTui(options: StartTuiOptions): Surface {
       if (text.trim() === '') {
         // An empty submit returns to the rows instead of answering.
         typingQid = undefined;
+        typingDrafts.delete(panel.state.askId);
         panel.set({ ...panel.state, typing: false });
         editor.setText('');
         tui.setFocus(panel);
@@ -1254,13 +1295,15 @@ export function startTui(options: StartTuiOptions): Surface {
       const next = commitTyping(panel.state, text);
       const line = answerSpec(next);
       editor.setText('');
+      typingDrafts.delete(panel.state.askId);
       if (line !== undefined) {
         options.sendLine(line);
         closePanel();
       } else {
-        typingQid = undefined;
+        // The next question also needs typed input: stay in typing mode for it.
         panel.set(next);
-        tui.setFocus(panel);
+        typingQid = next.questions[next.index]?.id;
+        tui.setFocus(editor);
       }
       tui.requestRender();
       return;
@@ -1408,7 +1451,13 @@ export function startTui(options: StartTuiOptions): Surface {
       // retired, and keeping it would let a stale id absorb a later bare answer.
       if ('closed' in frame) {
         openAsks.delete(frame.id);
-        if (shell.panel !== undefined && shell.panel.state.askId === frame.id) closePanel();
+        if (shell.panel !== undefined && shell.panel.state.askId === frame.id) {
+          // Another still-open ask takes the panel back, progress intact.
+          const remaining = [...openAsks.values()].filter((open) => !('closed' in open));
+          const next = remaining[remaining.length - 1];
+          if (next !== undefined && !('closed' in next)) openPanel(next);
+          else closePanel();
+        }
       } else {
         openAsks.set(frame.id, frame);
         // The newest open ask is the one the panel picks up.
