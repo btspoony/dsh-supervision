@@ -125,7 +125,7 @@ session=session-4f2a… state=blocked turn=3 asks=3f9ac1
 [ask 3f9ac1] question -> answered (source=supervisor)
 ```
 
-每个问题一个 token：`q1=2` 选第 2 项，`q1=1,3` 选两项，`q1=-` 跳过，其他值作为自由文本——首个 token 之后的词会并入该值，所以 `q1=two words` 是一个自定义答案。只有一个问题时可以省略问题 id，整行剩余内容都是该值（`/answer 3f9ac1 我的 想法`）。全屏交互面会打印同一张卡片，并在恰好只有一个提问打开时，把裸 `2`（或 `-`、`1,3`）改写为 `/answer <id> 2`；多问题提问会收到插件答案语法的错误行，而不是把输入变成发给 agent 的消息；其他输入仍是普通 steer。从 herdr-core HUD 作答不需要 attach：`hc send <terminal> "/answer <id> 2"`。提问方撤回或桥接断开时，所有问题按跳过结掉并关闭卡片。
+每个问题一个 token：`q1=2` 选第 2 项，`q1=1,3` 选两项，`q1=-` 跳过，其他值作为自由文本——首个 token 之后的词会并入该值，所以 `q1=two words` 是一个自定义答案。只有一个问题时可以省略问题 id，整行剩余内容都是该值（`/answer 3f9ac1 我的 想法`）。全屏交互面里不需要手打这行：打开的提问用键盘在面板里选（见下），自由文本走 `Other` 行——形如选项号（`2`、`1,3`、`-`）或带 `token=` 的文本会被拒绝并给出提示，不会发出去。手打的 `/answer` 语法在任何地方仍然有效；line 模式（`--no-tui`，或 stdout 被重定向）下它是唯一路径。从 herdr-core HUD 作答不需要 attach：`hc send <terminal> "/answer <id> 2"`。提问方撤回或桥接断开时，所有问题按跳过结掉并关闭卡片。
 
 全屏交互面里，提问打开时编辑器会被答题面板替换：一次一题，`↑`/`↓`（或 `j`/`k`）移动，`Enter` 选中，`1`–`9` 直接按序号选，`Space` 勾选多选题的选项并在 `Done` 行按 `Enter` 提交。`Other (type your own)` 把编辑器还给你输入自由文本，`Skip` 以 `-` 跳过该题，`Esc` 跳过整个提问。答完最后一题时，socket 上恰好发出一条 `/answer <ask> <qid>=<value> ...` ——上面的手打语法在任何地方仍然有效，且在 line 模式（`--no-tui`）下是唯一路径。
 
