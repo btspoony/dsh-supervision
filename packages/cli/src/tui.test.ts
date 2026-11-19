@@ -1263,3 +1263,47 @@ test('AskPanel truncates to the row budget with a … more marker', () => {
   assert.equal(short.length, panel.render(80).length); // no budget, no truncation
 });
 
+
+test('Esc out of typing discards the half-typed draft for good', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  surface.setAsk(SINGLE_ASK);
+  term.feed('\x1b[B'); // down
+  term.feed('\x1b[B'); // down → Other row
+  term.feed('\r'); // typing mode
+  term.feed('half');
+  term.feed('\x1b'); // Esc: back to the rows, draft dropped
+  term.feed('\r'); // Other row again (the cursor never moved), editor must be empty
+  term.feed('\r'); // empty submit returns to the rows, nothing is sent
+  assert.deepEqual(sent, []);
+  surface.stop();
+});
+
+test('a closed ask forgets its progress even while another ask shows', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const askA: AskFrame = {
+    t: 'ask',
+    id: 'aa11aa',
+    questions: [
+      { id: 'x', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'y', question: 'Second?', options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const askB: AskFrame = {
+    t: 'ask',
+    id: 'bb22bb',
+    questions: [{ id: 'z', question: 'Other?', options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  surface.setAsk(askA);
+  term.feed('1'); // x=1: askA now has stashed progress
+  surface.setAsk(askB); // the panel shows askB
+  surface.setAsk({ t: 'ask', id: 'aa11aa', closed: true }); // askA closes unseen
+  surface.setAsk(askA); // the same id asks again: it must start fresh
+  term.feed('2'); // answers x=2; no resurrected x=1 progress
+  term.feed('1'); // answers y=1, the ask completes
+  assert.deepEqual(sent, ['/answer aa11aa x=2 y=1']);
+  surface.stop();
+});

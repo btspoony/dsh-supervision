@@ -1407,6 +1407,7 @@ export function startTui(options: StartTuiOptions): Surface {
     if (shell.panel !== undefined && typingQid !== undefined && matchesKey(data, 'escape')) {
       const panel = shell.panel;
       typingQid = undefined;
+      typingDrafts.delete(panel.state.askId);
       panel.set({ ...panel.state, typing: false });
       editor.setText('');
       tui.setFocus(panel);
@@ -1462,6 +1463,9 @@ export function startTui(options: StartTuiOptions): Surface {
       // retired, and keeping it would let a stale id absorb a later bare answer.
       if ('closed' in frame) {
         openAsks.delete(frame.id);
+        // A closed ask must not resurrect its progress if the id is reused.
+        panelStates.delete(frame.id);
+        typingDrafts.delete(frame.id);
         if (shell.panel !== undefined && shell.panel.state.askId === frame.id) {
           // Another still-open ask takes the panel back, progress intact.
           const remaining = [...openAsks.values()].filter((open) => !('closed' in open));
