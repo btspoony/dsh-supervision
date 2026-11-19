@@ -1408,3 +1408,49 @@ test('panelKey ignores Kitty key-release sequences entirely', () => {
     assert.equal((result as { state: typeof state }).state, state, `release ${release} is a no-op`);
   }
 });
+
+test('finishing the newest ask hands the panel back to the older open ask', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const askA: AskFrame = {
+    t: 'ask',
+    id: 'aa11aa',
+    questions: [
+      { id: 'x', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'y', question: 'Second?', options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const askB: AskFrame = {
+    t: 'ask',
+    id: 'bb22bb',
+    questions: [{ id: 'z', question: 'Other?', options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  surface.setAsk(askA);
+  surface.setAsk(askB); // the panel shows askB (newest)
+  term.feed('1'); // finishes askB
+  assert.deepEqual(sent, ['/answer bb22bb z=1']);
+  surface.setAsk({ t: 'ask', id: 'bb22bb', closed: true }); // must not disturb the panel
+  term.feed('1'); // askA x=1
+  term.feed('2'); // askA y=2, the ask completes
+  assert.deepEqual(sent, ['/answer bb22bb z=1', '/answer aa11aa x=1 y=2']);
+  surface.stop();
+});
+
+test('the render window keeps the cursor row visible in a long list', () => {
+  const many: AskFrame = {
+    t: 'ask',
+    id: 'cc33cc',
+    questions: [
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: `opt${i + 1}` })) },
+    ],
+  };
+  const panel = new AskPanel(pickerFor(many));
+  const moved = { ...panel.state, cursor: 14 }; // cursor on option 15
+  panel.set(moved);
+  const clipped = panel.render(80, 8);
+  const text = clipped.join('\n');
+  assert.match(text, /❯ ● 15\. opt15/, 'the cursor row stays on screen');
+  assert.match(text, /… \d+ more/);
+  assert.equal(clipped.length, 8);
+});

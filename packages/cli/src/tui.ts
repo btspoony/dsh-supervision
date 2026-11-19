@@ -1004,8 +1004,12 @@ export class AskPanel implements Component {
       const hint = this.theme.dim('type your answer, Enter submits, Esc goes back');
       return [...lines, ...wrapPlain(hint, w).map((piece) => clipStyled(piece, w))];
     }
-    const rows = rowsOf(this.state);
-    for (const [rowIndex, row] of rows.entries()) {
+    const help = this.theme.dim('↑/↓ move · enter pick · 1-9 pick · space toggle · esc skip all');
+    const helpLines = wrapPlain(help, w).map((piece) => clipStyled(piece, w));
+    // Row lines stay separate so the window can be cut around the cursor: the
+    // cursor row must stay visible even in a list far longer than the budget.
+    const rowLines: { readonly text: readonly string[]; readonly cursor: boolean }[] = [];
+    for (const [rowIndex, row] of rowsOf(this.state).entries()) {
       const cursor = rowIndex === this.state.cursor;
       const mark = cursor ? '❯' : ' ';
       let text: string;
@@ -1022,25 +1026,27 @@ export class AskPanel implements Component {
         text = '○ Done';
       }
       const line = `${mark} ${text}`;
-      const wrapped = wrapPlain(cursor ? this.theme.bold(line) : line, w);
-      for (const piece of wrapped) lines.push(clipStyled(piece, w));
+      rowLines.push({
+        text: wrapPlain(cursor ? this.theme.bold(line) : line, w).map((piece) => clipStyled(piece, w)),
+        cursor,
+      });
     }
-    const help = this.theme.dim('↑/↓ move · enter pick · 1-9 pick · space toggle · esc skip all');
-    for (const piece of wrapPlain(help, w)) lines.push(clipStyled(piece, w));
-    // A long option list must fit the shell's row budget: keep the head and as
-    // many rows as fit, then one marker line for what a scroll would reveal.
-    if (lines.length > budget) {
-      const helpLines = wrapPlain(help, w).map((piece) => clipStyled(piece, w));
-      const body = lines.slice(0, lines.length - helpLines.length);
-      const keptBody = Math.max(0, budget - helpLines.length - 1);
-      const dropped = body.length - keptBody;
-      return [
-        ...body.slice(0, keptBody),
-        this.theme.dim(`… ${dropped} more (pick or skip to see the rest)`),
-        ...helpLines,
-      ];
+    const flat = rowLines.flatMap((row) => row.text);
+    if (lines.length + flat.length + helpLines.length <= budget) {
+      return [...lines, ...flat, ...helpLines];
     }
-    return lines;
+    // Window the rows so the cursor's line is always on screen; one marker line
+    // counts what the remaining scroll would reveal.
+    const available = Math.max(1, budget - lines.length - helpLines.length - 1);
+    let cursorLine = 0;
+    for (const row of rowLines) {
+      if (row.cursor) break;
+      cursorLine += row.text.length;
+    }
+    const start = Math.max(0, Math.min(cursorLine, flat.length - available));
+    const window = flat.slice(start, start + available);
+    const hidden = flat.length - window.length;
+    return [...lines, ...window, this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), ...helpLines];
   }
 }
 
@@ -1265,11 +1271,14 @@ export function startTui(options: StartTuiOptions): Surface {
   };
 
   /** Shows the panel for one open ask, entering typing mode when it must. */
-  const openPanel = (frame: Extract<AskFrame, { readonly questions: readonly unknown[] }>): void => {
+  const openPanel = (
+    frame: Extract<AskFrame, { readonly questions: readonly unknown[] }>,
+    opts: { readonly stashCurrent?: boolean } = {},
+  ): void => {
     // Only the first panel steals the steer draft; a switch between panels
     // (or a reopen after a closed frame) must leave it alone.
     if (!panelActive) steerDraft = editor.getText();
-    else stashPanelState();
+    else if (opts.stashCurrent !== false) stashPanelState();
     panelActive = true;
     const state = panelStates.get(frame.id) ?? pickerFor(frame);
     const panel = new AskPanel(state, theme);
@@ -1308,11 +1317,27 @@ export function startTui(options: StartTuiOptions): Surface {
     }
   };
 
+  /**
+   * One ask is answered: retire it and put the newest remaining open ask on
+   * the panel (its own progress), or close the panel when nothing is left.
+   * A later `closed` frame for the finished id then matches no panel and is a
+   * no-op.
+   */
+  const finishAsk = (askId: string): void => {
+    openAsks.delete(askId);
+    panelStates.delete(askId);
+    typingDrafts.delete(askId);
+    const remaining = [...openAsks.values()].filter((open) => !('closed' in open));
+    const next = remaining[remaining.length - 1];
+    if (next !== undefined && !('closed' in next)) openPanel(next, { stashCurrent: false });
+    else closePanel();
+  };
+
   /** Applies one panelKey result: send the line when the ask is finished. */
   const applyPanelKey = (result: { readonly state: AskPickerState } | { readonly line: string }): void => {
     if ('line' in result) {
       options.sendLine(result.line);
-      closePanel();
+      finishAsk(shell.panel?.state.askId ?? '');
       return;
     }
     const panel = shell.panel;
@@ -1353,7 +1378,7 @@ export function startTui(options: StartTuiOptions): Surface {
       typingDrafts.delete(panel.state.askId);
       if (line !== undefined) {
         options.sendLine(line);
-        closePanel();
+        finishAsk(panel.state.askId);
       } else {
         // The next question may need typed input or may offer rows again.
         adoptNextState(panel, next);
