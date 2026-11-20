@@ -1459,13 +1459,19 @@ test('a refused free-text hint clears on the next key and on timeout', async () 
   const term = makeFeedTerminal();
   const sent: string[] = [];
   const status = new StatusLine(PLAIN);
+  let fireHint: (() => void) | undefined;
   const surface = startTui({
     title: '',
     sendLine: (text) => sent.push(text),
     onExit: () => {},
     terminal: term,
     statusLine: status,
-    hintWindowMs: 40,
+    hintSchedule: (callback) => {
+      fireHint = callback;
+      return () => {
+        fireHint = undefined;
+      };
+    },
   });
   surface.setAsk({
     t: 'ask',
@@ -1485,7 +1491,7 @@ test('a refused free-text hint clears on the next key and on timeout', async () 
   term.feed('2');
   term.feed('\r'); // refused again on the second question
   assert.equal(status.hasHint(), true);
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  fireHint?.(); // the injected clock advances to the hint deadline
   assert.equal(status.hasHint(), false, 'the hint auto-clears');
   surface.stop();
 });
@@ -1504,6 +1510,26 @@ test('the … more marker fits narrow widths like every other panel line', () =>
     assert.ok(visibleWidth(line) <= 30, `line exceeds 30 columns: ${JSON.stringify(line)}`);
   }
   assert.match(panel.render(80, 8).join('\n'), /… \d+ more/); // wide text unchanged
+});
+
+test('the panel never exceeds the row budget and keeps the cursor visible', () => {
+  const many: AskFrame = {
+    t: 'ask',
+    id: 'cc33cc',
+    questions: [
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: 'opt' + String(i + 1) })) },
+    ],
+  };
+  for (const [maxLines, cursor] of [
+    [5, 0], [8, 0], [8, 10], [8, 15], [12, 0], [12, 19], [5, 2], [6, 7], [5, 19],
+  ] as const) {
+    const panel = new AskPanel({ ...pickerFor(many), cursor });
+    const lines = panel.render(80, maxLines);
+    assert.ok(lines.length <= maxLines, lines.length + ' rows exceed maxLines ' + String(maxLines));
+    const cursorLine = lines.find((line) => line.includes('\u276f'));
+    const expected = '\u25cf ' + String(cursor + 1) + '. opt' + String(cursor + 1);
+    assert.ok(cursorLine !== undefined && cursorLine.includes(expected), 'cursor row ' + String(cursor + 1) + ' stays visible');
+  }
 });
 
 test('panel rendering strips control bytes from host-provided text', () => {

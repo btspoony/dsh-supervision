@@ -211,9 +211,10 @@ question at a time, `↑`/`↓` (or `j`/`k`) move, `Enter` picks,
 on its `Done` row advances it. `Other (type your own)` hands the editor back
 prefilled for free text, `Skip` answers that question `-`, and `Esc` skips
 the whole ask. Answering the last question emits exactly one
-`/answer <ask> <qid>=<value> ...` line over the socket — the typed grammar
-above stays valid everywhere and remains the only path in line mode
-(`--no-tui`).
+`/answer <ask> <qid>=<value> ...` line over the socket — the same wire grammar
+the typed path uses, valid where the typed line is: over the wire, from a
+herdr-core HUD, and in line mode (`--no-tui`, or a non-TTY stdout), where it
+is the only path.
 
 ### Take back control
 

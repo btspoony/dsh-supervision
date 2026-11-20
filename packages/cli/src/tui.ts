@@ -993,7 +993,10 @@ export class AskPanel implements Component {
     const question = this.state.questions[this.state.index];
     if (question === undefined) return [];
     const lines: string[] = [];
-    const budget = maxLines === undefined ? Number.POSITIVE_INFINITY : Math.max(3, Math.floor(maxLines));
+    // Five rows is the panel's true minimum: header (2) + one cursor row +
+    // the truncation marker + the help line. Below that the cursor could not
+    // stay visible, so the budget floors there.
+    const budget = maxLines === undefined ? Number.POSITIVE_INFINITY : Math.max(5, Math.floor(maxLines));
     // Host-provided text goes through stripControls like renderAsk does: an
     // escape or OSC byte in an id, question or label must never reach stdout.
     const head = `ask ${stripControls(this.state.askId, '\n\t')} · question ${this.state.index + 1}/${this.state.questions.length}`;
@@ -1038,19 +1041,32 @@ export class AskPanel implements Component {
     if (lines.length + flat.length + helpLines.length <= budget) {
       return [...lines, ...flat, ...helpLines];
     }
-    // Window the rows so the cursor's line is always on screen; one marker line
-    // counts what the remaining scroll would reveal.
-    const available = Math.max(1, budget - lines.length - helpLines.length - 1);
+    // Window the rows so the cursor's line is always on screen. Every wrapped
+    // chunk — window, marker, help — counts toward the budget, so the returned
+    // rows never exceed maxLines even when the marker itself wraps.
+    let available = Math.max(1, budget - lines.length - helpLines.length - 1);
     let cursorLine = 0;
     for (const row of rowLines) {
       if (row.cursor) break;
       cursorLine += row.text.length;
     }
-    const start = Math.max(0, Math.min(cursorLine, flat.length - available));
-    const window = flat.slice(start, start + available);
-    const hidden = flat.length - window.length;
-    const more = this.theme.dim(`… ${hidden} more (move the cursor to scroll)`);
-    return [...lines, ...window, ...wrapPlain(more, w).map((piece) => clipStyled(piece, w)), ...helpLines];
+    let start = Math.max(0, Math.min(cursorLine, flat.length - available));
+    let window = flat.slice(start, start + available);
+    // The marker's own wrap may exceed its reserved slot: shrink the window
+    // once and recompute, so the returned rows stay within maxLines.
+    let hidden = flat.length - window.length;
+    let markerLines = wrapPlain(this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), w).map((piece) => clipStyled(piece, w));
+    if (markerLines.length > 1) {
+      window = window.slice(0, Math.max(0, window.length - (markerLines.length - 1)));
+      hidden = flat.length - window.length;
+      markerLines = wrapPlain(this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), w).map((piece) => clipStyled(piece, w));
+    }
+    let result = [...lines, ...window, ...markerLines, ...helpLines];
+    if (result.length > budget) {
+      const excess = result.length - budget;
+      result = [...lines, ...window.slice(0, Math.max(0, window.length - excess)), ...markerLines, ...helpLines];
+    }
+    return result;
   }
 }
 
@@ -1133,7 +1149,7 @@ export class Shell implements Component {
       // Typing mode: the question header above, the real editor below it.
       editorLines = [...this.panel.render(w), ...this.editor.render(w)];
     } else {
-      editorLines = this.panel.render(w, Math.max(4, rows - 2));
+      editorLines = this.panel.render(w, Math.max(5, rows - 2));
     }
     this.transcript.height = Math.max(0, rows - editorLines.length - 1);
     return [...this.transcript.render(w), ...editorLines, this.status.render(w)];
@@ -1215,6 +1231,8 @@ export interface StartTuiOptions {
   readonly statusLine?: StatusLine;
   /** Transient-hint duration override for tests; defaults to the Ctrl+C window. */
   readonly hintWindowMs?: number;
+  /** Timer source for transient hints; defaults to setTimeout/clearTimeout. */
+  readonly hintSchedule?: (callback: () => void, ms: number) => () => void;
 }
 
 /**
@@ -1405,11 +1423,11 @@ export function startTui(options: StartTuiOptions): Surface {
   };
 
   /** The Ctrl+C hint is transient: any other key, or the window, clears it. */
-  let hintTimer: ReturnType<typeof setTimeout> | undefined;
+  let hintTimer: (() => void) | undefined;
   let memory: KeyMemory = { lastCtrlC: undefined, exited: false };
   const clearHint = (): void => {
     if (hintTimer !== undefined) {
-      clearTimeout(hintTimer);
+      hintTimer();
       hintTimer = undefined;
     }
     if (status.hasHint()) {
@@ -1419,10 +1437,14 @@ export function startTui(options: StartTuiOptions): Surface {
   };
   /** Sets a transient hint with the same timeout + auto-clear as Ctrl+C's. */
   const showTransientHint = (text: string): void => {
-    if (hintTimer !== undefined) clearTimeout(hintTimer);
+    if (hintTimer !== undefined) hintTimer();
     status.setHint(text);
     tui.requestRender();
-    hintTimer = setTimeout(() => {
+    const schedule = options.hintSchedule ?? ((callback, ms) => {
+      const handle = setTimeout(callback, ms);
+      return () => clearTimeout(handle);
+    });
+    hintTimer = schedule(() => {
       hintTimer = undefined;
       status.setHint(undefined);
       tui.requestRender();
