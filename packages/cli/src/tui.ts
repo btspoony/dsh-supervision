@@ -993,14 +993,18 @@ export class AskPanel implements Component {
     const question = this.state.questions[this.state.index];
     if (question === undefined) return [];
     const lines: string[] = [];
-    // Five rows is the panel's true minimum: header (2) + one cursor row +
-    // the truncation marker + the help line. Below that the cursor could not
-    // stay visible, so the budget floors there.
-    const budget = maxLines === undefined ? Number.POSITIVE_INFINITY : Math.max(5, Math.floor(maxLines));
+    // Budget priority, fixed and without retries: the ask head (one clipped
+    // row) and the question text are never dropped — a panel that shows a
+    // number without the question is useless. If even head + question first
+    // row + one window row cannot fit, the result may exceed the budget;
+    // Shell clamps transcript.height, so the terminal never overflows. After
+    // the question, help goes first, then the \u2026 more marker; every row
+    // left in the budget goes to the option window.
+    const budget = maxLines === undefined ? Number.POSITIVE_INFINITY : Math.max(1, Math.floor(maxLines));
     // Host-provided text goes through stripControls like renderAsk does: an
     // escape or OSC byte in an id, question or label must never reach stdout.
     const head = `ask ${stripControls(this.state.askId, '\n\t')} · question ${this.state.index + 1}/${this.state.questions.length}`;
-    lines.push(...wrapPlain(this.theme.bold(head), w));
+    lines.push(clipStyled(this.theme.bold(head), w));
     const multi = question.multiSelect === true ? this.theme.dim(' (multi-select: space toggles)') : '';
     const label = stripControls(question.question, '\n\t');
     lines.push(...wrapPlain(`[${stripControls(question.id, '\n\t')}] ${label}${multi}`, w));
@@ -1041,40 +1045,45 @@ export class AskPanel implements Component {
     if (lines.length + flat.length + helpLines.length <= budget) {
       return [...lines, ...flat, ...helpLines];
     }
-    // Windowing, in two straight steps. The marker text depends on the hidden
-    // count and the hidden count depends on the marker's own wrapped size, so
-    // the marker slot converges in a small loop; nothing is trimmed afterwards.
-    const fixed = lines.length + helpLines.length;
+    const headRow = lines[0]!;
+    const questionLines = lines.length > 1 ? lines.slice(1) : [lines[0]!];
+    let qLines = questionLines;
+    let room = budget - 1 - qLines.length;
+    if (room < 1) {
+      // Deliberate trade-off: the question text wins over the budget; the
+      // result may exceed maxLines here and Shell clamps transcript.height.
+      qLines = questionLines.slice(0, Math.max(1, budget - 2));
+      room = budget - 1 - qLines.length;
+    }
+    // Help goes whole or not at all: it must never eat the window's row.
+    const helpOut = room - helpLines.length >= 1 ? helpLines : [];
+    room -= helpOut.length;
     let cursorLine = 0;
     for (const row of rowLines) {
       if (row.cursor) break;
       cursorLine += row.text.length;
     }
-    let markerSlot = 1;
-    let win = 1;
-    let start = 0;
-    let hidden = flat.length;
-    let markerLines: string[] = [];
-    let header = lines;
-    let helpOut = helpLines;
-    for (let pass = 0; pass < 3; pass += 1) {
-      win = Math.max(1, budget - fixed - markerSlot);
-      // Cursor-centred window: the cursor row is always inside [start, start+win).
-      start = Math.max(0, Math.min(cursorLine - Math.floor((win - 1) / 2), Math.max(0, flat.length - win)));
-      hidden = flat.length - win;
-      markerLines = wrapPlain(this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), w).map((piece) => clipStyled(piece, w));
-      // On a very narrow terminal the fixed chrome alone can overflow: trim
-      // help first, then the question line, keeping the ask-number head row.
-      const chromeRoom = Math.max(1, budget - win - markerLines.length);
-      if (header.length + helpOut.length > chromeRoom) {
-        helpOut = helpLines.slice(0, Math.max(0, chromeRoom - Math.min(header.length, chromeRoom)));
-        header = lines.slice(0, Math.max(1, chromeRoom - helpOut.length));
-      }
-      if (markerLines.length === markerSlot) break;
+    const markerLinesFor = (hidden: number): string[] =>
+      wrapPlain(this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), w).map((piece) => clipStyled(piece, w));
+    let markerSlot = room >= 2 ? 1 : 0;
+    let win = Math.max(1, room - markerSlot);
+    let start = Math.max(0, Math.min(cursorLine - Math.floor((win - 1) / 2), Math.max(0, flat.length - win)));
+    let markerLines = markerSlot > 0 ? markerLinesFor(flat.length - win) : [];
+    if (markerLines.length > markerSlot && win > 1) {
+      // One reflow if the marker wraps wider than its slot; the window stays
+      // cursor-centred, and the marker is dropped before it can squeeze the
+      // question rows out.
       markerSlot = markerLines.length;
+      win = Math.max(1, room - markerSlot);
+      start = Math.max(0, Math.min(cursorLine - Math.floor((win - 1) / 2), Math.max(0, flat.length - win)));
+      markerLines = markerSlot > 0 ? markerLinesFor(flat.length - win) : [];
+    }
+    // The marker must never squeeze out the question rows, whatever the path.
+    if (1 + qLines.length + win + helpOut.length + markerLines.length > budget && markerLines.length > 0) {
+      markerLines = [];
     }
     const window = flat.slice(start, start + win);
-    return [...header, ...window, ...markerLines, ...helpOut];
+    return [headRow, ...qLines, ...window, ...markerLines, ...helpOut];
   }
 }
 

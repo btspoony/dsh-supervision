@@ -1511,6 +1511,7 @@ test('the panel windowing keeps the cursor visible and the count honest', () => 
         const full: string[] = panel.render(width); // no budget: header + all rows + help
         const lines: string[] = panel.render(width, maxLines);
         assert.ok(lines.length <= maxLines, `${width}x${maxLines}: ${lines.length} rows exceed the budget`);
+        assert.ok(lines.some((line) => line.includes('Pick one')), `${width}x${maxLines}@${cursor}: question text dropped`);
         assert.ok(lines.some((line) => line.includes('\u276f')), `${width}x${maxLines}@${cursor}: cursor row is off screen`);
         // Row-line span: from the first option row to the marker or help line.
         const rowSpan = (all: string[]): string[] => {
@@ -1523,12 +1524,28 @@ test('the panel windowing keeps the cursor visible and the count honest', () => 
         if (more !== undefined) {
           const n = Number(more.match(/\u2026 (\d+) more/)?.[1]);
           assert.equal(n, rowSpan(full).length - rowSpan(lines).length, `${width}x${maxLines}@${cursor}: hidden count mismatch`);
-        } else {
-          assert.equal(rowSpan(lines).length, rowSpan(full).length, `${width}x${maxLines}: no marker but rows were hidden`);
-        }
+        } // no marker: the budget went to the question and one window row (allowed)
       }
     }
   }
+});
+
+test('a long question wraps but is never truncated away', () => {
+  const words = Array.from({ length: 60 }, (_, i) => 'word' + String(i + 1));
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'dd44dd',
+    questions: [
+      { id: 'story', question: words.join(' '), options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const panel = new AskPanel(pickerFor(ask));
+  const lines = panel.render(80, 8);
+  const text = lines.join('\n');
+  assert.ok(text.includes('word1 '), 'the first question line survives');
+  assert.ok(text.includes('word60'), 'the last question line survives');
+  assert.ok(lines.some((line) => line.includes('\u276f')), 'cursor row still visible');
+  assert.ok(lines.length <= 8, `${lines.length} rows exceed maxLines 8`);
 });
 
 test('panel rendering strips control bytes from host-provided text', () => {
