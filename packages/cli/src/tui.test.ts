@@ -1454,3 +1454,72 @@ test('the render window keeps the cursor row visible in a long list', () => {
   assert.match(text, /… \d+ more/);
   assert.equal(clipped.length, 8);
 });
+
+test('a refused free-text hint clears on the next key and on timeout', async () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const status = new StatusLine(PLAIN);
+  const surface = startTui({
+    title: '',
+    sendLine: (text) => sent.push(text),
+    onExit: () => {},
+    terminal: term,
+    statusLine: status,
+    hintWindowMs: 40,
+  });
+  surface.setAsk({
+    t: 'ask',
+    id: 'ff77ff',
+    questions: [
+      { id: 'note', question: 'Notes?' },
+      { id: 'more', question: 'More?' },
+    ],
+  });
+  term.feed('2');
+  term.feed('\r'); // refused: the hint is up
+  assert.equal(status.hasHint(), true);
+  term.feed('x'); // a printable key retires the hint
+  assert.equal(status.hasHint(), false);
+  term.feed('\r'); // '2x' commits to note; more is text-only, still typing
+  assert.deepEqual(sent, []);
+  term.feed('2');
+  term.feed('\r'); // refused again on the second question
+  assert.equal(status.hasHint(), true);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(status.hasHint(), false, 'the hint auto-clears');
+  surface.stop();
+});
+
+test('the … more marker fits narrow widths like every other panel line', () => {
+  const many: AskFrame = {
+    t: 'ask',
+    id: 'cc33cc',
+    questions: [
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: `opt${i + 1}` })) },
+    ],
+  };
+  const panel = new AskPanel(pickerFor(many));
+  const narrow = panel.render(30, 8);
+  for (const line of narrow) {
+    assert.ok(visibleWidth(line) <= 30, `line exceeds 30 columns: ${JSON.stringify(line)}`);
+  }
+  assert.match(panel.render(80, 8).join('\n'), /… \d+ more/); // wide text unchanged
+});
+
+test('panel rendering strips control bytes from host-provided text', () => {
+  const evil: AskFrame = {
+    t: 'ask',
+    id: 'a\x1b]0;evil\x07b',
+    questions: [
+      {
+        id: 'q\x1b[31mred',
+        question: 'Why?\x1b]8;;x\x07',
+        options: [{ label: 'opt\x1b]8;;link\x07A' }],
+      },
+    ],
+  };
+  const out = new AskPanel(pickerFor(evil)).render(80).join('\n');
+  assert.equal(out.includes('\x1b'), false, 'no escape byte reaches stdout');
+  assert.equal(out.includes('\x07'), false, 'no OSC terminator reaches stdout');
+  assert.match(out, /Why\?/);
+});

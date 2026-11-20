@@ -994,10 +994,13 @@ export class AskPanel implements Component {
     if (question === undefined) return [];
     const lines: string[] = [];
     const budget = maxLines === undefined ? Number.POSITIVE_INFINITY : Math.max(3, Math.floor(maxLines));
-    const head = `ask ${this.state.askId} · question ${this.state.index + 1}/${this.state.questions.length}`;
+    // Host-provided text goes through stripControls like renderAsk does: an
+    // escape or OSC byte in an id, question or label must never reach stdout.
+    const head = `ask ${stripControls(this.state.askId, '\n\t')} · question ${this.state.index + 1}/${this.state.questions.length}`;
     lines.push(...wrapPlain(this.theme.bold(head), w));
     const multi = question.multiSelect === true ? this.theme.dim(' (multi-select: space toggles)') : '';
-    lines.push(...wrapPlain(`[${question.id}] ${question.question}${multi}`, w));
+    const label = stripControls(question.question, '\n\t');
+    lines.push(...wrapPlain(`[${stripControls(question.id, '\n\t')}] ${label}${multi}`, w));
     // Typing mode: the editor owns input below, so the panel shrinks to the
     // question header — no rows, nothing that still looks navigable.
     if (this.state.typing) {
@@ -1017,7 +1020,7 @@ export class AskPanel implements Component {
         const box = question.multiSelect === true
           ? (this.state.picks.includes(row.index) ? '●' : '○')
           : (cursor ? '●' : '○');
-        text = `${box} ${row.index + 1}. ${question.options?.[row.index]?.label ?? ''}`;
+        text = `${box} ${row.index + 1}. ${stripControls(question.options?.[row.index]?.label ?? '', '\n\t')}`;
       } else if (row.kind === 'other') {
         text = '○ Other (type your own)';
       } else if (row.kind === 'skip') {
@@ -1046,7 +1049,8 @@ export class AskPanel implements Component {
     const start = Math.max(0, Math.min(cursorLine, flat.length - available));
     const window = flat.slice(start, start + available);
     const hidden = flat.length - window.length;
-    return [...lines, ...window, this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), ...helpLines];
+    const more = this.theme.dim(`… ${hidden} more (move the cursor to scroll)`);
+    return [...lines, ...window, ...wrapPlain(more, w).map((piece) => clipStyled(piece, w)), ...helpLines];
   }
 }
 
@@ -1207,6 +1211,10 @@ export interface StartTuiOptions {
   readonly basePath?: string;
   /** Terminal override for tests; defaults to this process's stdin/stdout. */
   readonly terminal?: Terminal;
+  /** Status-line override for tests, so hints can be asserted directly. */
+  readonly statusLine?: StatusLine;
+  /** Transient-hint duration override for tests; defaults to the Ctrl+C window. */
+  readonly hintWindowMs?: number;
 }
 
 /**
@@ -1222,7 +1230,7 @@ export function startTui(options: StartTuiOptions): Surface {
   const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
   const theme = themeFor();
   const transcript = new TranscriptView({ theme });
-  const status = new StatusLine(theme);
+  const status = options.statusLine ?? new StatusLine(theme);
   const editor = new Editor(tui, editorTheme(theme));
   const shell = new Shell(terminal, transcript, editor, status, options.width ?? 80);
   const basePath = options.basePath ?? process.cwd();
@@ -1361,15 +1369,13 @@ export function startTui(options: StartTuiOptions): Surface {
       // "2" or "-" typed as free text would be parsed as a pick: refuse it,
       // keep the editor text and tell the operator why nothing happened.
       if (readsAsPick(text.trim())) {
-        status.setHint(PICK_TEXT_HINT);
-        tui.requestRender();
+        showTransientHint(PICK_TEXT_HINT);
         return;
       }
       // A "token=" part would make the plugin parse the line as an unknown
       // question id and refuse it wholesale: refuse it here instead.
       if (containsAssignment(text.trim())) {
-        status.setHint('answers cannot contain "token=" parts; type the value only');
-        tui.requestRender();
+        showTransientHint('answers cannot contain "token=" parts; type the value only');
         return;
       }
       const next = commitTyping(panel.state, text);
@@ -1411,16 +1417,18 @@ export function startTui(options: StartTuiOptions): Surface {
       tui.requestRender();
     }
   };
-  const showHint = (): void => {
+  /** Sets a transient hint with the same timeout + auto-clear as Ctrl+C's. */
+  const showTransientHint = (text: string): void => {
     if (hintTimer !== undefined) clearTimeout(hintTimer);
-    status.setHint(CTRL_C_HINT);
+    status.setHint(text);
     tui.requestRender();
     hintTimer = setTimeout(() => {
       hintTimer = undefined;
       status.setHint(undefined);
       tui.requestRender();
-    }, CTRL_C_WINDOW_MS);
+    }, options.hintWindowMs ?? CTRL_C_WINDOW_MS);
   };
+  const showHint = (): void => showTransientHint(CTRL_C_HINT);
 
   tui.addChild(shell);
   tui.setFocus(editor);
@@ -1471,15 +1479,18 @@ export function startTui(options: StartTuiOptions): Surface {
       return { consume: true };
     }
     // Esc in the editor's typing mode returns to the rows, not /cancel.
-    if (shell.panel !== undefined && typingQid !== undefined && matchesKey(data, 'escape')) {
-      const panel = shell.panel;
-      typingQid = undefined;
-      typingDrafts.delete(panel.state.askId);
-      panel.set({ ...panel.state, typing: false });
-      editor.setText('');
-      tui.setFocus(panel);
-      tui.requestRender();
-      return { consume: true };
+    if (shell.panel !== undefined && typingQid !== undefined) {
+      if (!matchesKey(data, 'escape') && !matchesKey(data, 'enter')) clearHint(); // other keys retire a hint
+      if (matchesKey(data, 'escape')) {
+        const panel = shell.panel;
+        typingQid = undefined;
+        typingDrafts.delete(panel.state.askId);
+        panel.set({ ...panel.state, typing: false });
+        editor.setText('');
+        tui.setFocus(panel);
+        tui.requestRender();
+        return { consume: true };
+      }
     }
     const action = keyAction(data, editor.getText() === '');
     if (action === undefined) {
