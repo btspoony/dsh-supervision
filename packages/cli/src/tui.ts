@@ -1041,40 +1041,32 @@ export class AskPanel implements Component {
     if (lines.length + flat.length + helpLines.length <= budget) {
       return [...lines, ...flat, ...helpLines];
     }
-    // Windowing, in two straight steps. The marker text depends on the hidden
-    // count and the hidden count depends on the marker's own wrapped size, so
-    // the marker slot converges in a small loop; nothing is trimmed afterwards.
-    const fixed = lines.length + helpLines.length;
+    // Window the rows so the cursor's line is always on screen. Every wrapped
+    // chunk — window, marker, help — counts toward the budget, so the returned
+    // rows never exceed maxLines even when the marker itself wraps.
+    let available = Math.max(1, budget - lines.length - helpLines.length - 1);
     let cursorLine = 0;
     for (const row of rowLines) {
       if (row.cursor) break;
       cursorLine += row.text.length;
     }
-    let markerSlot = 1;
-    let win = 1;
-    let start = 0;
-    let hidden = flat.length;
-    let markerLines: string[] = [];
-    let header = lines;
-    let helpOut = helpLines;
-    for (let pass = 0; pass < 3; pass += 1) {
-      win = Math.max(1, budget - fixed - markerSlot);
-      // Cursor-centred window: the cursor row is always inside [start, start+win).
-      start = Math.max(0, Math.min(cursorLine - Math.floor((win - 1) / 2), Math.max(0, flat.length - win)));
-      hidden = flat.length - win;
+    let start = Math.max(0, Math.min(cursorLine, flat.length - available));
+    let window = flat.slice(start, start + available);
+    // The marker's own wrap may exceed its reserved slot: shrink the window
+    // once and recompute, so the returned rows stay within maxLines.
+    let hidden = flat.length - window.length;
+    let markerLines = wrapPlain(this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), w).map((piece) => clipStyled(piece, w));
+    if (markerLines.length > 1) {
+      window = window.slice(0, Math.max(0, window.length - (markerLines.length - 1)));
+      hidden = flat.length - window.length;
       markerLines = wrapPlain(this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), w).map((piece) => clipStyled(piece, w));
-      // On a very narrow terminal the fixed chrome alone can overflow: trim
-      // help first, then the question line, keeping the ask-number head row.
-      const chromeRoom = Math.max(1, budget - win - markerLines.length);
-      if (header.length + helpOut.length > chromeRoom) {
-        helpOut = helpLines.slice(0, Math.max(0, chromeRoom - Math.min(header.length, chromeRoom)));
-        header = lines.slice(0, Math.max(1, chromeRoom - helpOut.length));
-      }
-      if (markerLines.length === markerSlot) break;
-      markerSlot = markerLines.length;
     }
-    const window = flat.slice(start, start + win);
-    return [...header, ...window, ...markerLines, ...helpOut];
+    let result = [...lines, ...window, ...markerLines, ...helpLines];
+    if (result.length > budget) {
+      const excess = result.length - budget;
+      result = [...lines, ...window.slice(0, Math.max(0, window.length - excess)), ...markerLines, ...helpLines];
+    }
+    return result;
   }
 }
 

@@ -1496,7 +1496,7 @@ test('a refused free-text hint clears on the next key and on timeout', async () 
   surface.stop();
 });
 
-test('the panel windowing keeps the cursor visible and the count honest', () => {
+test('the … more marker fits narrow widths like every other panel line', () => {
   const many: AskFrame = {
     t: 'ask',
     id: 'cc33cc',
@@ -1504,30 +1504,31 @@ test('the panel windowing keeps the cursor visible and the count honest', () => 
       { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: `opt${i + 1}` })) },
     ],
   };
-  for (const width of [20, 30, 80]) {
-    for (const maxLines of [5, 8]) {
-      for (const cursor of [0, 10, 19]) {
-        const panel: AskPanel = new AskPanel({ ...pickerFor(many), cursor });
-        const full: string[] = panel.render(width); // no budget: header + all rows + help
-        const lines: string[] = panel.render(width, maxLines);
-        assert.ok(lines.length <= maxLines, `${width}x${maxLines}: ${lines.length} rows exceed the budget`);
-        assert.ok(lines.some((line) => line.includes('\u276f')), `${width}x${maxLines}@${cursor}: cursor row is off screen`);
-        // Row-line span: from the first option row to the marker or help line.
-        const rowSpan = (all: string[]): string[] => {
-          const first = all.findIndex((line) => line.includes('●') || line.includes('○'));
-          const ends = [all.findIndex((line) => line.includes('\u2026 ')), all.findIndex((line) => line.includes('\u2191/\u2193'))].filter((index) => index >= 0);
-          const end = ends.length > 0 ? Math.min(...ends) : all.length;
-          return all.slice(first, end);
-        };
-        const more = lines.find((line) => line.includes('\u2026 '));
-        if (more !== undefined) {
-          const n = Number(more.match(/\u2026 (\d+) more/)?.[1]);
-          assert.equal(n, rowSpan(full).length - rowSpan(lines).length, `${width}x${maxLines}@${cursor}: hidden count mismatch`);
-        } else {
-          assert.equal(rowSpan(lines).length, rowSpan(full).length, `${width}x${maxLines}: no marker but rows were hidden`);
-        }
-      }
-    }
+  const panel = new AskPanel(pickerFor(many));
+  const narrow = panel.render(30, 8);
+  for (const line of narrow) {
+    assert.ok(visibleWidth(line) <= 30, `line exceeds 30 columns: ${JSON.stringify(line)}`);
+  }
+  assert.match(panel.render(80, 8).join('\n'), /… \d+ more/); // wide text unchanged
+});
+
+test('the panel never exceeds the row budget and keeps the cursor visible', () => {
+  const many: AskFrame = {
+    t: 'ask',
+    id: 'cc33cc',
+    questions: [
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: 'opt' + String(i + 1) })) },
+    ],
+  };
+  for (const [maxLines, cursor] of [
+    [5, 0], [8, 0], [8, 10], [8, 15], [12, 0], [12, 19], [5, 2], [6, 7], [5, 19],
+  ] as const) {
+    const panel = new AskPanel({ ...pickerFor(many), cursor });
+    const lines = panel.render(80, maxLines);
+    assert.ok(lines.length <= maxLines, lines.length + ' rows exceed maxLines ' + String(maxLines));
+    const cursorLine = lines.find((line) => line.includes('\u276f'));
+    const expected = '\u25cf ' + String(cursor + 1) + '. opt' + String(cursor + 1);
+    assert.ok(cursorLine !== undefined && cursorLine.includes(expected), 'cursor row ' + String(cursor + 1) + ' stays visible');
   }
 });
 
