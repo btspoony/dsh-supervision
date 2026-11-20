@@ -1490,20 +1490,54 @@ test('a refused free-text hint clears on the next key and on timeout', async () 
   surface.stop();
 });
 
-test('the … more marker fits narrow widths like every other panel line', () => {
+test('the panel windowing keeps the cursor visible and the count honest', () => {
   const many: AskFrame = {
     t: 'ask',
     id: 'cc33cc',
     questions: [
-      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: `opt${i + 1}` })) },
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: 'opt' + String(i + 1) })) },
     ],
   };
-  const panel = new AskPanel(pickerFor(many));
-  const narrow = panel.render(30, 8);
-  for (const line of narrow) {
-    assert.ok(visibleWidth(line) <= 30, `line exceeds 30 columns: ${JSON.stringify(line)}`);
+  for (const width of [20, 30, 80]) {
+    for (const maxLines of [5, 8]) {
+      for (const cursor of [0, 10, 19]) {
+        const panel: AskPanel = new AskPanel({ ...pickerFor(many), cursor });
+        const lines: string[] = panel.render(width, maxLines);
+        assert.ok(lines.length <= maxLines, width + 'x' + maxLines + ': ' + lines.length + ' rows exceed the budget');
+        assert.ok(lines.some((line) => line.includes('Pick one')), width + 'x' + maxLines + '@' + cursor + ': question text dropped');
+        assert.ok(lines.some((line) => line.includes('\u276f')), width + 'x' + maxLines + '@' + cursor + ': cursor row is off screen');
+        const more = lines.find((line) => line.includes('\u2026 '));
+        if (more !== undefined) {
+          const n = Number(more.match(/\u2026 (\d+) more/)?.[1]);
+          const rowSpan = (all: string[]): string[] => {
+            const first = all.findIndex((line) => line.includes('●') || line.includes('○'));
+            const ends = [all.findIndex((line) => line.includes('\u2026 ')), all.findIndex((line) => line.includes('\u2191/\u2193'))].filter((index) => index >= 0);
+            const end = ends.length > 0 ? Math.min(...ends) : all.length;
+            return all.slice(first, end);
+          };
+          assert.equal(n, rowSpan(panel.render(width)).length - rowSpan(lines).length, width + 'x' + maxLines + '@' + cursor + ': hidden count mismatch');
+        } // no marker: the budget went to the question and one window row (allowed)
+      }
+    }
   }
-  assert.match(panel.render(80, 8).join('\n'), /… \d+ more/); // wide text unchanged
+});
+
+test('a long question wraps but is never truncated away', () => {
+  const words = Array.from({ length: 60 }, (_, i) => 'word' + String(i + 1));
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'dd44dd',
+    questions: [
+      { id: 'story', question: words.join(' '), options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const panel = new AskPanel(pickerFor(ask));
+  const lines = panel.render(80, 8);
+  const text = lines.join('\n');
+  assert.ok(text.includes('word1 '), 'the first question line survives');
+  assert.ok(text.includes('word60'), 'the last question line survives');
+  assert.ok(lines.some((line) => line.includes('\u276f')), 'cursor row still visible');
+  assert.ok(lines.length <= 8, lines.length + ' rows exceed maxLines 8');
 });
 
 test('panel rendering strips control bytes from host-provided text', () => {

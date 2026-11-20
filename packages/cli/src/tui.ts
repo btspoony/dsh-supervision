@@ -1038,22 +1038,41 @@ export class AskPanel implements Component {
     if (lines.length + flat.length + helpLines.length <= budget) {
       return [...lines, ...flat, ...helpLines];
     }
-    // Window the rows so the cursor's line is always on screen; one marker line
-    // counts what the remaining scroll would reveal.
-    const available = Math.max(1, budget - lines.length - helpLines.length - 1);
+    // Window around the cursor so its line is always inside the window, then
+    // trim the assembled lines down to the budget in one pass: help goes
+    // first, then the marker, then the window end farthest from the cursor.
+    // The head's first row, the question's first row and the cursor row are
+    // the minimum a useful panel shows; a budget below three rows still
+    // returns exactly those three, and Shell clamps transcript.height.
     let cursorLine = 0;
     for (const row of rowLines) {
       if (row.cursor) break;
       cursorLine += row.text.length;
     }
-    const start = Math.max(0, Math.min(cursorLine, flat.length - available));
-    const window = flat.slice(start, start + available);
+    const winSize = Math.max(1, budget - lines.length - helpLines.length - 1);
+    const start = Math.max(0, Math.min(cursorLine - Math.floor((winSize - 1) / 2), Math.max(0, flat.length - winSize)));
+    const window = flat.slice(start, start + winSize);
     const hidden = flat.length - window.length;
-    const more = this.theme.dim(`… ${hidden} more (move the cursor to scroll)`);
-    return [...lines, ...window, ...wrapPlain(more, w).map((piece) => clipStyled(piece, w)), ...helpLines];
+    const marker = hidden > 0
+      ? wrapPlain(this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), w).map((piece) => clipStyled(piece, w))
+      : [];
+    const helpOut = [...helpLines];
+    const cursorInOut = lines.length + Math.max(0, cursorLine - start);
+    const out = [...lines, ...window, ...marker, ...helpOut];
+    while (out.length > Math.max(3, budget)) {
+      if (helpOut.length > 0) helpOut.pop();
+      else if (marker.length > 0) marker.pop();
+      else {
+        const tail = out.length - 1;
+        const head = lines.length;
+        const index = tail > cursorInOut ? tail : head;
+        if (index === cursorInOut) break;
+        out.splice(index, 1);
+      }
+    }
+    return out;
   }
 }
-
 /**
  * The panel's key reducer: one raw input sequence against the picker state.
  * Ctrl+C/Ctrl+D/PageUp/PageDown never reach this — the surface keeps them.
