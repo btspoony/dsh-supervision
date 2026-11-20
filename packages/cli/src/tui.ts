@@ -31,6 +31,19 @@ import {
   type Terminal,
 } from '@earendil-works/pi-tui';
 import {
+  answerSpec,
+  commitTyping,
+  moveCursor,
+  pickerFor,
+  pickRow,
+  rowsOf,
+  skipAll,
+  toggleMulti,
+  readsAsPick,
+  containsAssignment,
+  type AskPickerState,
+} from './ask-picker.js';
+import {
   isProgramState,
   renderAsk,
   stripControls,
@@ -960,13 +973,158 @@ function append(into: string[], lines: readonly string[]): void {
   for (const line of lines) into.push(line);
 }
 
-/** Transcript, editor and status stacked into exactly the terminal's rows. */
+/**
+ * The terminal ask panel: the current question's rows drawn in the editor's
+ * place while an ask is open. Rendering only — the key reducer is
+ * `panelKey`, so the whole interaction is testable without a terminal.
+ */
+export class AskPanel implements Component {
+  constructor(public state: AskPickerState, private readonly theme: Theme = PLAIN) {}
+
+  /** Replaces the state after one key; the panel never mutates in place. */
+  set(state: AskPickerState): void {
+    this.state = state;
+  }
+
+  invalidate(): void {}
+
+  render(width: number, maxLines?: number): string[] {
+    const w = Math.max(1, Math.floor(width));
+    const question = this.state.questions[this.state.index];
+    if (question === undefined) return [];
+    const lines: string[] = [];
+    const budget = maxLines === undefined ? Number.POSITIVE_INFINITY : Math.max(3, Math.floor(maxLines));
+    // Host-provided text goes through stripControls like renderAsk does: an
+    // escape or OSC byte in an id, question or label must never reach stdout.
+    const head = `ask ${stripControls(this.state.askId, '\n\t')} · question ${this.state.index + 1}/${this.state.questions.length}`;
+    lines.push(...wrapPlain(this.theme.bold(head), w));
+    const multi = question.multiSelect === true ? this.theme.dim(' (multi-select: space toggles)') : '';
+    const label = stripControls(question.question, '\n\t');
+    lines.push(...wrapPlain(`[${stripControls(question.id, '\n\t')}] ${label}${multi}`, w));
+    // Typing mode: the editor owns input below, so the panel shrinks to the
+    // question header — no rows, nothing that still looks navigable.
+    if (this.state.typing) {
+      const hint = this.theme.dim('type your answer, Enter submits, Esc goes back');
+      return [...lines, ...wrapPlain(hint, w).map((piece) => clipStyled(piece, w))];
+    }
+    const help = this.theme.dim('↑/↓ move · enter pick · 1-9 pick · space toggle · esc skip all');
+    const helpLines = wrapPlain(help, w).map((piece) => clipStyled(piece, w));
+    // Row lines stay separate so the window can be cut around the cursor: the
+    // cursor row must stay visible even in a list far longer than the budget.
+    const rowLines: { readonly text: readonly string[]; readonly cursor: boolean }[] = [];
+    for (const [rowIndex, row] of rowsOf(this.state).entries()) {
+      const cursor = rowIndex === this.state.cursor;
+      const mark = cursor ? '❯' : ' ';
+      let text: string;
+      if (row.kind === 'option') {
+        const box = question.multiSelect === true
+          ? (this.state.picks.includes(row.index) ? '●' : '○')
+          : (cursor ? '●' : '○');
+        text = `${box} ${row.index + 1}. ${stripControls(question.options?.[row.index]?.label ?? '', '\n\t')}`;
+      } else if (row.kind === 'other') {
+        text = '○ Other (type your own)';
+      } else if (row.kind === 'skip') {
+        text = '○ Skip (answer -)';
+      } else {
+        text = '○ Done';
+      }
+      const line = `${mark} ${text}`;
+      rowLines.push({
+        text: wrapPlain(cursor ? this.theme.bold(line) : line, w).map((piece) => clipStyled(piece, w)),
+        cursor,
+      });
+    }
+    const flat = rowLines.flatMap((row) => row.text);
+    if (lines.length + flat.length + helpLines.length <= budget) {
+      return [...lines, ...flat, ...helpLines];
+    }
+    // Window around the cursor so its line is always inside the window, then
+    // trim the assembled lines down to the budget in one pass: help goes
+    // first, then the marker, then the window end farthest from the cursor.
+    // The head's first row, the question's first row and the cursor row are
+    // the minimum a useful panel shows; a budget below three rows still
+    // returns exactly those three, and Shell clamps transcript.height.
+    let cursorLine = 0;
+    for (const row of rowLines) {
+      if (row.cursor) break;
+      cursorLine += row.text.length;
+    }
+    const winSize = Math.max(1, budget - lines.length - helpLines.length - 1);
+    const start = Math.max(0, Math.min(cursorLine - Math.floor((winSize - 1) / 2), Math.max(0, flat.length - winSize)));
+    const window = flat.slice(start, start + winSize);
+    const hidden = flat.length - window.length;
+    const marker = hidden > 0
+      ? wrapPlain(this.theme.dim(`… ${hidden} more (move the cursor to scroll)`), w).map((piece) => clipStyled(piece, w))
+      : [];
+    const helpOut = [...helpLines];
+    const cursorInOut = lines.length + Math.max(0, cursorLine - start);
+    const out = [...lines, ...window, ...marker, ...helpOut];
+    while (out.length > Math.max(3, budget)) {
+      if (helpOut.length > 0) helpOut.pop();
+      else if (marker.length > 0) marker.pop();
+      else {
+        const tail = out.length - 1;
+        const head = lines.length;
+        const index = tail > cursorInOut ? tail : head;
+        if (index === cursorInOut) break;
+        out.splice(index, 1);
+      }
+    }
+    return out;
+  }
+}
+/**
+ * The panel's key reducer: one raw input sequence against the picker state.
+ * Ctrl+C/Ctrl+D/PageUp/PageDown never reach this — the surface keeps them.
+ * @returns the next state, or `{ line }` once the whole ask is answered
+ *   (every question picked, or Esc skipping the rest).
+ */
+export function panelKey(
+  state: AskPickerState,
+  data: string,
+): { readonly state: AskPickerState } | { readonly line: string } {
+  // A Kitty terminal reports press, repeat and release for the same key; a
+  // release must never act, or one Enter would pick twice.
+  if (isKeyRelease(data)) return { state };
+  const action = keyAction(data, true);
+  if (action?.kind === 'escape') return { line: answerSpec(skipAll(state))! };
+  if (action?.kind === 'line') return { state: moveCursor(state, action.delta) };
+  if (matchesKey(data, 'enter')) return actOnRow(state, state.cursor);
+  if (matchesKey(data, 'space')) {
+    const question = state.questions[state.index];
+    return question?.multiSelect === true ? { state: toggleMulti(state) } : { state };
+  }
+  if (/^[1-9]$/.test(data)) {
+    const question = state.questions[state.index];
+    const option = Number(data) - 1;
+    if (question === undefined || option >= (question.options ?? []).length) return { state };
+    return actOnRow(state, option);
+  }
+  if (data === 'j') return { state: moveCursor(state, 1) };
+  if (data === 'k') return { state: moveCursor(state, -1) };
+  return { state };
+}
+
+/** Acts on one row and emits the finished line when the ask is complete. */
+function actOnRow(
+  state: AskPickerState,
+  rowIndex: number,
+): { readonly state: AskPickerState } | { readonly line: string } {
+  const next = pickRow(state, rowIndex);
+  if (next.typing) return { state: next };
+  const line = answerSpec(next);
+  return line !== undefined ? { line } : { state: next };
+}
+
+/** Transcript, editor (or ask panel) and status stacked into the terminal's rows. */
 export class Shell implements Component {
   private readonly terminal: Terminal;
   private readonly transcript: TranscriptView;
   private readonly editor: Editor;
   private readonly status: StatusLine;
   private readonly fallbackWidth: number;
+  /** While set, the ask panel takes the editor's rows; undefined restores it. */
+  panel: AskPanel | undefined;
 
   constructor(
     terminal: Terminal,
@@ -986,8 +1144,16 @@ export class Shell implements Component {
     // A narrow terminal must render narrow: widening here would put lines wider
     // than the viewport on screen. Every component truncates to what it gets.
     const w = Math.max(1, Math.floor(width) || this.fallbackWidth || 80);
-    const editorLines = this.editor.render(w);
     const rows = Math.max(3, this.terminal.rows || 24);
+    let editorLines: string[];
+    if (this.panel === undefined) {
+      editorLines = this.editor.render(w);
+    } else if (this.panel.state.typing) {
+      // Typing mode: the question header above, the real editor below it.
+      editorLines = [...this.panel.render(w), ...this.editor.render(w)];
+    } else {
+      editorLines = this.panel.render(w, Math.max(4, rows - 2));
+    }
     this.transcript.height = Math.max(0, rows - editorLines.length - 1);
     return [...this.transcript.render(w), ...editorLines, this.status.render(w)];
   }
@@ -995,6 +1161,7 @@ export class Shell implements Component {
   invalidate(): void {
     this.transcript.invalidate();
     this.editor.invalidate();
+    this.panel?.invalidate();
   }
 }
 
@@ -1061,6 +1228,12 @@ export interface StartTuiOptions {
   readonly width?: number;
   /** Directory `@file` completion resolves against: the session's cwd. */
   readonly basePath?: string;
+  /** Terminal override for tests; defaults to this process's stdin/stdout. */
+  readonly terminal?: Terminal;
+  /** Status-line override for tests, so hints can be asserted directly. */
+  readonly statusLine?: StatusLine;
+  /** Transient-hint duration override for tests; defaults to the Ctrl+C window. */
+  readonly hintWindowMs?: number;
 }
 
 /**
@@ -1069,14 +1242,14 @@ export interface StartTuiOptions {
  * @returns the sink to push frames into; `stop()` restores the terminal.
  */
 export function startTui(options: StartTuiOptions): Surface {
-  const terminal = new ProcessTerminal();
+  const terminal = options.terminal ?? new ProcessTerminal();
   // Full-screen (alternate screen): the transcript viewport replaces terminal
   // scrollback while attached. Mouse capture stays off — the plan has no mouse
   // support, and leaving it on would steal the terminal's own selection.
   const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
   const theme = themeFor();
   const transcript = new TranscriptView({ theme });
-  const status = new StatusLine(theme);
+  const status = options.statusLine ?? new StatusLine(theme);
   const editor = new Editor(tui, editorTheme(theme));
   const shell = new Shell(terminal, transcript, editor, status, options.width ?? 80);
   const basePath = options.basePath ?? process.cwd();
@@ -1090,7 +1263,154 @@ export function startTui(options: StartTuiOptions): Surface {
   /** The ask cards this surface has not yet been told are closed. */
   const openAsks = new Map<string, AskFrame>();
 
+  /**
+   * While set, the editor is answering the panel's "Other" row for this
+   * question id; the next submit records it as custom text. Empty submit
+   * returns to the rows.
+   */
+  let typingQid: string | undefined;
+  /** The steer draft the editor held before the panel took its rows. */
+  let steerDraft = '';
+  /** True while the panel (rows or typing) owns the editor's place. */
+  let panelActive = false;
+  /** Per-ask picker state, so a second open ask never discards progress. */
+  const panelStates = new Map<string, AskPickerState>();
+  /** Per-ask half-typed "Other" text, kept while the ask is open. */
+  const typingDrafts = new Map<string, string>();
+
+  /** Shown when typed text would be parsed as a pick instead of a value. */
+  const PICK_TEXT_HINT = 'that text would be read as a pick; add a word to keep it literal';
+
+  /** Drops the panel and hands the editor its rows back, draft restored. */
+  const closePanel = (): void => {
+    if (shell.panel === undefined && typingQid === undefined) return;
+    const askId = shell.panel?.state.askId;
+    if (askId !== undefined) {
+      panelStates.delete(askId);
+      typingDrafts.delete(askId);
+    }
+    shell.panel = undefined;
+    typingQid = undefined;
+    panelActive = false;
+    editor.setText(steerDraft);
+    steerDraft = '';
+    tui.setFocus(editor);
+  };
+
+  /** Shows the panel for one open ask, entering typing mode when it must. */
+  const openPanel = (
+    frame: Extract<AskFrame, { readonly questions: readonly unknown[] }>,
+    opts: { readonly stashCurrent?: boolean } = {},
+  ): void => {
+    // Only the first panel steals the steer draft; a switch between panels
+    // (or a reopen after a closed frame) must leave it alone.
+    if (!panelActive) steerDraft = editor.getText();
+    else if (opts.stashCurrent !== false) stashPanelState();
+    panelActive = true;
+    const state = panelStates.get(frame.id) ?? pickerFor(frame);
+    const panel = new AskPanel(state, theme);
+    shell.panel = panel;
+    typingQid = state.typing ? state.questions[state.index]?.id : undefined;
+    if (typingQid !== undefined) {
+      editor.setText(typingDrafts.get(frame.id) ?? '');
+      tui.setFocus(editor);
+    } else {
+      tui.setFocus(panel);
+    }
+  };
+
+  /** Saves the visible ask's progress and any half-typed custom text. */
+  const stashPanelState = (): void => {
+    const panel = shell.panel;
+    if (panel === undefined) return;
+    panelStates.set(panel.state.askId, panel.state);
+    if (typingQid !== undefined) typingDrafts.set(panel.state.askId, editor.getText());
+  };
+
+  /**
+   * The one transition onto a new picker state: typing questions take the
+   * editor, everything else goes back to the panel's rows. Both key results
+   * and editor submits land here, so focus can never disagree with typingQid.
+   */
+  const adoptNextState = (panel: AskPanel, next: AskPickerState): void => {
+    panel.set(next);
+    if (next.typing) {
+      typingQid = next.questions[next.index]?.id;
+      editor.setText('');
+      tui.setFocus(editor);
+    } else {
+      typingQid = undefined;
+      tui.setFocus(panel);
+    }
+  };
+
+  /**
+   * One ask is answered: retire it and put the newest remaining open ask on
+   * the panel (its own progress), or close the panel when nothing is left.
+   * A later `closed` frame for the finished id then matches no panel and is a
+   * no-op.
+   */
+  const finishAsk = (askId: string): void => {
+    openAsks.delete(askId);
+    panelStates.delete(askId);
+    typingDrafts.delete(askId);
+    const remaining = [...openAsks.values()].filter((open) => !('closed' in open));
+    const next = remaining[remaining.length - 1];
+    if (next !== undefined && !('closed' in next)) openPanel(next, { stashCurrent: false });
+    else closePanel();
+  };
+
+  /** Applies one panelKey result: send the line when the ask is finished. */
+  const applyPanelKey = (result: { readonly state: AskPickerState } | { readonly line: string }): void => {
+    if ('line' in result) {
+      options.sendLine(result.line);
+      finishAsk(shell.panel?.state.askId ?? '');
+      return;
+    }
+    const panel = shell.panel;
+    if (panel === undefined) return;
+    adoptNextState(panel, result.state);
+  };
+
   editor.onSubmit = (text: string): void => {
+    if (shell.panel !== undefined && typingQid !== undefined) {
+      const panel = shell.panel;
+      if (text.trim() === '') {
+        // An empty submit returns to the rows instead of answering.
+        typingQid = undefined;
+        typingDrafts.delete(panel.state.askId);
+        panel.set({ ...panel.state, typing: false });
+        editor.setText('');
+        tui.setFocus(panel);
+        tui.requestRender();
+        return;
+      }
+      // "2" or "-" typed as free text would be parsed as a pick: refuse it,
+      // keep the editor text and tell the operator why nothing happened.
+      if (readsAsPick(text.trim())) {
+        showTransientHint(PICK_TEXT_HINT);
+        return;
+      }
+      // A "token=" part would make the plugin parse the line as an unknown
+      // question id and refuse it wholesale: refuse it here instead.
+      if (containsAssignment(text.trim())) {
+        showTransientHint('answers cannot contain "token=" parts; type the value only');
+        return;
+      }
+      const next = commitTyping(panel.state, text);
+      const line = answerSpec(next);
+      editor.setText('');
+      typingDrafts.delete(panel.state.askId);
+      if (line !== undefined) {
+        options.sendLine(line);
+        finishAsk(panel.state.askId);
+      } else {
+        // The next question may need typed input or may offer rows again.
+        adoptNextState(panel, next);
+      }
+      tui.requestRender();
+      return;
+    }
     if (text.trim() === '') return;
     options.sendLine(answerLine(text, openAsks));
   };
@@ -1116,16 +1436,18 @@ export function startTui(options: StartTuiOptions): Surface {
       tui.requestRender();
     }
   };
-  const showHint = (): void => {
+  /** Sets a transient hint with the same timeout + auto-clear as Ctrl+C's. */
+  const showTransientHint = (text: string): void => {
     if (hintTimer !== undefined) clearTimeout(hintTimer);
-    status.setHint(CTRL_C_HINT);
+    status.setHint(text);
     tui.requestRender();
     hintTimer = setTimeout(() => {
       hintTimer = undefined;
       status.setHint(undefined);
       tui.requestRender();
-    }, CTRL_C_WINDOW_MS);
+    }, options.hintWindowMs ?? CTRL_C_WINDOW_MS);
   };
+  const showHint = (): void => showTransientHint(CTRL_C_HINT);
 
   tui.addChild(shell);
   tui.setFocus(editor);
@@ -1152,6 +1474,43 @@ export function startTui(options: StartTuiOptions): Surface {
   };
 
   tui.addInputListener((data: string) => {
+    // The panel owns the keys while its rows are up: only Ctrl+C, Ctrl+D and
+    // transcript scrolling keep their surface meaning (constraint 6).
+    if (shell.panel !== undefined && typingQid === undefined) {
+      const passthrough = keyAction(data, false);
+      if (
+        passthrough !== undefined &&
+        (passthrough.kind === 'ctrl-c' || passthrough.kind === 'exit' || passthrough.kind === 'page')
+      ) {
+        if (passthrough.kind !== 'ctrl-c') clearHint();
+        const outcome = surfaceKey(
+          passthrough,
+          memory,
+          { editorEmpty: true, menuOpen: false, now: Date.now() },
+          effects,
+        );
+        memory = outcome.memory;
+        if (outcome.consumed) tui.requestRender();
+        return { consume: true };
+      }
+      applyPanelKey(panelKey(shell.panel.state, data));
+      tui.requestRender();
+      return { consume: true };
+    }
+    // Esc in the editor's typing mode returns to the rows, not /cancel.
+    if (shell.panel !== undefined && typingQid !== undefined) {
+      if (!matchesKey(data, 'escape') && !matchesKey(data, 'enter')) clearHint(); // other keys retire a hint
+      if (matchesKey(data, 'escape')) {
+        const panel = shell.panel;
+        typingQid = undefined;
+        typingDrafts.delete(panel.state.askId);
+        panel.set({ ...panel.state, typing: false });
+        editor.setText('');
+        tui.setFocus(panel);
+        tui.requestRender();
+        return { consume: true };
+      }
+    }
     const action = keyAction(data, editor.getText() === '');
     if (action === undefined) {
       // A printable key or a release: the hint no longer applies.
@@ -1199,8 +1558,32 @@ export function startTui(options: StartTuiOptions): Surface {
     setAsk: (frame: AskFrame): void => {
       // The closed frame carries no questions: a card that is over can only be
       // retired, and keeping it would let a stale id absorb a later bare answer.
-      if ('closed' in frame) openAsks.delete(frame.id);
-      else openAsks.set(frame.id, frame);
+      if ('closed' in frame) {
+        openAsks.delete(frame.id);
+        // A closed ask must not resurrect its progress if the id is reused.
+        panelStates.delete(frame.id);
+        typingDrafts.delete(frame.id);
+        if (shell.panel !== undefined && shell.panel.state.askId === frame.id) {
+          // Detach the closing panel first: openPanel below must not stash the
+          // just-deleted state back, nor touch the editor or the steer draft.
+          shell.panel = undefined;
+          typingQid = undefined;
+          // Another still-open ask takes the panel back, progress intact.
+          const remaining = [...openAsks.values()].filter((open) => !('closed' in open));
+          const next = remaining[remaining.length - 1];
+          if (next !== undefined && !('closed' in next)) openPanel(next);
+          else {
+            panelActive = false;
+            editor.setText(steerDraft);
+            steerDraft = '';
+            tui.setFocus(editor);
+          }
+        }
+      } else {
+        openAsks.set(frame.id, frame);
+        // The newest open ask is the one the panel picks up.
+        openPanel(frame);
+      }
       transcript.push(renderAsk(frame));
       tui.requestRender();
     },

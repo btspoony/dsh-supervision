@@ -193,14 +193,27 @@ every question of the ask by its id:
 One token per question: `q1=2` picks option 2, `q1=1,3` selects both, `q1=-`
 skips it, and any other value is free text — the words after the first token join
 it, so `q1=two words` is one custom answer. With a single question the id may be
-omitted and the rest of the line is the value (`/answer 3f9ac1 我的 想法`). The
-full-screen surface prints the same card and, while exactly one ask is open,
-rewrites a bare `2` (or `-`, or `1,3`) to `/answer <id> 2`; a multi-question ask
-then answers with the plugin's answer-grammar error line instead of steering the
-agent, and anything else is still an ordinary steer. From a
-herdr-core HUD the same line needs no attach:
-`hc send <terminal> "/answer <id> 2"`. An asker that withdraws, or a bridge that
-goes away, skips every question and closes the card.
+omitted and the rest of the line is the value (`/answer 3f9ac1 我的 想法`). In
+the full-screen surface you do not type that line: the open ask is picked with
+the keyboard (see below), and free text goes through the `Other` row — text
+that reads like an option number (`2`, `1,3`, `-`) or carries a `token=`
+part is refused with a hint instead of being sent. The typed `/answer` line
+still works over the wire and from a herdr-core HUD
+(`hc send <terminal> "/answer <id> 2"`), and in line mode (`--no-tui`, or a
+non-TTY stdout) it is the only path; the full-screen surface itself is
+keyboard-driven, as described below. From a herdr-core HUD the same line needs no
+attach: `hc send <terminal> "/answer <id> 2"`. An asker that withdraws, or a
+bridge that goes away, skips every question and closes the card.
+
+In the full-screen surface an open ask replaces the editor with a picker: one
+question at a time, `↑`/`↓` (or `j`/`k`) move, `Enter` picks,
+`1`–`9` pick directly, `Space` toggles a multi-select option and `Enter`
+on its `Done` row advances it. `Other (type your own)` hands the editor back
+prefilled for free text, `Skip` answers that question `-`, and `Esc` skips
+the whole ask. Answering the last question emits exactly one
+`/answer <ask> <qid>=<value> ...` line over the socket — the typed grammar
+above stays valid everywhere and remains the only path in line mode
+(`--no-tui`).
 
 ### Take back control
 

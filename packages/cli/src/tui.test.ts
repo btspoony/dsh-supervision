@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { CombinedAutocompleteProvider, Editor, TuiAltScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { PROTO, renderMirror, type AskFrame } from 'dsh-supervision-protocol';
+import { pickerFor } from './ask-picker.js';
 import { routeFrame } from './route.js';
 import { PLAIN, createTheme } from './theme.js';
 import {
@@ -47,6 +48,10 @@ import {
   fitLines,
   keyAction,
   maxTop,
+  panelKey,
+  AskPanel,
+  startTui,
+  type Surface,
   restoreOnExit,
   newMarker,
   scrollBy,
@@ -1062,4 +1067,493 @@ test('Ctrl+C clears typed text instead of touching the turn', () => {
   );
   assert.deepEqual(harness.log, ['clear', 'hint:off']);
   assert.equal(outcome.memory.lastCtrlC, undefined, 'clearing does not start the exit window');
+});
+
+// --- ask panel keys (panelKey / AskPanel) ---
+
+const TWO_Q_ASK: AskFrame = {
+  t: 'ask',
+  id: '84e11a',
+  questions: [
+    { id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] },
+    { id: 'scope', question: 'Which scope?', options: [{ label: 'a' }, { label: 'b' }] },
+  ],
+};
+
+const UP = '\x1b[A';
+const DOWN = '\x1b[B';
+const ENTER = '\r';
+
+function typeOf(result: ReturnType<typeof panelKey>): 'state' | 'line' {
+  return 'line' in result ? 'line' : 'state';
+}
+
+test('panelKey moves the cursor and commits a single-select on Enter', () => {
+  let state = pickerFor(TWO_Q_ASK);
+  state = (panelKey(state, DOWN) as { state: typeof state }).state;
+  const picked = panelKey(state, ENTER);
+  assert.equal(typeOf(picked), 'state');
+  const next = (picked as { state: typeof state }).state;
+  assert.equal(next.answers['db'], '2');
+  assert.equal(next.index, 1);
+});
+
+test('panelKey picks directly with 1-9 and emits one line when complete', () => {
+  let state = pickerFor(TWO_Q_ASK);
+  const first = panelKey(state, '2');
+  assert.equal(typeOf(first), 'state');
+  state = (first as { state: typeof state }).state;
+  const second = panelKey(state, '1');
+  assert.equal(typeOf(second), 'line');
+  assert.equal((second as { line: string }).line, '/answer 84e11a db=2 scope=1');
+});
+
+test('panelKey Esc skips the whole ask in one line', () => {
+  const result = panelKey(pickerFor(TWO_Q_ASK), '\x1b');
+  assert.equal(typeOf(result), 'line');
+  assert.equal((result as { line: string }).line, '/answer 84e11a db=- scope=-');
+});
+
+test('panelKey j/k wrap and space toggles only multi-select questions', () => {
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'ab12cd',
+    questions: [{ id: 'feat', question: 'Features?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  let state = pickerFor(ask);
+  state = (panelKey(state, 'j') as { state: typeof state }).state;
+  assert.equal(state.cursor, 1);
+  state = (panelKey(state, 'k') as { state: typeof state }).state;
+  state = (panelKey(state, 'k') as { state: typeof state }).state;
+  assert.equal(state.cursor, 4); // wrapped to the last row (done)
+  state = (panelKey(state, ' ') as { state: typeof state }).state;
+  assert.deepEqual(state.picks, []); // done row: toggle is a no-op
+  state = (panelKey(state, UP) as { state: typeof state }).state;
+  state = (panelKey(state, UP) as { state: typeof state }).state;
+  state = (panelKey(state, UP) as { state: typeof state }).state; // back to option 2
+  state = (panelKey(state, ' ') as { state: typeof state }).state;
+  assert.deepEqual(state.picks, [1]);
+});
+
+test('panelKey ignores unknown digits and out-of-range options', () => {
+  const state = pickerFor(TWO_Q_ASK);
+  const result = panelKey(state, '9');
+  assert.equal(typeOf(result), 'state');
+  assert.equal((result as { state: typeof state }).state, state); // same object: untouched
+});
+
+test('AskPanel renders rows for the current question with a help line', () => {
+  const panel = new AskPanel(pickerFor(TWO_Q_ASK));
+  const lines = panel.render(80).join('\n');
+  assert.match(lines, /● 1\. SQLite/);
+  assert.match(lines, /Other \(type your own\)/);
+  assert.match(lines, /Skip \(answer -\)/);
+  assert.match(lines, /esc skip all/);
+  panel.set({ ...panel.state, cursor: 1 });
+  assert.match(panel.render(80).join('\n'), /❯ ● 2\. Postgres/);
+});
+
+
+// --- panel lifecycle fixes driven through startTui with a feedable terminal ---
+
+interface FeedTerminal {
+  feed(data: string): void;
+  readonly writes: string[];
+}
+
+function makeFeedTerminal(): Terminal & FeedTerminal {
+  let input: ((data: string) => void) | undefined;
+  const writes: string[] = [];
+  const term = {
+    columns: 80,
+    rows: 24,
+    writes,
+    write: (data: string): void => { writes.push(data); },
+    start: (onData: (data: string) => void): void => { input = onData; },
+    stop: (): void => {},
+    hideCursor: (): void => {},
+    showCursor: (): void => {},
+    restoreOnExit: (): void => {},
+    setTitle: (): void => {},
+    feed: (data: string): void => { input?.(data); },
+  };
+  return term as unknown as Terminal & FeedTerminal;
+}
+
+function runSurface(term: Terminal & FeedTerminal, sent: string[]): Surface {
+  return startTui({ title: '', sendLine: (text) => sent.push(text), onExit: () => {}, terminal: term });
+}
+
+test('closing the panel restores the steer draft the editor held before it', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  term.feed('draft steer');
+  surface.setAsk(SINGLE_ASK);
+  surface.setAsk({ t: 'ask', id: SINGLE_ASK.id, closed: true });
+  term.feed('\r'); // submits whatever the editor holds now
+  assert.deepEqual(sent, ['draft steer']);
+  surface.stop();
+});
+
+test('typing mode survives a commit when the next question also needs typed input', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'aa11bb',
+    questions: [
+      { id: 'q1', question: 'Why?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'q2', question: 'Details?' },
+    ],
+  };
+  surface.setAsk(ask);
+  term.feed('\x1b[B'); // down
+  term.feed('\x1b[B'); // down → Other row
+  term.feed('\r'); // enter typing mode
+  term.feed('first answer');
+  term.feed('\r'); // commits q1, q2 needs typing too
+  term.feed('second answer');
+  term.feed('\r'); // commits q2, the whole ask answers in one line
+  assert.deepEqual(sent, ['/answer aa11bb q1=first answer q2=second answer']);
+  surface.stop();
+});
+
+test('a second open ask takes the panel and returns progress intact when it closes', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const askA: AskFrame = {
+    t: 'ask',
+    id: 'aa11aa',
+    questions: [
+      { id: 'x', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'y', question: 'Second?', options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const askB: AskFrame = {
+    t: 'ask',
+    id: 'bb22bb',
+    questions: [{ id: 'z', question: 'Other?', options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  surface.setAsk(askA);
+  term.feed('1'); // answers x=1
+  surface.setAsk(askB); // the panel switches to the newest ask
+  surface.setAsk({ t: 'ask', id: 'bb22bb', closed: true }); // back to askA
+  term.feed('1'); // answers y=1; x must still be answered
+  assert.deepEqual(sent, ['/answer aa11aa x=1 y=1']);
+  surface.stop();
+});
+
+test('AskPanel truncates to the row budget with a … more marker', () => {
+  const many: AskFrame = {
+    t: 'ask',
+    id: 'cc33cc',
+    questions: [
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: `opt${i + 1}` })) },
+    ],
+  };
+  const panel = new AskPanel(pickerFor(many));
+  const clipped = panel.render(80, 8);
+  assert.equal(clipped.length, 8);
+  assert.match(clipped.join('\n'), /… \d+ more/);
+  assert.ok(clipped[clipped.length - 1]!.includes('esc skip all'), 'the help line stays last');
+  const short = panel.render(80, 200);
+  assert.equal(short.length, panel.render(80).length); // no budget, no truncation
+});
+
+
+test('Esc out of typing discards the half-typed draft for good', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  surface.setAsk(SINGLE_ASK);
+  term.feed('\x1b[B'); // down
+  term.feed('\x1b[B'); // down → Other row
+  term.feed('\r'); // typing mode
+  term.feed('half');
+  term.feed('\x1b'); // Esc: back to the rows, draft dropped
+  term.feed('\r'); // Other row again (the cursor never moved), editor must be empty
+  term.feed('\r'); // empty submit returns to the rows, nothing is sent
+  assert.deepEqual(sent, []);
+  surface.stop();
+});
+
+test('a closed ask forgets its progress even while another ask shows', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const askA: AskFrame = {
+    t: 'ask',
+    id: 'aa11aa',
+    questions: [
+      { id: 'x', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'y', question: 'Second?', options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const askB: AskFrame = {
+    t: 'ask',
+    id: 'bb22bb',
+    questions: [{ id: 'z', question: 'Other?', options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  surface.setAsk(askA);
+  term.feed('1'); // x=1: askA now has stashed progress
+  surface.setAsk(askB); // the panel shows askB
+  surface.setAsk({ t: 'ask', id: 'aa11aa', closed: true }); // askA closes unseen
+  surface.setAsk(askA); // the same id asks again: it must start fresh
+  term.feed('2'); // answers x=2; no resurrected x=1 progress
+  term.feed('1'); // answers y=1, the ask completes
+  assert.deepEqual(sent, ['/answer aa11aa x=2 y=1']);
+  surface.stop();
+});
+
+test('the ask panel in typing mode renders only the question header and hint', () => {
+  const state = { ...pickerFor(TWO_Q_ASK), typing: true };
+  const lines = new AskPanel(state).render(80).join('\n');
+  assert.match(lines, /question 1\/2/);
+  assert.match(lines, /type your answer, Enter submits, Esc goes back/);
+  assert.equal(lines.includes('\u25cb'), false, 'no option rows while typing');
+  assert.equal(lines.includes('Done'), false);
+});
+
+test('Shell shows the editor under the panel header while typing, panel alone otherwise', () => {
+  const terminal = { columns: 80, rows: 24, write: () => {} } as unknown as Terminal;
+  const tui = new TuiAltScreen(terminal);
+  const shell = new Shell(terminal, new TranscriptView(), new Editor(tui, THEME), new StatusLine(), 80);
+  const typingPanel = new AskPanel({ ...pickerFor(TWO_Q_ASK), typing: true });
+  shell.panel = typingPanel;
+  const typingRows = shell.render(80);
+  const hintAt = typingRows.findIndex((line) => line.includes('type your answer'));
+  assert.notEqual(hintAt, -1, 'the typing hint renders');
+  const below = typingRows.slice(hintAt + 1);
+  assert.ok(below.length > 0, 'editor lines render under the header');
+  assert.equal(typingRows.some((line) => line.includes('\u25cb')), false, 'no navigable rows while typing');
+  const rowsPanel = new AskPanel(pickerFor(TWO_Q_ASK));
+  shell.panel = rowsPanel;
+  const rowsOut = shell.render(80);
+  assert.ok(rowsOut.some((line) => line.includes('\u25cb')), 'rows render when not typing');
+  assert.equal(rowsOut.some((line) => line.includes('type your answer')), false);
+  shell.panel = undefined;
+});
+
+test('after a typed answer a next question with rows goes back to the picker', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'ee55ee',
+    questions: [
+      { id: 'q1', question: 'Why?' },
+      { id: 'q2', question: 'Which DB?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] },
+    ],
+  };
+  surface.setAsk(ask); // text-only first question opens straight into typing
+  term.feed('because');
+  term.feed('\r'); // commits q1; q2 has rows, so the picker must come back
+  term.feed('j'); // panel key: moves the cursor (down)
+  term.feed('\r'); // picks Postgres
+  assert.deepEqual(sent, ['/answer ee55ee q1=because q2=2']);
+  surface.stop();
+});
+
+test('closing the visible ask while another is open never stashes the closed progress', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const askA: AskFrame = {
+    t: 'ask',
+    id: 'aa11aa',
+    questions: [
+      { id: 'x', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'y', question: 'Second?', options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const askB: AskFrame = {
+    t: 'ask',
+    id: 'bb22bb',
+    questions: [{ id: 'z', question: 'Other?', options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  surface.setAsk(askB);
+  surface.setAsk(askA); // the visible panel is askA
+  term.feed('1'); // x=1, not yet stashed anywhere
+  surface.setAsk({ t: 'ask', id: 'aa11aa', closed: true }); // closes the visible ask
+  surface.setAsk(askA); // askA asks again: fresh, x must not be pre-answered
+  term.feed('2');
+  term.feed('1');
+  assert.deepEqual(sent, ['/answer aa11aa x=2 y=1']);
+  surface.stop();
+});
+
+test('an assignment token typed as free text is refused and emits nothing', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  surface.setAsk({ t: 'ask', id: 'ff77ff', questions: [{ id: 'note', question: 'Notes?' }] });
+  term.feed('note=set A=1');
+  term.feed('\r'); // refused: nothing is sent, the editor keeps the text
+  assert.deepEqual(sent, []);
+  term.feed('set A 1');
+  term.feed('\r'); // the literal value goes out as one custom answer
+  assert.deepEqual(sent, ['/answer ff77ff note=set A 1']);
+  surface.stop();
+});
+
+test('panelKey ignores Kitty key-release sequences entirely', () => {
+  const state = pickerFor(TWO_Q_ASK);
+  for (const release of ['\x1b[13;1:3u', '\x1b[27;1:3u', '\x1b[1;1:3A']) {
+    const result = panelKey(state, release);
+    assert.equal(typeOf(result), 'state');
+    assert.equal((result as { state: typeof state }).state, state, `release ${release} is a no-op`);
+  }
+});
+
+test('finishing the newest ask hands the panel back to the older open ask', () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const surface = runSurface(term, sent);
+  const askA: AskFrame = {
+    t: 'ask',
+    id: 'aa11aa',
+    questions: [
+      { id: 'x', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+      { id: 'y', question: 'Second?', options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const askB: AskFrame = {
+    t: 'ask',
+    id: 'bb22bb',
+    questions: [{ id: 'z', question: 'Other?', options: [{ label: 'a' }, { label: 'b' }] }],
+  };
+  surface.setAsk(askA);
+  surface.setAsk(askB); // the panel shows askB (newest)
+  term.feed('1'); // finishes askB
+  assert.deepEqual(sent, ['/answer bb22bb z=1']);
+  surface.setAsk({ t: 'ask', id: 'bb22bb', closed: true }); // must not disturb the panel
+  term.feed('1'); // askA x=1
+  term.feed('2'); // askA y=2, the ask completes
+  assert.deepEqual(sent, ['/answer bb22bb z=1', '/answer aa11aa x=1 y=2']);
+  surface.stop();
+});
+
+test('the render window keeps the cursor row visible in a long list', () => {
+  const many: AskFrame = {
+    t: 'ask',
+    id: 'cc33cc',
+    questions: [
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: `opt${i + 1}` })) },
+    ],
+  };
+  const panel = new AskPanel(pickerFor(many));
+  const moved = { ...panel.state, cursor: 14 }; // cursor on option 15
+  panel.set(moved);
+  const clipped = panel.render(80, 8);
+  const text = clipped.join('\n');
+  assert.match(text, /❯ ● 15\. opt15/, 'the cursor row stays on screen');
+  assert.match(text, /… \d+ more/);
+  assert.equal(clipped.length, 8);
+});
+
+test('a refused free-text hint clears on the next key and on timeout', async () => {
+  const term = makeFeedTerminal();
+  const sent: string[] = [];
+  const status = new StatusLine(PLAIN);
+  const surface = startTui({
+    title: '',
+    sendLine: (text) => sent.push(text),
+    onExit: () => {},
+    terminal: term,
+    statusLine: status,
+    hintWindowMs: 40,
+  });
+  surface.setAsk({
+    t: 'ask',
+    id: 'ff77ff',
+    questions: [
+      { id: 'note', question: 'Notes?' },
+      { id: 'more', question: 'More?' },
+    ],
+  });
+  term.feed('2');
+  term.feed('\r'); // refused: the hint is up
+  assert.equal(status.hasHint(), true);
+  term.feed('x'); // a printable key retires the hint
+  assert.equal(status.hasHint(), false);
+  term.feed('\r'); // '2x' commits to note; more is text-only, still typing
+  assert.deepEqual(sent, []);
+  term.feed('2');
+  term.feed('\r'); // refused again on the second question
+  assert.equal(status.hasHint(), true);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(status.hasHint(), false, 'the hint auto-clears');
+  surface.stop();
+});
+
+test('the panel windowing keeps the cursor visible and the count honest', () => {
+  const many: AskFrame = {
+    t: 'ask',
+    id: 'cc33cc',
+    questions: [
+      { id: 'big', question: 'Pick one', options: Array.from({ length: 20 }, (_, i) => ({ label: 'opt' + String(i + 1) })) },
+    ],
+  };
+  for (const width of [20, 30, 80]) {
+    for (const maxLines of [5, 8]) {
+      for (const cursor of [0, 10, 19]) {
+        const panel: AskPanel = new AskPanel({ ...pickerFor(many), cursor });
+        const lines: string[] = panel.render(width, maxLines);
+        assert.ok(lines.length <= maxLines, width + 'x' + maxLines + ': ' + lines.length + ' rows exceed the budget');
+        assert.ok(lines.some((line) => line.includes('Pick one')), width + 'x' + maxLines + '@' + cursor + ': question text dropped');
+        assert.ok(lines.some((line) => line.includes('\u276f')), width + 'x' + maxLines + '@' + cursor + ': cursor row is off screen');
+        const more = lines.find((line) => line.includes('\u2026 '));
+        if (more !== undefined) {
+          const n = Number(more.match(/\u2026 (\d+) more/)?.[1]);
+          const rowSpan = (all: string[]): string[] => {
+            const first = all.findIndex((line) => line.includes('●') || line.includes('○'));
+            const ends = [all.findIndex((line) => line.includes('\u2026 ')), all.findIndex((line) => line.includes('\u2191/\u2193'))].filter((index) => index >= 0);
+            const end = ends.length > 0 ? Math.min(...ends) : all.length;
+            return all.slice(first, end);
+          };
+          assert.equal(n, rowSpan(panel.render(width)).length - rowSpan(lines).length, width + 'x' + maxLines + '@' + cursor + ': hidden count mismatch');
+        } // no marker: the budget went to the question and one window row (allowed)
+      }
+    }
+  }
+});
+
+test('a long question wraps but is never truncated away', () => {
+  const words = Array.from({ length: 60 }, (_, i) => 'word' + String(i + 1));
+  const ask: AskFrame = {
+    t: 'ask',
+    id: 'dd44dd',
+    questions: [
+      { id: 'story', question: words.join(' '), options: [{ label: 'a' }, { label: 'b' }] },
+    ],
+  };
+  const panel = new AskPanel(pickerFor(ask));
+  const lines = panel.render(80, 8);
+  const text = lines.join('\n');
+  assert.ok(text.includes('word1 '), 'the first question line survives');
+  assert.ok(text.includes('word60'), 'the last question line survives');
+  assert.ok(lines.some((line) => line.includes('\u276f')), 'cursor row still visible');
+  assert.ok(lines.length <= 8, lines.length + ' rows exceed maxLines 8');
+});
+
+test('panel rendering strips control bytes from host-provided text', () => {
+  const evil: AskFrame = {
+    t: 'ask',
+    id: 'a\x1b]0;evil\x07b',
+    questions: [
+      {
+        id: 'q\x1b[31mred',
+        question: 'Why?\x1b]8;;x\x07',
+        options: [{ label: 'opt\x1b]8;;link\x07A' }],
+      },
+    ],
+  };
+  const out = new AskPanel(pickerFor(evil)).render(80).join('\n');
+  assert.equal(out.includes('\x1b'), false, 'no escape byte reaches stdout');
+  assert.equal(out.includes('\x07'), false, 'no OSC terminator reaches stdout');
+  assert.match(out, /Why\?/);
 });
